@@ -10,9 +10,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from codegiraffe.graph import Edge, Node
+
+if TYPE_CHECKING:
+    from codegiraffe.registry import RecognizerRegistry
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -366,43 +369,81 @@ def _infer_cross_file_edges(
 def scan_project(
     project_path: str,
     recognizers: list[PatternRecognizer] | None = None,
+    registry: RecognizerRegistry | None = None,
 ) -> ScanResult:
-    """Walk *project_path* and scan every ``.py`` file for architectural patterns.
+    """Walk *project_path* and scan files for architectural patterns.
+
+    The scanner uses a :class:`RecognizerRegistry` to determine which files
+    to scan and which recognizers to apply.  There are three ways to configure
+    the scan:
+
+    1. Provide a *registry* -- full control over extensions and recognizers.
+    2. Provide *recognizers* (legacy) -- wraps them in a temporary registry
+       that maps to ``.py`` / ``.pyi`` extensions for backward compatibility.
+    3. Provide neither -- uses the default registry which includes the
+       built-in ``PythonRecognizer`` for ``.py`` / ``.pyi`` files.
 
     Parameters
     ----------
     project_path:
         Root directory of the project to scan.
     recognizers:
-        Pattern recognizers to apply to each file. If ``None``, defaults to
-        ``[PythonRecognizer()]``.
+        Legacy parameter.  Pattern recognizers to apply.  Ignored when
+        *registry* is provided.
+    registry:
+        A :class:`RecognizerRegistry` that maps file extensions to
+        recognizers.
 
     Returns
     -------
     ScanResult
         Merged nodes and edges from all files and all recognizers.
     """
-    if recognizers is None:
-        recognizers = [PythonRecognizer()]
+    from codegiraffe.registry import RecognizerRegistry, get_default_registry
+
+    if registry is not None:
+        active_registry = registry
+    elif recognizers is not None:
+        # Legacy: wrap recognizers in a temporary registry
+        active_registry = RecognizerRegistry()
+        for r in recognizers:
+            # For legacy recognizers without extension info, default to .py
+            active_registry.register(r, extensions=[".py", ".pyi"])
+    else:
+        active_registry = get_default_registry()
 
     root = Path(project_path)
     merged = ScanResult()
     file_contents: dict[Path, str] = {}
 
-    for py_file in sorted(root.rglob("*.py")):
-        if _should_skip(py_file):
+    # Determine which extensions to scan
+    extensions = active_registry.registered_extensions
+    has_global = bool(active_registry._global_recognizers)
+
+    for source_file in sorted(root.rglob("*")):
+        if not source_file.is_file():
+            continue
+        if _should_skip(source_file):
+            continue
+
+        suffix = source_file.suffix.lower()
+        if not has_global and suffix not in extensions:
+            continue
+
+        applicable = active_registry.get_recognizers(source_file)
+        if not applicable:
             continue
 
         try:
-            content = py_file.read_text(encoding="utf-8", errors="replace")
+            content = source_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
 
         # Store content for cross-file inference later
-        rel_path = py_file.relative_to(root)
+        rel_path = source_file.relative_to(root)
         file_contents[rel_path] = content
 
-        for recognizer in recognizers:
+        for recognizer in applicable:
             file_result = recognizer.recognize(rel_path, content)
             merged.merge(file_result)
 

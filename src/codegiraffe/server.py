@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
+from codegiraffe.coordination import CoordinationStore
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 from codegiraffe.query import context_for_task, detect_drift, query_by_node, query_by_type
 from codegiraffe.scanner import scan_project
-from codegiraffe.storage import JSONStorage
+from codegiraffe.storage import JSONStorage, StorageBackend
 
 # ---------------------------------------------------------------------------
 # Server and shared state
@@ -23,8 +24,18 @@ from codegiraffe.storage import JSONStorage
 
 mcp = FastMCP("codegiraffe")
 
-_storage = JSONStorage()
+_storage: StorageBackend = JSONStorage()
 _graph: ArchGraph | None = None
+_coordinator = CoordinationStore()
+
+
+def _get_storage(backend: str = "json"):
+    """Get a storage backend by name."""
+    if backend == "sqlite":
+        from codegiraffe.sqlite_storage import SQLiteStorage
+
+        return SQLiteStorage()
+    return JSONStorage()
 
 
 def _ensure_graph(project_path: str) -> ArchGraph:
@@ -58,7 +69,9 @@ def _ensure_graph(project_path: str) -> ArchGraph:
 
 
 @mcp.tool()
-def codegiraffe_init(project_path: str, rescan: bool = False) -> str:
+def codegiraffe_init(
+    project_path: str, rescan: bool = False, backend: str = "json"
+) -> str:
     """Initialize or re-scan the architecture knowledge graph for a project.
 
     Scans the project directory for architectural patterns (endpoints,
@@ -66,11 +79,15 @@ def codegiraffe_init(project_path: str, rescan: bool = False) -> str:
     a graph. When *rescan* is True and an existing graph is found, manually
     added annotations are preserved.
 
+    Use *backend* to select the storage backend: ``"json"`` (default) for
+    JSON files or ``"sqlite"`` for a SQLite database.
+
     Returns a summary of the initialized graph.
     """
-    global _graph  # noqa: PLW0603
+    global _graph, _storage  # noqa: PLW0603
 
     try:
+        _storage = _get_storage(backend)
         # Preserve manual annotations when rescanning
         old_data: GraphData | None = None
         if rescan:
@@ -210,17 +227,21 @@ def codegiraffe_context_for(
     project_path: str,
     task: str,
     max_nodes: int = 20,
+    use_embeddings: bool = True,
 ) -> str:
     """Get the most relevant subgraph for a natural-language task description.
 
-    Scores nodes by keyword overlap with the task text and returns the
-    top-matching nodes with their immediate neighbors, capped at *max_nodes*.
+    When sentence-transformers is installed and *use_embeddings* is True, uses
+    embedding-based semantic similarity for scoring.  Otherwise falls back to
+    keyword overlap scoring.  Returns the top-matching nodes with their
+    immediate neighbors, capped at *max_nodes*.
+
     Useful for scoping what parts of the architecture are relevant before
     making changes.
     """
     try:
         graph = _ensure_graph(project_path)
-        subgraph = context_for_task(graph, task, max_nodes)
+        subgraph = context_for_task(graph, task, max_nodes, use_embeddings=use_embeddings)
         return subgraph.model_dump_json(indent=2)
     except Exception as exc:
         return f"Error computing context: {exc}"
@@ -322,6 +343,107 @@ def codegiraffe_sync(project_path: str) -> str:
         )
     except Exception as exc:
         return f"Error syncing graph: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_export(
+    project_path: str,
+    format: str = "mermaid",
+    direction: str = "TD",
+    subgraph_by_type: bool = True,
+    node_id: str | None = None,
+    depth: int = 2,
+) -> str:
+    """Export the architecture graph as a visualization.
+
+    Supported formats:
+    - "mermaid": Mermaid flowchart diagram
+    - "d3": D3.js-compatible JSON for force-directed graphs
+
+    Optionally scope the export to a subgraph around a specific node.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+
+        if node_id:
+            data = graph.get_subgraph(node_id, depth=depth)
+        else:
+            data = graph.to_data()
+
+        from codegiraffe.export import to_d3_json, to_mermaid
+
+        if format.lower() == "mermaid":
+            return to_mermaid(
+                data, direction=direction, subgraph_by_type=subgraph_by_type
+            )
+        elif format.lower() == "d3":
+            return to_d3_json(data)
+        else:
+            return f"Unsupported format: {format}. Use 'mermaid' or 'd3'."
+    except Exception as exc:
+        return f"Error exporting graph: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent coordination tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_claim(
+    project_path: str,
+    agent_id: str,
+    node_ids: list[str],
+    task: str,
+    ttl: int = 1800,
+) -> str:
+    """Claim graph nodes for an agent to prevent conflicts during concurrent development.
+
+    Before modifying nodes, agents should claim them. If another agent has already
+    claimed overlapping nodes, the claim fails with conflict details.
+
+    Claims automatically expire after `ttl` seconds (default 30 minutes).
+    """
+    try:
+        result = _coordinator.claim(project_path, agent_id, node_ids, task, ttl)
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Error claiming nodes: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_status(
+    project_path: str,
+    agent_id: str,
+    status: str,
+    task: str | None = None,
+) -> str:
+    """Update an agent's status. Status can be 'active', 'done', or 'blocked'.
+
+    Also refreshes the claim's TTL so it doesn't expire while the agent is
+    actively working.
+    """
+    try:
+        result = _coordinator.update_status(project_path, agent_id, status, task)
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Error updating status: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_agents(project_path: str) -> str:
+    """List all active agents and their claimed nodes/status.
+
+    Shows which agents are working on which parts of the architecture graph,
+    enabling coordination and conflict avoidance.
+    """
+    try:
+        agents = _coordinator.list_agents(project_path)
+        if not agents:
+            return "No active agents."
+        return json.dumps(agents, indent=2)
+    except Exception as exc:
+        return f"Error listing agents: {exc}"
 
 
 # ---------------------------------------------------------------------------
