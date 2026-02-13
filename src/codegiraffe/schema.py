@@ -34,3 +34,7 @@ class EdgeType(StrEnum):
     CONFIGURES = "configures"
     OWNS = "owns"
     TRIGGERS = "triggers"
+    CROSS_REPO_CALLS = "cross_repo_calls"
+    CROSS_REPO_DEPENDS_ON = "cross_repo_depends_on"
+    CROSS_REPO_PUBLISHES = "cross_repo_publishes"
+    CROSS_REPO_CONSUMES = "cross_repo_consumes"

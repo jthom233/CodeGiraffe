@@ -686,7 +686,10 @@ def codegiraffe_cypher(project_path: str, query: str) -> str:
     try:
         from codegiraffe.neo4j_storage import Neo4jStorage
 
-        storage = Neo4jStorage()
+        if isinstance(_storage, Neo4jStorage):
+            storage = _storage
+        else:
+            storage = Neo4jStorage()
         results = storage.run_cypher(query, project_path=project_path)
         return json.dumps(results, indent=2, default=str)
     except ImportError:
