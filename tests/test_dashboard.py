@@ -314,6 +314,6 @@ class TestRegisterRoutes:
         register_dashboard_routes(test_mcp, _make_failing_ensure_fn(), None)
         route_paths = [r.path for r in test_mcp._custom_starlette_routes]
         assert "/dashboard" in route_paths
-        assert any("/api/graph/" in p for p in route_paths)
-        assert any("/api/node/" in p for p in route_paths)
-        assert any("/api/subgraph/" in p for p in route_paths)
+        assert "/api/graph" in route_paths
+        assert "/api/node" in route_paths
+        assert "/api/subgraph" in route_paths

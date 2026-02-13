@@ -407,7 +407,22 @@ body {
     $errorMsg.style.display = 'none';
 
     try {
-      const resp = await fetch('/api/graph/' + encodeURIComponent(path));
+      let resp = await fetch('/api/graph?project_path=' + encodeURIComponent(path));
+      if (resp.status === 404) {
+        // Auto-init: scan the project first
+        $loading.textContent = 'Scanning project...';
+        const initResp = await fetch('/api/init', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({project_path: path})
+        });
+        if (!initResp.ok) {
+          const err = await initResp.json().catch(() => ({}));
+          throw new Error(err.error || 'Failed to initialize project');
+        }
+        $loading.textContent = 'Loading...';
+        resp = await fetch('/api/graph?project_path=' + encodeURIComponent(path));
+      }
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.error || resp.statusText);
@@ -532,7 +547,7 @@ body {
     const path = $path.value.trim();
     if (!path || !cy) return;
     try {
-      const resp = await fetch('/api/subgraph/' + encodeURIComponent(path) + '/' + encodeURIComponent(nodeId) + '?depth=2');
+      const resp = await fetch('/api/subgraph?project_path=' + encodeURIComponent(path) + '&node_id=' + encodeURIComponent(nodeId) + '&depth=2');
       if (!resp.ok) return;
       const d3Data = await resp.json();
       const subIds = new Set((d3Data.nodes || []).map(n => n.id));
@@ -612,10 +627,46 @@ def register_dashboard_routes(
         """Serve the main dashboard HTML page."""
         return HTMLResponse(DASHBOARD_HTML)
 
-    @mcp.custom_route("/api/graph/{project_path:path}", methods=["GET"])
+    @mcp.custom_route("/api/init", methods=["POST"])
+    async def init_graph(request: Request) -> JSONResponse:
+        """Initialize/scan a project so the dashboard can display it."""
+        from codegiraffe.scanner import scan_project
+        from codegiraffe.graph import ArchGraph, GraphData, Node
+        from datetime import datetime, timezone
+        import codegiraffe.server as srv
+
+        body = await request.json()
+        project_path = body.get("project_path", "")
+        if not project_path:
+            return JSONResponse({"error": "project_path required"}, status_code=400)
+        try:
+            result = scan_project(project_path)
+            nodes = {node.id: node for node in result.nodes}
+            data = GraphData(
+                nodes=nodes,
+                edges=result.edges,
+                project_path=project_path,
+                last_scan=datetime.now(timezone.utc).isoformat(),
+            )
+            graph = ArchGraph(data)
+            storage.save(project_path, graph.to_data())
+            srv._graph = graph
+            srv._storage = storage
+            final = graph.to_data()
+            return JSONResponse({
+                "status": "ok",
+                "nodes": len(final.nodes),
+                "edges": len(final.edges),
+            })
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    @mcp.custom_route("/api/graph", methods=["GET"])
     async def graph_data(request: Request) -> JSONResponse:
         """Return graph data as D3-style JSON for the given project."""
-        project_path = request.path_params["project_path"]
+        project_path = request.query_params.get("project_path", "")
+        if not project_path:
+            return JSONResponse({"error": "project_path query parameter required"}, status_code=400)
         try:
             result = get_graph_json(ensure_graph_fn, project_path)
             return JSONResponse(result)
@@ -624,11 +675,13 @@ def register_dashboard_routes(
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
-    @mcp.custom_route("/api/node/{project_path:path}/{node_id:path}", methods=["GET"])
+    @mcp.custom_route("/api/node", methods=["GET"])
     async def node_detail(request: Request) -> JSONResponse:
         """Return detailed information about a single node."""
-        project_path = request.path_params["project_path"]
-        node_id = request.path_params["node_id"]
+        project_path = request.query_params.get("project_path", "")
+        node_id = request.query_params.get("node_id", "")
+        if not project_path or not node_id:
+            return JSONResponse({"error": "project_path and node_id query parameters required"}, status_code=400)
         try:
             result = get_node_detail(ensure_graph_fn, project_path, node_id)
             if "error" in result:
@@ -639,11 +692,13 @@ def register_dashboard_routes(
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
-    @mcp.custom_route("/api/subgraph/{project_path:path}/{node_id:path}", methods=["GET"])
+    @mcp.custom_route("/api/subgraph", methods=["GET"])
     async def subgraph_data(request: Request) -> JSONResponse:
         """Return a subgraph centered on *node_id*."""
-        project_path = request.path_params["project_path"]
-        node_id = request.path_params["node_id"]
+        project_path = request.query_params.get("project_path", "")
+        node_id = request.query_params.get("node_id", "")
+        if not project_path or not node_id:
+            return JSONResponse({"error": "project_path and node_id query parameters required"}, status_code=400)
         depth_str = request.query_params.get("depth", "2")
         try:
             depth = int(depth_str)
