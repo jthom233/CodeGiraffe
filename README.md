@@ -636,10 +636,14 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Multi-agent status coordination tools
 - [x] Plugin system for custom recognizers
 
+### v0.2.1 (completed)
+
+- [x] CI/CD pipeline (GitHub Actions — Python 3.11/3.12/3.13 matrix)
+- [x] Enhanced Go recognizer (imports, interfaces, events, IPC, SQL)
+
 ### Future
 
 - [ ] Publish to PyPI
-- [ ] CI/CD pipeline (GitHub Actions)
 - [ ] Neo4j storage backend
 - [ ] AST-aware scanning (tree-sitter)
 - [ ] Cross-repo graph federation
