@@ -699,6 +699,14 @@ def codegiraffe_cypher(project_path: str, query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Web dashboard
+# ---------------------------------------------------------------------------
+
+from codegiraffe.dashboard import register_dashboard_routes
+
+register_dashboard_routes(mcp, _ensure_graph, _storage)
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
