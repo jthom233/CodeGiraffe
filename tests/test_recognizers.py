@@ -234,6 +234,170 @@ type Product struct {
         assert "table:Product" in ids
         assert "service:Product" not in ids
 
+    def test_interface_definitions(self, recognizer):
+        content = '''
+type Store interface {
+    ListConnections() ([]Connection, error)
+    GetConnection(id string) (Connection, error)
+    Close() error
+}
+'''
+        result = recognizer.recognize(Path("store.go"), content)
+        ids = {n.id for n in result.nodes}
+        # Should create a service node with interface metadata
+        assert any("Store" in nid for nid in ids)
+        store_node = next(n for n in result.nodes if "Store" in n.id)
+        assert store_node.metadata.get("kind") == "interface"
+        # Should NOT also create a duplicate service:Store from struct fallback
+
+    def test_internal_imports_create_edges(self, recognizer):
+        content = '''
+package tui
+
+import (
+    "fmt"
+    "github.com/dr4zz/nexus/internal/session"
+    "github.com/dr4zz/nexus/internal/config"
+)
+
+type App struct{}
+'''
+        result = recognizer.recognize(Path("internal/tui/app.go"), content)
+        # Should have package nodes
+        ids = {n.id for n in result.nodes}
+        assert "pkg:tui" in ids
+        # Should have dependency edges
+        edge_targets = {e.target for e in result.edges}
+        assert "pkg:session" in edge_targets
+        assert "pkg:config" in edge_targets
+
+    def test_bubbletea_msg_types(self, recognizer):
+        content = '''
+package tui
+
+type SessionDetachedMsg struct {
+    SessionID string
+    ConnID    string
+}
+
+type LaunchFinishedMsg struct {
+    Err error
+}
+
+type RegularStruct struct {
+    Name string
+}
+'''
+        result = recognizer.recognize(Path("messages.go"), content)
+        ids = {n.id for n in result.nodes}
+        types = {n.id: n.type for n in result.nodes}
+        # Msg types should be event nodes
+        assert "event:SessionDetachedMsg" in ids
+        assert "event:LaunchFinishedMsg" in ids
+        # Non-Msg structs should be service nodes
+        assert "service:RegularStruct" in ids
+
+    def test_sql_open_pattern(self, recognizer):
+        content = '''
+package store
+
+import "database/sql"
+
+func NewStore(path string) (*Store, error) {
+    db, err := sql.Open("sqlite", path)
+    return &Store{db: db}, err
+}
+'''
+        result = recognizer.recognize(Path("store.go"), content)
+        ids = {n.id for n in result.nodes}
+        # Should detect sqlite database
+        assert any("sqlite" in nid for nid in ids)
+
+    def test_ipc_patterns(self, recognizer):
+        content = '''
+package ipc
+
+import "net"
+
+func NewServer() (*Server, error) {
+    listener, err := net.Listen("unix", "/tmp/app.sock")
+    return &Server{listener: listener}, err
+}
+'''
+        result = recognizer.recognize(Path("internal/ipc/server.go"), content)
+        ids = {n.id for n in result.nodes}
+        # Should detect IPC server
+        assert any("ipc" in nid.lower() for nid in ids)
+
+    def test_ipc_client(self, recognizer):
+        content = '''
+package ipc
+
+import "net"
+
+func Dial() (*Client, error) {
+    conn, err := net.Dial("unix", "/tmp/app.sock")
+    return &Client{conn: conn}, err
+}
+'''
+        result = recognizer.recognize(Path("internal/ipc/client.go"), content)
+        ids = {n.id for n in result.nodes}
+        assert any("ipc" in nid.lower() for nid in ids)
+
+    def test_package_declaration(self, recognizer):
+        content = '''
+package launcher
+
+type SSHLauncher struct {
+    host string
+}
+'''
+        result = recognizer.recognize(Path("internal/launcher/ssh.go"), content)
+        ids = {n.id for n in result.nodes}
+        assert "pkg:launcher" in ids
+
+    def test_service_env_var_edge(self, recognizer):
+        content = '''
+package config
+
+type Config struct {
+    Path string
+}
+
+func Load() (*Config, error) {
+    dir := os.Getenv("XDG_CONFIG_HOME")
+    return &Config{Path: dir}, nil
+}
+'''
+        result = recognizer.recognize(Path("config.go"), content)
+        # Should have edge from package to env var
+        edge_pairs = {(e.source, e.target) for e in result.edges}
+        assert any("env:XDG_CONFIG_HOME" in target for _, target in edge_pairs)
+
+    def test_interface_not_duplicated_as_struct(self, recognizer):
+        """Interfaces should NOT also create a service node from struct fallback."""
+        content = '''
+type Vault interface {
+    Get(id string) (string, error)
+    Set(id string, credential string) error
+}
+'''
+        result = recognizer.recognize(Path("vault.go"), content)
+        ids = [n.id for n in result.nodes]
+        # Should only have one node for Vault, not two
+        vault_nodes = [nid for nid in ids if "Vault" in nid]
+        assert len(vault_nodes) == 1
+
+    def test_msg_not_duplicated_as_service(self, recognizer):
+        """Msg types should be events, not also services."""
+        content = '''
+type TickMsg struct{}
+'''
+        result = recognizer.recognize(Path("health.go"), content)
+        ids = {n.id for n in result.nodes}
+        assert "event:TickMsg" in ids
+        assert "service:TickMsg" not in ids
+
 
 class TestRustRecognizer:
     @pytest.fixture
