@@ -252,6 +252,11 @@ body {
 (function() {
   "use strict";
 
+  // Register cose-bilkent layout extension
+  if (typeof cytoscapeCoseBilkent !== 'undefined') {
+    cytoscape.use(cytoscapeCoseBilkent);
+  }
+
   // ---- Color / shape palettes ----
   const TYPE_COLORS = {
     service: '#4A90D9', endpoint: '#7B68EE', database_table: '#2ECC71',
