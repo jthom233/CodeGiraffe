@@ -40,6 +40,18 @@ For embedding-based context scoring (optional, falls back to keyword matching if
 uv pip install -e ".[dev,embeddings]"
 ```
 
+For Neo4j storage backend (optional):
+
+```bash
+uv pip install -e ".[neo4j]"
+```
+
+For AST-aware scanning (optional):
+
+```bash
+uv pip install -e ".[ast]"
+```
+
 Or with pip:
 
 ```bash
@@ -84,7 +96,7 @@ Add to your `claude_desktop_config.json`:
 
 ## MCP Tools
 
-Code Giraffe exposes 11 tools that any MCP client can call:
+Code Giraffe exposes 19 tools that any MCP client can call:
 
 ### `codegiraffe_init`
 
@@ -94,7 +106,8 @@ Scan a project and bootstrap the architecture knowledge graph.
 |---|---|---|---|
 | `project_path` | `str` | required | Root directory of the project to scan |
 | `rescan` | `bool` | `false` | Re-scan while preserving manual annotations |
-| `backend` | `str` | `"json"` | Storage backend: `"json"` or `"sqlite"` |
+| `backend` | `str` | `"json"` | Storage backend: `"json"`, `"sqlite"`, or `"neo4j"` |
+| `scanner_mode` | `str` | `"regex"` | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
 
 **Example:**
 ```
@@ -351,11 +364,138 @@ codegiraffe_agents(project_path="/home/user/my-project")
     ]
 ```
 
+---
+
+### `codegiraffe_history`
+
+List version history for a project's architecture graph. Returns timestamped entries with diff summaries.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `limit` | `int` | `20` | Maximum number of versions to return |
+
+**Example:**
+```
+codegiraffe_history(project_path="/home/user/my-project")
+--> [{"version_id": 3, "timestamp": "...", "message": "Sync", "nodes_added": 2, "nodes_removed": 0, ...}]
+```
+
+---
+
+### `codegiraffe_diff`
+
+Compare two versions of the architecture graph, or view a specific version's diff.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `version_a` | `int` | required | Version ID to inspect or compare |
+| `version_b` | `int \| None` | `None` | Second version ID for comparison |
+
+**Example:**
+```
+codegiraffe_diff(project_path="/home/user/my-project", version_a=3)
+--> {"nodes_added": ["service:NewSvc"], "nodes_removed": [], "edges_added": [...], ...}
+```
+
+---
+
+### `codegiraffe_snapshot`
+
+Create a named snapshot of the current graph state for bookmarking before changes.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `message` | `str` | `"Manual snapshot"` | Descriptive message for this snapshot |
+
+**Example:**
+```
+codegiraffe_snapshot(project_path="/home/user/my-project", message="Before auth refactor")
+--> {"version_id": 4, "message": "Before auth refactor", "timestamp": "..."}
+```
+
+---
+
+### `codegiraffe_restore`
+
+Restore the architecture graph to a specific version. Automatically creates a backup snapshot first.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `version_id` | `int` | required | Version ID to restore to |
+
+Note: Currently supports diff-based history only. Full snapshot restore is planned.
+
+---
+
+### `codegiraffe_federate`
+
+Register multiple repositories into a federated view, combining their architecture graphs.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_paths` | `list[str]` | required | List of project root directories to federate |
+
+**Example:**
+```
+codegiraffe_federate(project_paths=["/home/user/api", "/home/user/frontend"])
+--> {"repos": ["api", "frontend"], "total_nodes": 285, "total_edges": 412}
+```
+
+---
+
+### `codegiraffe_cross_query`
+
+Query across federated graphs using repo-namespaced node IDs.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `node_id` | `str` | required | Namespaced node ID (e.g., `"repo:api::endpoint:/users"`) |
+| `depth` | `int` | `2` | Maximum hops from the queried node |
+
+**Example:**
+```
+codegiraffe_cross_query(node_id="repo:api::endpoint:/api/users", depth=2)
+--> JSON subgraph spanning both repos
+```
+
+---
+
+### `codegiraffe_cross_edges`
+
+List all edges that cross repository boundaries in the federated graph.
+
+**Example:**
+```
+codegiraffe_cross_edges()
+--> [{"source": "repo:api::endpoint:/users", "target": "repo:frontend::component:UserList", "type": "cross_repo_calls"}]
+```
+
+---
+
+### `codegiraffe_cypher`
+
+Run a read-only Cypher query against a Neo4j-backed graph. Requires `neo4j` backend.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `query` | `str` | required | Read-only Cypher query |
+
+**Example:**
+```
+codegiraffe_cypher(project_path="/home/user/my-project", query="MATCH (n:endpoint) RETURN n.label, n.id LIMIT 10")
+--> [{"n.label": "GET /api/users", "n.id": "endpoint:/api/users"}, ...]
+```
+
 ## Architecture
 
 ```
 src/codegiraffe/
-├── server.py            # FastMCP server + 11 tool definitions
+├── server.py            # FastMCP server + 19 tool definitions
 ├── graph.py             # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph engine
 ├── storage.py           # StorageBackend protocol + JSON file implementation
 ├── sqlite_storage.py    # SQLite storage backend for larger graphs
@@ -365,6 +505,10 @@ src/codegiraffe/
 ├── embeddings.py        # Optional embedding-based semantic scoring (sentence-transformers)
 ├── export.py            # Graph visualization export (Mermaid + D3.js JSON)
 ├── coordination.py      # Multi-agent claim/status coordination with TTL
+├── versioning.py        # Schema evolution, diffs, version history
+├── federation.py        # Cross-repo graph federation
+├── neo4j_storage.py     # Neo4j storage backend (optional)
+├── ast_scanner.py       # tree-sitter AST-based scanning (optional)
 ├── schema.py            # Node/edge type enums (extensible)
 └── recognizers/         # Language-specific pattern recognizers
     ├── __init__.py
@@ -411,7 +555,7 @@ Custom types are fully supported -- any string works as a node or edge type.
 
 ## Storage Backends
 
-Code Giraffe supports two storage backends, selectable via the `backend` parameter on `codegiraffe_init`:
+Code Giraffe supports three storage backends, selectable via the `backend` parameter on `codegiraffe_init`:
 
 ### JSON (default)
 
@@ -429,7 +573,25 @@ Graphs are stored in a SQLite database at `{project_path}/.codegiraffe/graph.db`
 codegiraffe_init(project_path="/home/user/large-project", backend="sqlite")
 ```
 
-Both backends implement the `StorageBackend` protocol, so switching between them is transparent to the rest of the system. Manual annotations and graph structure are preserved identically regardless of backend.
+### Neo4j (optional)
+
+For enterprise-scale graphs, Code Giraffe supports Neo4j as a storage backend. Requires a running Neo4j instance and the `neo4j` Python driver.
+
+```bash
+uv pip install -e ".[neo4j]"
+```
+
+Configure via environment variables:
+- `NEO4J_URI` -- Connection URI (default: `bolt://localhost:7687`)
+- `NEO4J_AUTH` -- Colon-separated user:password (default: `neo4j:password`)
+
+```
+codegiraffe_init(project_path="/home/user/enterprise-project", backend="neo4j")
+```
+
+Use `codegiraffe_cypher` to run read-only Cypher queries directly against the graph for advanced analysis.
+
+All backends implement the `StorageBackend` protocol, so switching between them is transparent to the rest of the system. Manual annotations and graph structure are preserved identically regardless of backend.
 
 ## Multi-Language Scanner
 
@@ -486,6 +648,22 @@ Code Giraffe uses a plugin-based scanner architecture built on the `RecognizerRe
 The `RecognizerRegistry` maps file extensions to recognizer classes. The registry is pre-populated with all built-in recognizers, but custom recognizers can be added by implementing the `PatternRecognizer` protocol and registering them for the appropriate file extensions.
 
 Cross-file edge inference connects endpoints to database tables when a file references model class names from other files, regardless of language.
+
+### AST-Aware Scanning (optional)
+
+For more accurate pattern detection, install tree-sitter support:
+
+```bash
+uv pip install -e ".[ast]"
+```
+
+Then use `scanner_mode="ast"` when initializing:
+
+```
+codegiraffe_init(project_path="/home/user/my-project", scanner_mode="ast")
+```
+
+AST scanning detects the same patterns as regex scanning but with higher accuracy -- it understands actual syntax trees rather than pattern matching raw text. Particularly useful for complex nested patterns and avoiding false positives.
 
 ## Embedding-Based Scoring
 
@@ -556,6 +734,64 @@ codegiraffe_claim(project_path="...", agent_id="agent-2",
 --> {"status": "claimed", ...}
 ```
 
+## Schema Evolution & Versioning
+
+Code Giraffe tracks how your architecture graph changes over time. Every `codegiraffe_sync` and `codegiraffe_init --rescan` automatically creates a version.
+
+### Automatic Versioning
+
+Version history is stored at `{project_path}/.codegiraffe/versions.json` as diffs (not full snapshots) for storage efficiency. Maximum 100 versions are retained by default.
+
+### Manual Snapshots
+
+Create named bookmarks before making significant changes:
+
+```
+codegiraffe_snapshot(project_path="...", message="Before payment refactor")
+```
+
+### Viewing History
+
+```
+codegiraffe_history(project_path="...")
+--> [{version_id: 1, message: "Init", timestamp: "...", nodes_added: 47, ...}, ...]
+
+codegiraffe_diff(project_path="...", version_a=3)
+--> {nodes_added: [...], nodes_removed: [...], edges_added: [...], attrs_changed: [...]}
+```
+
+## Cross-Repo Federation
+
+Link architecture graphs from multiple repositories into a unified federated view.
+
+### How It Works
+
+1. **Register** repos using `codegiraffe_federate` with a list of project paths
+2. Nodes are namespaced with `repo:{name}::` prefixes to avoid collisions
+3. Cross-repo edges use types like `cross_repo_calls`, `cross_repo_depends_on`, `cross_repo_publishes`, `cross_repo_consumes`
+4. Query across repos using `codegiraffe_cross_query` with namespaced IDs
+
+### Example
+
+```
+# Register two repos
+codegiraffe_federate(project_paths=["/home/user/api", "/home/user/frontend"])
+
+# Add a cross-repo relationship
+codegiraffe_add_relation(
+  project_path="/home/user/api",
+  source="repo:api::endpoint:/api/users",
+  target="repo:frontend::component:UserList",
+  relation_type="cross_repo_calls"
+)
+
+# Find all cross-repo edges
+codegiraffe_cross_edges()
+--> Shows all edges crossing repo boundaries
+```
+
+Federation metadata is stored globally at `~/.codegiraffe/federation.json`.
+
 ## Usage Patterns
 
 ### Orchestrator + Subagent Workflow
@@ -610,7 +846,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-231 tests covering graph operations, storage backends, scanner, recognizers, query engine, export, embeddings, coordination, and drift detection.
+377 tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex and AST), recognizers, query engine, export, embeddings, coordination, drift detection, versioning, and federation.
 
 ### Project Constitution
 
@@ -641,14 +877,18 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] CI/CD pipeline (GitHub Actions — Python 3.11/3.12/3.13 matrix)
 - [x] Enhanced Go recognizer (imports, interfaces, events, IPC, SQL)
 
+### v0.3.0 (completed)
+
+- [x] Neo4j storage backend (optional `neo4j` dependency)
+- [x] AST-aware scanning via tree-sitter (optional `ast` dependency)
+- [x] Cross-repo graph federation with namespace isolation
+- [x] Schema evolution and versioning with auto-versioning on sync/init
+- [x] 8 new MCP tools (19 total)
+
 ### Future
 
 - [ ] Publish to PyPI
-- [ ] Neo4j storage backend
-- [ ] AST-aware scanning (tree-sitter)
-- [ ] Cross-repo graph federation
 - [ ] Web dashboard
-- [ ] Schema evolution/versioning
 
 ## License
 
