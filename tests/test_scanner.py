@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 
 from codegiraffe.scanner import scan_project, PythonRecognizer, ScanResult
-from codegiraffe.types import NodeType, EdgeType
+from codegiraffe.schema import NodeType, EdgeType
 
 
 class TestScanFindsEndpoints:

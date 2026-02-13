@@ -6,7 +6,7 @@ from pathlib import Path
 
 from codegiraffe.graph import Node, Edge, GraphData
 from codegiraffe.storage import JSONStorage, STORAGE_DIR, GRAPH_FILENAME
-from codegiraffe.types import NodeType, EdgeType
+from codegiraffe.schema import NodeType, EdgeType
 
 
 @pytest.fixture

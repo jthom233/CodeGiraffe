@@ -6,7 +6,7 @@ from unittest.mock import patch
 from codegiraffe.graph import Node, Edge, GraphData, ArchGraph
 from codegiraffe.query import query_by_node, query_by_type, context_for_task, detect_drift
 from codegiraffe.scanner import ScanResult
-from codegiraffe.types import NodeType, EdgeType
+from codegiraffe.schema import NodeType, EdgeType
 
 
 class TestQueryByNode:
