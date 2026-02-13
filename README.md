@@ -89,6 +89,8 @@ codegiraffe_init(project_path="/home/user/my-project")
 → "Initialized graph with 47 nodes and 63 edges"
 ```
 
+**Supported language: Python only (v0.1.0).** Multi-language support (TypeScript, Go, Rust, Java) is on the [roadmap](#roadmap).
+
 The scanner automatically detects:
 - Flask / FastAPI route decorators → `endpoint` nodes
 - SQLAlchemy model classes → `database_table` nodes
@@ -267,6 +269,8 @@ Custom types are fully supported — any string works as a node or edge type.
 Graphs are stored as JSON at `{project_path}/.codegiraffe/graph.json`. The storage layer uses a protocol-based abstraction, making it straightforward to add SQLite or Neo4j backends in the future.
 
 ### Scanner
+
+> **Note:** The v0.1.0 scanner supports **Python only**. The scanner uses a pluggable `PatternRecognizer` protocol, so adding new languages (TypeScript, Go, Rust, Java) is a matter of writing a new recognizer class — no changes to the core graph or query engine required.
 
 The v1 scanner uses regex pattern matching (not AST parsing) to keep things simple and fast. It recognizes common Python framework patterns:
 
