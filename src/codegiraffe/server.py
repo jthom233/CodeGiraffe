@@ -699,8 +699,36 @@ def codegiraffe_cypher(project_path: str, query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Web dashboard
+# ---------------------------------------------------------------------------
+
+from codegiraffe.dashboard import register_dashboard_routes
+
+register_dashboard_routes(mcp, _ensure_graph, _storage)
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+
+    transport = "stdio"
+    port = 8000
+    for arg in sys.argv[1:]:
+        if arg.startswith("--transport="):
+            transport = arg.split("=", 1)[1]
+        elif arg.startswith("--port="):
+            port = int(arg.split("=", 1)[1])
+        elif arg in ("--transport", "--port"):
+            idx = sys.argv.index(arg)
+            if idx + 1 < len(sys.argv):
+                val = sys.argv[idx + 1]
+                if arg == "--transport":
+                    transport = val
+                else:
+                    port = int(val)
+
+    if transport in ("sse", "streamable-http"):
+        mcp.settings.port = port
+    mcp.run(transport=transport)

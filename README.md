@@ -509,6 +509,7 @@ src/codegiraffe/
 ├── federation.py        # Cross-repo graph federation
 ├── neo4j_storage.py     # Neo4j storage backend (optional)
 ├── ast_scanner.py       # tree-sitter AST-based scanning (optional)
+├── dashboard.py         # Web dashboard (Cytoscape.js, served via HTTP)
 ├── schema.py            # Node/edge type enums (extensible)
 └── recognizers/         # Language-specific pattern recognizers
     ├── __init__.py
@@ -792,6 +793,41 @@ codegiraffe_cross_edges()
 
 Federation metadata is stored globally at `~/.codegiraffe/federation.json`.
 
+## Web Dashboard
+
+Code Giraffe includes a built-in web dashboard for interactive graph exploration. No additional dependencies required — it uses Cytoscape.js loaded from CDN and is served via FastMCP's HTTP routes.
+
+### Launching the Dashboard
+
+Start the server with HTTP transport:
+
+```bash
+python src/codegiraffe/server.py --transport streamable-http --port 8000
+```
+
+Then open `http://localhost:8000/dashboard` in your browser.
+
+### Features
+
+- **Interactive graph visualization** — Pan, zoom, click nodes for details
+- **Node type filtering** — Toggle visibility by type (endpoint, service, database_table, etc.)
+- **Search** — Filter nodes by label or ID in real-time
+- **Node detail panel** — Click any node to see its properties, metadata, and connected edges
+- **Subgraph focus** — Double-click a node to zoom into its neighborhood
+- **Layout switching** — Toggle between force-directed (cose-bilkent) and circular layouts
+- **PNG export** — Download the current view as an image
+- **Dark theme** — Developer-friendly dark interface
+
+### API Endpoints
+
+The dashboard also exposes JSON API endpoints for programmatic access:
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/graph/{project_path}` | Full graph as D3.js-compatible JSON |
+| `GET /api/node/{project_path}/{node_id}` | Node detail with connected edges |
+| `GET /api/subgraph/{project_path}/{node_id}?depth=2` | Subgraph centered on a node |
+
 ## Usage Patterns
 
 ### Orchestrator + Subagent Workflow
@@ -846,7 +882,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-377 tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex and AST), recognizers, query engine, export, embeddings, coordination, drift detection, versioning, and federation.
+426 tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex and AST), recognizers, query engine, export, embeddings, coordination, drift detection, versioning, federation, and web dashboard.
 
 ### Project Constitution
 
@@ -885,10 +921,13 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Schema evolution and versioning with auto-versioning on sync/init
 - [x] 8 new MCP tools (19 total)
 
+### v0.3.1 (completed)
+
+- [x] Interactive web dashboard with Cytoscape.js graph visualization
+
 ### Future
 
 - [ ] Publish to PyPI
-- [ ] Web dashboard
 
 ## License
 
