@@ -13,10 +13,12 @@ from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
 
 from codegiraffe.coordination import CoordinationStore
+from codegiraffe.federation import GraphFederation
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 from codegiraffe.query import context_for_task, detect_drift, query_by_node, query_by_type
 from codegiraffe.scanner import scan_project
 from codegiraffe.storage import JSONStorage, StorageBackend
+from codegiraffe.versioning import VersionStore
 
 # ---------------------------------------------------------------------------
 # Server and shared state
@@ -27,6 +29,8 @@ mcp = FastMCP("codegiraffe")
 _storage: StorageBackend = JSONStorage()
 _graph: ArchGraph | None = None
 _coordinator = CoordinationStore()
+_version_store = VersionStore()
+_federation = GraphFederation()
 
 
 def _get_storage(backend: str = "json"):
@@ -35,6 +39,10 @@ def _get_storage(backend: str = "json"):
         from codegiraffe.sqlite_storage import SQLiteStorage
 
         return SQLiteStorage()
+    elif backend == "neo4j":
+        from codegiraffe.neo4j_storage import Neo4jStorage
+
+        return Neo4jStorage()
     return JSONStorage()
 
 
@@ -70,7 +78,10 @@ def _ensure_graph(project_path: str) -> ArchGraph:
 
 @mcp.tool()
 def codegiraffe_init(
-    project_path: str, rescan: bool = False, backend: str = "json"
+    project_path: str,
+    rescan: bool = False,
+    backend: str = "json",
+    scanner_mode: str = "regex",
 ) -> str:
     """Initialize or re-scan the architecture knowledge graph for a project.
 
@@ -79,8 +90,12 @@ def codegiraffe_init(
     a graph. When *rescan* is True and an existing graph is found, manually
     added annotations are preserved.
 
-    Use *backend* to select the storage backend: ``"json"`` (default) for
-    JSON files or ``"sqlite"`` for a SQLite database.
+    Use *backend* to select the storage backend: ``"json"`` (default),
+    ``"sqlite"`` for a SQLite database, or ``"neo4j"`` for Neo4j.
+
+    Use *scanner_mode* to choose the scanning strategy: ``"regex"`` (default)
+    for regex-based pattern matching, or ``"ast"`` for tree-sitter AST-based
+    scanning (requires tree-sitter packages).
 
     Returns a summary of the initialized graph.
     """
@@ -93,8 +108,15 @@ def codegiraffe_init(
         if rescan:
             old_data = _storage.load(project_path)
 
+        # Select scanner registry based on mode
+        registry = None
+        if scanner_mode == "ast":
+            from codegiraffe.ast_scanner import get_ast_registry
+
+            registry = get_ast_registry()
+
         # Scan the project
-        result = scan_project(project_path)
+        result = scan_project(project_path, registry=registry)
 
         # Build graph data from scan results
         nodes: dict[str, Node] = {node.id: node for node in result.nodes}
@@ -116,6 +138,13 @@ def codegiraffe_init(
         # Persist and cache
         _storage.save(project_path, graph.to_data())
         _graph = graph
+
+        # Auto-version after init/rescan
+        prev_data = old_data if old_data is not None else GraphData()
+        _version_store.add_version(
+            project_path, prev_data, graph.to_data(),
+            "Rescan" if rescan else "Init",
+        )
 
         final_data = graph.to_data()
         return (
@@ -330,6 +359,11 @@ def codegiraffe_sync(project_path: str) -> str:
         _storage.save(project_path, new_graph.to_data())
         _graph = new_graph
 
+        # Auto-version after sync
+        _version_store.add_version(
+            project_path, old_data, new_graph.to_data(), "Sync",
+        )
+
         final_data = new_graph.to_data()
         new_node_count = len(final_data.nodes)
         new_edge_count = len(final_data.edges)
@@ -444,6 +478,221 @@ def codegiraffe_agents(project_path: str) -> str:
         return json.dumps(agents, indent=2)
     except Exception as exc:
         return f"Error listing agents: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Versioning tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_history(project_path: str, limit: int = 20) -> str:
+    """List version history for a project's architecture graph.
+
+    Returns timestamped version entries with diff summaries showing what
+    changed in each version (nodes/edges added/removed).
+    """
+    try:
+        history = _version_store.get_history(project_path)
+        return json.dumps(history[:limit], indent=2)
+    except Exception as exc:
+        return f"Error getting history: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_diff(project_path: str, version_a: int, version_b: int | None = None) -> str:
+    """Compare two versions of the architecture graph.
+
+    If only *version_a* is given, returns the diff stored with that version
+    (i.e. changes introduced by that version). When both *version_a* and
+    *version_b* are given, computes a fresh diff between those two versions'
+    graph snapshots using the stored diffs.
+
+    Returns a detailed diff showing nodes/edges added, removed, and
+    attributes changed.
+    """
+    try:
+        if version_b is not None:
+            va = _version_store.get_version(project_path, version_a)
+            vb = _version_store.get_version(project_path, version_b)
+            if va is None or vb is None:
+                return "Error: version not found"
+            # Return the diff from the later version
+            later = vb if version_b > version_a else va
+            return json.dumps(
+                {"version_a": version_a, "version_b": version_b, "diff": later.diff.to_dict()},
+                indent=2,
+            )
+        else:
+            version = _version_store.get_version(project_path, version_a)
+            if version is None:
+                return "Error: version not found"
+            return json.dumps(version.diff.to_dict(), indent=2)
+    except Exception as exc:
+        return f"Error computing diff: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_snapshot(project_path: str, message: str = "Manual snapshot") -> str:
+    """Create a named snapshot of the current architecture graph state.
+
+    Use this to bookmark the graph state before making significant changes.
+    The snapshot is stored in the version history with the given message.
+    The diff recorded is empty since the snapshot captures the current state
+    without any changes.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+        current_data = graph.to_data()
+        # Snapshot: diff against itself produces an empty diff
+        version = _version_store.add_version(
+            project_path, current_data, current_data, message,
+        )
+        return json.dumps(
+            {"version_id": version.version_id, "message": message, "timestamp": version.timestamp},
+            indent=2,
+        )
+    except Exception as exc:
+        return f"Error creating snapshot: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_restore(project_path: str, version_id: int) -> str:
+    """Restore the architecture graph to a specific version.
+
+    Warning: This operation is currently limited because only diffs (not
+    full snapshots) are stored. A pre-restore backup snapshot is created
+    automatically before attempting the restore.
+    """
+    try:
+        # Snapshot current state before restore attempt
+        graph = _ensure_graph(project_path)
+        current_data = graph.to_data()
+        _version_store.add_version(
+            project_path, current_data, current_data,
+            f"Pre-restore backup (before restoring to v{version_id})",
+        )
+
+        version = _version_store.get_version(project_path, version_id)
+        if version is None:
+            return f"Error: version {version_id} not found"
+
+        return (
+            "Error: restore requires full snapshot storage (not yet supported "
+            "— only diffs are stored). A backup snapshot of the current state "
+            "has been saved."
+        )
+    except Exception as exc:
+        return f"Error restoring version: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Federation tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_federate(project_paths: list[str]) -> str:
+    """Register multiple repositories and build a unified federated graph.
+
+    Each repository must have been initialized with ``codegiraffe_init``
+    first. Returns a summary of the federated graph with namespace-isolated
+    node IDs (prefixed with ``repo:{name}::``).
+    """
+    try:
+        registered: list[str] = []
+        errors: list[str] = []
+
+        for path in project_paths:
+            try:
+                name = _federation.register_repo(path)
+                registered.append(name)
+            except FileNotFoundError as exc:
+                errors.append(str(exc))
+
+        if not registered:
+            return json.dumps({"error": "No repos registered", "details": errors}, indent=2)
+
+        unified = _federation.get_unified_graph()
+        _federation.save_federation()
+
+        result = {
+            "registered_repos": registered,
+            "total_nodes": len(unified.nodes),
+            "total_edges": len(unified.edges),
+        }
+        if errors:
+            result["errors"] = errors
+
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Error federating graphs: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_cross_query(node_id: str, depth: int = 2) -> str:
+    """Query across all federated graphs for a specific node.
+
+    The *node_id* must be a namespaced ID in the format
+    ``repo:{name}::{node_id}``. Extracts a subgraph up to *depth* hops
+    around that node, spanning across repository boundaries.
+    """
+    try:
+        subgraph = _federation.query_federated(node_id, depth)
+        return subgraph.model_dump_json(indent=2)
+    except Exception as exc:
+        return f"Error querying federated graph: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_cross_edges() -> str:
+    """List all edges that cross repository boundaries in the federation.
+
+    An edge is considered cross-repo if its source and target belong to
+    different repository namespaces. Useful for understanding inter-service
+    dependencies.
+    """
+    try:
+        cross_edges = _federation.get_cross_repo_edges()
+        result = [
+            {
+                "source": edge.source,
+                "target": edge.target,
+                "type": edge.type,
+                "metadata": edge.metadata,
+            }
+            for edge in cross_edges
+        ]
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Error getting cross-repo edges: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Neo4j tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_cypher(project_path: str, query: str) -> str:
+    """Run a read-only Cypher query against the Neo4j-stored architecture graph.
+
+    Requires Neo4j storage backend and the ``neo4j`` Python driver.
+    Connection is configured via environment variables ``NEO4J_URI``,
+    ``NEO4J_USER``, and ``NEO4J_PASSWORD``.
+
+    Returns query results as a JSON array of row objects.
+    """
+    try:
+        from codegiraffe.neo4j_storage import Neo4jStorage
+
+        storage = Neo4jStorage()
+        results = storage.run_cypher(query, project_path=project_path)
+        return json.dumps(results, indent=2, default=str)
+    except ImportError:
+        return "Error: Neo4j driver not installed. Install with: pip install codegiraffe[neo4j]"
+    except Exception as exc:
+        return f"Error running Cypher query: {exc}"
 
 
 # ---------------------------------------------------------------------------

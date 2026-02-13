@@ -39,6 +39,17 @@ dev = [
 embeddings = [
     "sentence-transformers>=2.0",
 ]
+neo4j = [
+    "neo4j>=6.0",
+]
+ast = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-python>=0.23.0",
+    "tree-sitter-go>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+    "tree-sitter-java>=0.23.0",
+]
 
 [build-system]
 requires = ["hatchling"]
