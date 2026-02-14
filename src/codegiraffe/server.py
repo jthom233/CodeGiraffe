@@ -82,6 +82,7 @@ def codegiraffe_init(
     rescan: bool = False,
     backend: str = "json",
     scanner_mode: str = "regex",
+    include_tests: bool = False,
 ) -> str:
     """Initialize or re-scan the architecture knowledge graph for a project.
 
@@ -116,7 +117,7 @@ def codegiraffe_init(
             registry = get_ast_registry()
 
         # Scan the project
-        result = scan_project(project_path, registry=registry)
+        result = scan_project(project_path, registry=registry, include_tests=include_tests)
 
         # Build graph data from scan results
         nodes: dict[str, Node] = {node.id: node for node in result.nodes}
@@ -321,7 +322,7 @@ def codegiraffe_hotspots(project_path: str, top_n: int = 10) -> str:
 
 
 @mcp.tool()
-def codegiraffe_sync(project_path: str) -> str:
+def codegiraffe_sync(project_path: str, include_tests: bool = False) -> str:
     """Re-scan the project and synchronize the architecture graph.
 
     Performs a fresh scan, replaces all auto-discovered nodes and edges,
@@ -337,7 +338,7 @@ def codegiraffe_sync(project_path: str) -> str:
         old_edge_count = len(old_data.edges)
 
         # Re-scan
-        result = scan_project(project_path)
+        result = scan_project(project_path, include_tests=include_tests)
 
         # Build new graph from scan results
         nodes: dict[str, Node] = {node.id: node for node in result.nodes}

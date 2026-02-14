@@ -110,6 +110,7 @@ Scan a project and bootstrap the architecture knowledge graph.
 | `rescan` | `bool` | `false` | Re-scan while preserving manual annotations |
 | `backend` | `str` | `"json"` | Storage backend: `"json"`, `"sqlite"`, or `"neo4j"` |
 | `scanner_mode` | `str` | `"regex"` | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
+| `include_tests` | `bool` | `false` | Include test files in the scan (excluded by default) |
 
 **Example:**
 ```
@@ -247,6 +248,7 @@ Re-scan the project and synchronize the architecture graph, preserving manual an
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_path` | `str` | required | Root directory of the project |
+| `include_tests` | `bool` | `false` | Include test files in the scan (excluded by default) |
 
 **Example:**
 ```
@@ -283,6 +285,7 @@ Export the architecture graph as a visualization format for documentation or das
 | `frontend_component` | Asymmetric |
 | `event` | Stadium |
 | `external_api` | Circle |
+| `module` | Rectangle |
 
 **D3 format** generates a JSON structure compatible with D3.js force-directed graph visualizations, suitable for embedding in web dashboards.
 
@@ -550,9 +553,9 @@ src/codegiraffe/
 
 ### Built-in Types
 
-**Node types:** `service`, `endpoint`, `database_table`, `queue`, `env_var`, `config`, `worker`, `frontend_component`, `event`, `external_api`
+**Node types:** `service`, `endpoint`, `database_table`, `queue`, `env_var`, `config`, `worker`, `frontend_component`, `event`, `external_api`, `module`
 
-**Edge types:** `calls`, `reads`, `writes`, `publishes`, `consumes`, `depends_on`, `configures`, `owns`, `triggers`, `cross_repo_calls`, `cross_repo_depends_on`, `cross_repo_publishes`, `cross_repo_consumes`
+**Edge types:** `calls`, `reads`, `writes`, `publishes`, `consumes`, `depends_on`, `configures`, `owns`, `triggers`, `imports`, `implements`, `contains`, `cross_repo_calls`, `cross_repo_depends_on`, `cross_repo_publishes`, `cross_repo_consumes`
 
 Custom types are fully supported -- any string works as a node or edge type.
 
@@ -600,6 +603,15 @@ All backends implement the `StorageBackend` protocol, so switching between them 
 ## Multi-Language Scanner
 
 Code Giraffe uses a plugin-based scanner architecture built on the `RecognizerRegistry`. Each language has a dedicated recognizer that detects framework-specific patterns using regex matching (not AST parsing) for speed and simplicity. The Python recognizer is built into the core scanner; additional languages are provided by recognizer plugins registered by file extension.
+
+### Scanner Intelligence (v0.4.0)
+
+The scanner includes several intelligence features that produce a richer, more accurate architecture graph:
+
+- **Test file exclusion** -- Test files (`test_*.py`, `*_test.py`, `conftest.py`) and test directories (`tests/`, `test/`) are excluded by default. Pass `include_tests=true` to include them; test-sourced nodes are tagged with `"source": "test"` metadata.
+- **Module nodes** -- Each Python file produces a `module` node (e.g., `mod:codegiraffe.scanner`) with `contains` edges to every entity defined in that file.
+- **Import detection** -- The scanner parses absolute and relative import statements, resolves them to project-internal modules (skipping stdlib and third-party), and creates `imports` edges between `module` nodes with metadata listing the imported symbols.
+- **Inheritance detection** -- Class definitions with base classes produce `implements` edges from child to parent when both classes are defined within the project. External base classes are silently skipped.
 
 ### Python (.py, .pyi)
 
@@ -886,7 +898,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-426 tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex and AST), recognizers, query engine, export, embeddings, coordination, drift detection, versioning, federation, and web dashboard.
+505+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers, query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, and web dashboard.
 
 ### Project Constitution
 
@@ -928,6 +940,14 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 ### v0.3.1 (completed)
 
 - [x] Interactive web dashboard with Cytoscape.js graph visualization
+
+### v0.4.0 (completed)
+
+- [x] Scanner intelligence: test file exclusion (default), import detection, inheritance detection, module nodes
+- [x] New node type: `module` with `contains` edges to file-level entities
+- [x] New edge types: `imports` (inter-module), `implements` (inheritance), `contains` (module-to-entity)
+- [x] `include_tests` parameter for `codegiraffe_init` and `codegiraffe_sync`
+- [x] 505+ tests
 
 ### Future
 

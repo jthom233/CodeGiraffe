@@ -20,6 +20,7 @@ class NodeType(StrEnum):
     FRONTEND_COMPONENT = "frontend_component"
     EVENT = "event"
     EXTERNAL_API = "external_api"
+    MODULE = "module"
 
 
 class EdgeType(StrEnum):
@@ -34,6 +35,9 @@ class EdgeType(StrEnum):
     CONFIGURES = "configures"
     OWNS = "owns"
     TRIGGERS = "triggers"
+    IMPORTS = "imports"
+    IMPLEMENTS = "implements"
+    CONTAINS = "contains"
     CROSS_REPO_CALLS = "cross_repo_calls"
     CROSS_REPO_DEPENDS_ON = "cross_repo_depends_on"
     CROSS_REPO_PUBLISHES = "cross_repo_publishes"
