@@ -1,11 +1,11 @@
 # Code Giraffe Development Guidelines
 
 ## Active Technologies
-- **Version**: 0.9.0
+- **Version**: 0.10.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - **Storage**: JSON files + SQLite + Neo4j (optional)
-- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (874+ tests)
+- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (979+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
 
@@ -13,13 +13,15 @@
 
 ```text
 src/codegiraffe/          # Main package
-├── server.py             # FastMCP server + 25 MCP tool definitions
+├── server.py             # FastMCP server + 28 MCP tool definitions
 ├── graph.py              # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph
 ├── storage.py            # StorageBackend protocol + JSONStorage
 ├── sqlite_storage.py     # SQLiteStorage implementation
 ├── scanner.py            # Scanner pipeline + PythonRecognizer
 ├── registry.py           # RecognizerRegistry plugin system
-├── query.py              # Subgraph extraction, scoring, drift detection, blast radius, risk, cycles
+├── query.py              # Subgraph extraction, scoring, drift detection, blast radius, risk, cycles, change validation
+├── diff_parser.py        # Unified diff parsing + data models for change impact
+├── git_utils.py          # Git CLI subprocess wrappers for change detection
 ├── schema.py             # Node/edge type enums
 ├── export.py             # Mermaid + D3.js graph export
 ├── embeddings.py         # Embedding-based scoring + cache
@@ -39,7 +41,7 @@ src/codegiraffe/          # Main package
     ├── php.py
     └── ruby.py
 
-tests/                    # 874+ tests
+tests/                    # 979+ tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 
@@ -98,6 +100,7 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
+- v0.10.0: Change impact validation -- `codegiraffe_validate_changes` (detect incomplete modifications from git diff), `codegiraffe_suggest_tests` (recommend test files for changes), `codegiraffe_file_coupling` (mine git co-change history); enhanced `codegiraffe_context_for` with `include_changes` parameter for change-aware scoring; new modules `diff_parser.py` and `git_utils.py`; 28 MCP tools total; 979+ tests
 - v0.9.0: Scanner depth -- call-graph edges (`calls`) for Go/Python/TypeScript via regex and tree-sitter AST; cross-file Go interface satisfaction (duck-type method set matching); demand-driven method nodes (`service:{Parent}.{Method}`); `CallInfo`/`InterfaceInfo`/`MethodSetEntry` data classes; `_infer_call_edges()` and `_infer_interface_satisfaction()` pipeline steps; improved TypeScript `implements` multi-interface and generic handling; 874+ tests
 - v0.8.0: Cross-system contracts -- `codegiraffe_contracts` (list/filter), `codegiraffe_validate_contracts` (integrity check), `codegiraffe_add_contract` (manual creation); contract inference for API, event, config, and data contracts; contract-aware blast radius with critical severity for contract consumers; dashboard contract styling (hexagonal purple nodes); 25 MCP tools total; 791+ tests
 - v0.7.0: Impact analysis tools -- `codegiraffe_blast_radius` (downstream impact by severity), `codegiraffe_risk_assessment` (composite risk scoring), `codegiraffe_cycles` (circular dependency detection); enhanced `codegiraffe_context_for` with `include_impact` parameter; enhanced `codegiraffe_hotspots` with `metrics` parameter; 22 MCP tools total; 754+ tests
