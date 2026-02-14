@@ -42,6 +42,35 @@ class ImplementationInfo:
     file_path: str  # Relative path where child is defined
 
 
+@dataclass
+class CallInfo:
+    """Structured call-graph information returned by recognizers."""
+
+    caller: str  # Enclosing function/method name (e.g., "App.Update")
+    callee: str  # Called function/method name (e.g., "Save")
+    receiver: str = ""  # Receiver/object (e.g., "Store" for s.Store.Save())
+    file_path: str = ""  # Source file where the call occurs
+    style: str = "direct"  # "direct", "method", "constructor"
+
+
+@dataclass
+class InterfaceInfo:
+    """Structured interface declaration info returned by recognizers."""
+
+    name: str  # Interface name (e.g., "Store")
+    methods: list[str] = field(default_factory=list)  # Method signatures
+    file_path: str = ""  # Source file where defined
+
+
+@dataclass
+class MethodSetEntry:
+    """A single method in a struct's method set, for interface satisfaction matching."""
+
+    struct_name: str  # Struct that has this method
+    method_name: str  # Method name
+    file_path: str = ""  # Source file where defined
+
+
 # ---------------------------------------------------------------------------
 # Scan result container
 # ---------------------------------------------------------------------------
@@ -55,6 +84,9 @@ class ScanResult:
     edges: list[Edge] = field(default_factory=list)
     imports: list[ImportInfo] = field(default_factory=list)
     implementations: list[ImplementationInfo] = field(default_factory=list)
+    calls: list[CallInfo] = field(default_factory=list)
+    interfaces: list[InterfaceInfo] = field(default_factory=list)
+    method_sets: list[MethodSetEntry] = field(default_factory=list)
 
     def merge(self, other: ScanResult) -> None:
         """Merge another ScanResult into this one, deduplicating by node id."""
@@ -73,6 +105,9 @@ class ScanResult:
 
         self.imports.extend(other.imports)
         self.implementations.extend(other.implementations)
+        self.calls.extend(other.calls)
+        self.interfaces.extend(other.interfaces)
+        self.method_sets.extend(other.method_sets)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +191,72 @@ _RELATIVE_IMPORT_RE = re.compile(
     r"""^from\s+(\.+)([\w.]*)\s+import\s+(.+)""",
     re.MULTILINE,
 )
+
+# ---------------------------------------------------------------------------
+# Python call detection (v0.9.0)
+# ---------------------------------------------------------------------------
+
+_PY_FUNC_CALL_RE = re.compile(r'(?:(\w+)\.)?(\w+)\s*\(')
+_PY_FUNC_DEF_RE = re.compile(r'^(?:    |\t)?def\s+(\w+)\s*\(', re.MULTILINE)
+_PY_CLASS_DEF_RE = re.compile(r'^class\s+(\w+)', re.MULTILINE)
+
+_PYTHON_BUILTINS = frozenset({
+    "print", "len", "range", "str", "int", "float", "bool", "list", "dict",
+    "set", "tuple", "type", "isinstance", "issubclass", "hasattr", "getattr",
+    "setattr", "delattr", "super", "property", "staticmethod", "classmethod",
+    "open", "input", "enumerate", "zip", "map", "filter", "sorted", "reversed",
+    "min", "max", "sum", "abs", "round", "any", "all", "next", "iter",
+    "repr", "hash", "id", "dir", "vars", "globals", "locals", "exec", "eval",
+    "compile", "breakpoint", "exit", "quit",
+})
+
+
+def _find_py_enclosing_context(content: str) -> dict[int, tuple[str, str]]:
+    """Build a mapping of line_number -> (enclosing_class, enclosing_function).
+
+    For methods inside a class, returns e.g. ("MyClass", "my_method").
+    For top-level functions, returns ("", "my_function").
+    """
+    result: dict[int, tuple[str, str]] = {}
+    lines = content.split('\n')
+
+    # Find all class and function definitions with their line numbers
+    class_ranges: list[tuple[int, str]] = []
+    func_ranges: list[tuple[int, str, int]] = []  # (start_line, name, indent)
+
+    for match in _PY_CLASS_DEF_RE.finditer(content):
+        class_name = match.group(1)
+        start_line = content[:match.start()].count('\n')
+        class_ranges.append((start_line, class_name))
+
+    for match in _PY_FUNC_DEF_RE.finditer(content):
+        func_name = match.group(1)
+        start_line = content[:match.start()].count('\n')
+        line = lines[start_line] if start_line < len(lines) else ""
+        indent = len(line) - len(line.lstrip())
+        func_ranges.append((start_line, func_name, indent))
+
+    for line_no in range(len(lines)):
+        # Find enclosing class (most recent class def before this line)
+        current_class = ""
+        for cls_start, cls_name in class_ranges:
+            if cls_start <= line_no:
+                current_class = cls_name
+            else:
+                break
+
+        # Find enclosing function (most recent func def before this line)
+        current_func = ""
+        for func_start, func_name, _indent in func_ranges:
+            if func_start <= line_no:
+                current_func = func_name
+            else:
+                break
+
+        result[line_no] = (current_class, current_func)
+
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Directories and files to skip
@@ -778,7 +879,58 @@ class PythonRecognizer:
         # Cross-file reference inference is handled during merge
         # (see _infer_cross_file_edges below).
 
-        return ScanResult(nodes=nodes, edges=edges)
+        # --- Call detection (v0.9.0) ---
+        calls: list[CallInfo] = []
+        enclosing_ctx = _find_py_enclosing_context(content)
+        rel_path_str = str(file_path)
+
+        for match in _PY_FUNC_CALL_RE.finditer(cleaned):
+            receiver = match.group(1) or ""
+            callee = match.group(2)
+
+            # Skip builtins
+            if callee in _PYTHON_BUILTINS:
+                continue
+            # Skip if receiver is a builtin module
+            if receiver in _PYTHON_BUILTINS:
+                continue
+
+            # Skip decorators (@ lines), import statements, def/class keywords
+            line_start = cleaned.rfind('\n', 0, match.start()) + 1
+            line_prefix = cleaned[line_start:match.start()].lstrip()
+            if line_prefix.startswith(('@', 'import ', 'from ', 'def ', 'class ')):
+                continue
+
+            line_no = content[:match.start()].count('\n')
+            enc_class, enc_func = enclosing_ctx.get(line_no, ("", ""))
+
+            # Determine caller name
+            if enc_class and enc_func:
+                caller = f"{enc_class}.{enc_func}"
+            else:
+                caller = enc_func
+
+            # Determine style
+            if receiver == "self":
+                style = "method"
+                # Replace "self" receiver with the enclosing class name
+                receiver = enc_class
+            elif receiver:
+                style = "method"
+            elif callee[0:1].isupper():
+                style = "constructor"
+            else:
+                style = "direct"
+
+            calls.append(CallInfo(
+                caller=caller,
+                callee=callee,
+                receiver=receiver,
+                file_path=rel_path_str,
+                style=style,
+            ))
+
+        return ScanResult(nodes=nodes, edges=edges, calls=calls)
 
 
 # ---------------------------------------------------------------------------
@@ -1321,6 +1473,151 @@ def _infer_data_contracts(result: ScanResult) -> None:
                 existing_edges.add(edge_key)
 
 
+def _find_node_id_for_name(result: ScanResult, name: str) -> str | None:
+    """Find the node ID for a given class/struct/interface name."""
+    for node in result.nodes:
+        if node.label == name:
+            return node.id
+        if node.metadata.get("struct_name") == name:
+            return node.id
+        if node.metadata.get("class_name") == name:
+            return node.id
+    return None
+
+
+def _infer_interface_satisfaction(result: ScanResult) -> None:
+    """Infer implements edges from Go duck-type interface satisfaction.
+
+    Matches struct method sets against interface method lists.
+    A struct satisfies an interface if its method set is a superset of
+    the interface's method list.
+    """
+    if not result.interfaces or not result.method_sets:
+        return
+
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    # Build method sets per struct: struct_name -> set of method names
+    struct_methods: dict[str, set[str]] = {}
+    struct_files: dict[str, str] = {}
+    for entry in result.method_sets:
+        struct_methods.setdefault(entry.struct_name, set()).add(entry.method_name)
+        if entry.file_path:
+            struct_files[entry.struct_name] = entry.file_path
+
+    # For each interface, find structs that satisfy it
+    for iface in result.interfaces:
+        if not iface.methods:
+            continue
+        iface_method_set = set(iface.methods)
+
+        for struct_name, methods in struct_methods.items():
+            if iface_method_set.issubset(methods):
+                # Find the struct's node ID and interface's node ID
+                struct_node_id = _find_node_id_for_name(result, struct_name)
+                iface_node_id = _find_node_id_for_name(result, iface.name)
+
+                if struct_node_id and iface_node_id:
+                    edge_key = (struct_node_id, iface_node_id, EdgeType.IMPLEMENTS.value)
+                    if edge_key not in existing_edges:
+                        result.edges.append(Edge(
+                            source=struct_node_id,
+                            target=iface_node_id,
+                            type=EdgeType.IMPLEMENTS.value,
+                            metadata={
+                                "inferred": True,
+                                "mechanism": "duck_type",
+                                "matched_methods": sorted(iface_method_set),
+                            },
+                        ))
+                        existing_edges.add(edge_key)
+
+
+def _infer_call_edges(result: ScanResult) -> None:
+    """Resolve CallInfo records into calls edges in the graph.
+
+    Creates edges between caller and callee nodes. When a callee can be
+    resolved to an existing node (via receiver matching or symbol registry),
+    creates a calls edge. Creates demand-driven method-level nodes only
+    when they participate in call relationships.
+    """
+    if not result.calls:
+        return
+
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_node_ids = {n.id for n in result.nodes}
+
+    # Build symbol registry: map names to node IDs
+    # Maps: struct_name -> node_id, module_label -> module_node_id
+    symbol_registry: dict[str, str] = {}
+    module_registry: dict[str, str] = {}  # package/module label -> node_id
+    for node in result.nodes:
+        if node.type == "service":
+            name = node.metadata.get("struct_name") or node.metadata.get("class_name") or node.label
+            symbol_registry[name] = node.id
+        elif node.type == "module":
+            symbol_registry[node.label] = node.id
+            module_registry[node.label] = node.id
+            # Also map package name from metadata
+            pkg = node.metadata.get("package", "")
+            if pkg:
+                module_registry[pkg] = node.id
+
+    for call in result.calls:
+        # Try to resolve the callee to an existing node
+        callee_node_id = None
+
+        if call.receiver:
+            # receiver.callee() — try to find receiver as a known symbol
+            callee_node_id = symbol_registry.get(call.receiver)
+            if not callee_node_id:
+                # Try matching receiver as a module/package
+                callee_node_id = module_registry.get(call.receiver)
+        else:
+            # Direct call — try to find callee as a known symbol
+            callee_node_id = symbol_registry.get(call.callee)
+
+        if callee_node_id is None:
+            continue  # Can't resolve — skip
+
+        # Resolve caller
+        caller_node_id = None
+        if call.caller:
+            # Try "Class.Method" format first
+            if "." in call.caller:
+                class_name = call.caller.split(".")[0]
+                caller_node_id = symbol_registry.get(class_name)
+            else:
+                caller_node_id = symbol_registry.get(call.caller)
+
+        if caller_node_id is None:
+            # Try to find caller by file path — use the module node
+            if call.file_path:
+                for node in result.nodes:
+                    if node.type == "module" and node.file_path == call.file_path:
+                        caller_node_id = node.id
+                        break
+
+        if caller_node_id is None or caller_node_id == callee_node_id:
+            continue  # Can't resolve caller or self-call
+
+        edge_key = (caller_node_id, callee_node_id, EdgeType.CALLS.value)
+        if edge_key not in existing_edges:
+            result.edges.append(Edge(
+                source=caller_node_id,
+                target=callee_node_id,
+                type=EdgeType.CALLS.value,
+                metadata={
+                    "inferred": True,
+                    "caller": call.caller,
+                    "callee": call.callee,
+                    "receiver": call.receiver,
+                    "style": call.style,
+                },
+            ))
+            existing_edges.add(edge_key)
+
+
 def _infer_contract_edges(result: ScanResult) -> None:
     """Orchestrate all contract inference passes.
 
@@ -1438,12 +1735,18 @@ def scan_project(
         file_edges: list[Edge] = []
         file_imports: list[ImportInfo] = []
         file_implementations: list[ImplementationInfo] = []
+        file_calls: list[CallInfo] = []
+        file_interfaces: list[InterfaceInfo] = []
+        file_method_sets: list[MethodSetEntry] = []
         for recognizer in applicable:
             file_result = recognizer.recognize(rel_path, content)
             file_nodes.extend(file_result.nodes)
             file_edges.extend(file_result.edges)
             file_imports.extend(file_result.imports)
             file_implementations.extend(file_result.implementations)
+            file_calls.extend(file_result.calls)
+            file_interfaces.extend(file_result.interfaces)
+            file_method_sets.extend(file_result.method_sets)
 
         # Tag nodes from test files with source: test metadata
         if is_test and include_tests:
@@ -1483,6 +1786,9 @@ def scan_project(
             edges=file_edges,
             imports=file_imports,
             implementations=file_implementations,
+            calls=file_calls,
+            interfaces=file_interfaces,
+            method_sets=file_method_sets,
         )
         per_file_results[rel_path] = combined
         merged.merge(combined)
@@ -1506,6 +1812,12 @@ def scan_project(
 
     # Python-specific inheritance inference (backward compat)
     _infer_inheritance_edges(merged, class_registry, file_contents)
+
+    # Interface satisfaction (duck-type matching across files)
+    _infer_interface_satisfaction(merged)
+
+    # Call-graph edges (resolve CallInfo into calls edges)
+    _infer_call_edges(merged)
 
     # Contract inference (detects cross-component agreements)
     _infer_contract_edges(merged)
