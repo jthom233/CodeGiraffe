@@ -8,6 +8,10 @@ from codegiraffe.recognizers import (
     GoRecognizer,
     RustRecognizer,
     JavaRecognizer,
+    CSharpRecognizer,
+    CppRecognizer,
+    PhpRecognizer,
+    RubyRecognizer,
 )
 from codegiraffe.scanner import ScanResult, scan_project
 from codegiraffe.registry import RecognizerRegistry
@@ -669,12 +673,55 @@ app.get("/api/typescript", handler);
         assert "endpoint:/api/python" in ids
         assert "endpoint:/api/typescript" in ids
 
-    def test_scan_project_all_four_languages(self, tmp_path):
-        """Verify all four new languages are scanned in one project."""
+    def test_scan_project_with_csharp(self, tmp_path):
+        (tmp_path / "Controller.cs").write_text('''
+[HttpGet("/api/items")]
+public IActionResult Get() { return Ok(); }
+var key = Environment.GetEnvironmentVariable("API_KEY");
+''')
+        result = scan_project(str(tmp_path))
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/items" in ids
+        assert "env:API_KEY" in ids
+
+    def test_scan_project_with_cpp(self, tmp_path):
+        (tmp_path / "main.cpp").write_text('''
+#include "mylib.h"
+const char *host = getenv("HOST");
+struct Server { int fd; };
+''')
+        result = scan_project(str(tmp_path))
+        ids = {n.id for n in result.nodes}
+        assert "env:HOST" in ids
+        assert "service:Server" in ids
+
+    def test_scan_project_with_php(self, tmp_path):
+        (tmp_path / "routes.php").write_text("""
+Route::get('/api/products', 'ProductController@index');
+$key = env('APP_KEY');
+""")
+        result = scan_project(str(tmp_path))
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/products" in ids
+        assert "env:APP_KEY" in ids
+
+    def test_scan_project_with_ruby(self, tmp_path):
+        (tmp_path / "routes.rb").write_text("""
+get '/api/health'
+""")
+        result = scan_project(str(tmp_path))
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/health" in ids
+
+    def test_scan_project_all_languages(self, tmp_path):
+        """Verify all language recognizers are scanned in one project."""
         (tmp_path / "server.ts").write_text('app.get("/ts-route", h);')
         (tmp_path / "main.go").write_text('http.HandleFunc("/go-route", h)')
         (tmp_path / "main.rs").write_text('#[get("/rs-route")]\nasync fn h() {}')
         (tmp_path / "App.java").write_text('@GetMapping("/java-route")\npublic void h() {}')
+        (tmp_path / "Controller.cs").write_text('[HttpGet("/cs-route")]\npublic void H() {}')
+        (tmp_path / "routes.php").write_text("Route::get('/php-route', 'C@i');")
+        (tmp_path / "routes.rb").write_text("get '/rb-route'")
 
         result = scan_project(str(tmp_path))
         ids = {n.id for n in result.nodes}
@@ -682,6 +729,9 @@ app.get("/api/typescript", handler);
         assert "endpoint:/go-route" in ids
         assert "endpoint:/rs-route" in ids
         assert "endpoint:/java-route" in ids
+        assert "endpoint:/cs-route" in ids
+        assert "endpoint:/php-route" in ids
+        assert "endpoint:/rb-route" in ids
 
 
 class TestDefaultRegistryExtensions:
@@ -692,5 +742,487 @@ class TestDefaultRegistryExtensions:
 
         registry = get_default_registry()
         extensions = registry.registered_extensions
-        for ext in [".py", ".pyi", ".ts", ".tsx", ".mts", ".cts", ".go", ".rs", ".java"]:
+        for ext in [
+            ".py", ".pyi", ".ts", ".tsx", ".mts", ".cts", ".go", ".rs", ".java",
+            ".cs", ".c", ".cpp", ".h", ".hpp", ".cc", ".cxx", ".php", ".rb",
+        ]:
             assert ext in extensions, f"Missing extension: {ext}"
+
+
+class TestCSharpRecognizer:
+    @pytest.fixture
+    def recognizer(self):
+        return CSharpRecognizer()
+
+    def test_aspnet_route_attributes(self, recognizer):
+        content = '''
+[HttpGet("/api/users")]
+public async Task<IActionResult> GetUsers() { return Ok(); }
+
+[HttpPost("/api/users")]
+public async Task<IActionResult> CreateUser() { return Created(); }
+'''
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/users" in ids
+        assert any(n.type == "endpoint" for n in result.nodes)
+
+    def test_route_attribute(self, recognizer):
+        content = '''
+[Route("api/health")]
+public string Health() { return "ok"; }
+'''
+        result = recognizer.recognize(Path("Controllers/HealthController.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:api/health" in ids
+
+    def test_entity_framework_table(self, recognizer):
+        content = '''
+[Table("Orders")]
+public class Order { public int Id { get; set; } }
+'''
+        result = recognizer.recognize(Path("Models/Order.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:Orders" in ids
+
+    def test_entity_framework_dbset(self, recognizer):
+        content = '''
+public class AppDbContext : DbContext {
+    public DbSet<User> Users { get; set; }
+    public DbSet<Order> Orders { get; set; }
+}
+'''
+        result = recognizer.recognize(Path("Data/AppDbContext.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:User" in ids
+        assert "table:Order" in ids
+
+    def test_environment_variable(self, recognizer):
+        content = '''
+var dbHost = Environment.GetEnvironmentVariable("DB_HOST");
+'''
+        result = recognizer.recognize(Path("Config.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "env:DB_HOST" in ids
+
+    def test_httpclient_external_api(self, recognizer):
+        content = '''
+await _httpClient.PostAsync("https://api.stripe.com/v1/charges");
+'''
+        result = recognizer.recognize(Path("Services/PaymentService.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert any("api.stripe.com" in nid for nid in ids)
+
+    def test_signalr_hub(self, recognizer):
+        content = '''
+public class ChatHub : Hub<IChatClient> {
+    public async Task SendMessage(string msg) { }
+}
+'''
+        result = recognizer.recognize(Path("Hubs/ChatHub.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:ChatHub" in ids
+        hub_node = next(n for n in result.nodes if n.id == "service:ChatHub")
+        assert hub_node.metadata.get("kind") == "signalr_hub"
+
+    def test_mediatr_handler(self, recognizer):
+        content = '''
+public class CreateOrderHandler : IRequestHandler<CreateOrderCommand, int> {
+    public Task<int> Handle(CreateOrderCommand request, CancellationToken ct) { return Task.FromResult(1); }
+}
+'''
+        result = recognizer.recognize(Path("Handlers/CreateOrderHandler.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "worker:CreateOrderHandler" in ids
+
+    def test_di_registration(self, recognizer):
+        content = '''
+services.AddScoped<IOrderService>();
+services.AddSingleton<ICacheService>();
+'''
+        result = recognizer.recognize(Path("Startup.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:IOrderService" in ids
+        assert "service:ICacheService" in ids
+
+    def test_class_fallback(self, recognizer):
+        content = '''
+internal class HelperUtil { }
+'''
+        result = recognizer.recognize(Path("Helpers/HelperUtil.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:HelperUtil" in ids
+
+    def test_signalr_hub_not_duplicated_as_service(self, recognizer):
+        """SignalR hubs should not also appear as fallback services."""
+        content = '''
+public class NotificationHub : Hub {
+    public async Task Notify(string msg) { }
+}
+'''
+        result = recognizer.recognize(Path("Hubs/NotificationHub.cs"), content)
+        ids = [n.id for n in result.nodes]
+        hub_nodes = [nid for nid in ids if "NotificationHub" in nid]
+        assert len(hub_nodes) == 1
+
+
+class TestCppRecognizer:
+    @pytest.fixture
+    def recognizer(self):
+        return CppRecognizer()
+
+    def test_local_include(self, recognizer):
+        content = '''
+#include "mylib.h"
+#include "utils/helper.h"
+'''
+        result = recognizer.recognize(Path("src/main.cpp"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:mylib" in ids
+        assert "service:helper" in ids
+
+    def test_system_include_ignored(self, recognizer):
+        content = '''
+#include <stdio.h>
+#include <vector>
+'''
+        result = recognizer.recognize(Path("main.cpp"), content)
+        ids = {n.id for n in result.nodes}
+        # System includes should NOT produce nodes
+        assert not any("stdio" in nid for nid in ids)
+
+    def test_struct_definition(self, recognizer):
+        content = '''
+struct Connection {
+    int fd;
+    char *host;
+};
+'''
+        result = recognizer.recognize(Path("network.h"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:Connection" in ids
+
+    def test_class_definition(self, recognizer):
+        content = '''
+class HttpServer : public BaseServer {
+    void handle();
+};
+'''
+        result = recognizer.recognize(Path("server.h"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:HttpServer" in ids
+
+    def test_socket_pattern(self, recognizer):
+        content = '''
+int fd = socket(AF_INET, SOCK_STREAM, 0);
+bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+'''
+        result = recognizer.recognize(Path("src/server.cpp"), content)
+        ids = {n.id for n in result.nodes}
+        assert any("socket" in nid for nid in ids)
+        assert any(n.type == "queue" for n in result.nodes)
+
+    def test_getenv(self, recognizer):
+        content = '''
+const char *host = getenv("SERVER_HOST");
+const char *port = getenv("SERVER_PORT");
+'''
+        result = recognizer.recognize(Path("config.c"), content)
+        ids = {n.id for n in result.nodes}
+        assert "env:SERVER_HOST" in ids
+        assert "env:SERVER_PORT" in ids
+
+    def test_curl_external_api(self, recognizer):
+        content = '''
+curl_easy_setopt(curl, CURLOPT_URL, "https://api.example.com/data");
+'''
+        result = recognizer.recognize(Path("client.c"), content)
+        ids = {n.id for n in result.nodes}
+        assert any("api.example.com" in nid for nid in ids)
+
+    def test_function_definition(self, recognizer):
+        content = '''
+void process_request(int fd) {
+    // do stuff
+}
+'''
+        result = recognizer.recognize(Path("handler.c"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:process_request" in ids
+
+    def test_control_flow_excluded(self, recognizer):
+        content = '''
+void main() {
+    if (x > 0) {
+        return;
+    }
+    while (running) {
+        // loop
+    }
+}
+'''
+        result = recognizer.recognize(Path("main.c"), content)
+        ids = {n.id for n in result.nodes}
+        # 'if', 'while', 'return' should NOT be captured as functions
+        assert "service:if" not in ids
+        assert "service:while" not in ids
+
+    def test_define_macro(self, recognizer):
+        content = '''
+#define MAX_BUFFER_SIZE 1024
+#define APP_VERSION "1.0.0"
+'''
+        result = recognizer.recognize(Path("config.h"), content)
+        ids = {n.id for n in result.nodes}
+        assert "config:MAX_BUFFER_SIZE" in ids
+        assert "config:APP_VERSION" in ids
+
+    def test_include_guard_excluded(self, recognizer):
+        content = '''
+#ifndef MY_HEADER_H_
+#define MY_HEADER_H_
+#endif
+'''
+        result = recognizer.recognize(Path("header.h"), content)
+        ids = {n.id for n in result.nodes}
+        assert "config:MY_HEADER_H_" not in ids
+
+
+class TestPhpRecognizer:
+    @pytest.fixture
+    def recognizer(self):
+        return PhpRecognizer()
+
+    def test_laravel_routes(self, recognizer):
+        content = """
+Route::get('/api/users', 'UserController@index');
+Route::post('/api/users', 'UserController@store');
+"""
+        result = recognizer.recognize(Path("routes/api.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/users" in ids
+
+    def test_symfony_route_attribute(self, recognizer):
+        content = """
+#[Route('/api/products')]
+public function index(): Response { }
+"""
+        result = recognizer.recognize(Path("src/Controller/ProductController.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/products" in ids
+
+    def test_eloquent_model(self, recognizer):
+        content = """
+class UserProfile extends Model {
+    protected $fillable = ['name', 'email'];
+}
+"""
+        result = recognizer.recognize(Path("app/Models/UserProfile.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:user_profiles" in ids
+
+    def test_eloquent_explicit_table(self, recognizer):
+        content = """
+class Item extends Model {
+    protected $table = 'inventory_items';
+}
+"""
+        result = recognizer.recognize(Path("app/Models/Item.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:inventory_items" in ids
+
+    def test_env_calls(self, recognizer):
+        content = """
+$dbUrl = env('DATABASE_URL');
+$port = getenv('PORT');
+$secret = $_ENV['SECRET_KEY'];
+"""
+        result = recognizer.recognize(Path("config/app.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert "env:DATABASE_URL" in ids
+        assert "env:PORT" in ids
+        assert "env:SECRET_KEY" in ids
+
+    def test_queue_job(self, recognizer):
+        content = """
+class SendEmailJob extends Job implements ShouldQueue {
+    public function handle() { }
+}
+"""
+        result = recognizer.recognize(Path("app/Jobs/SendEmailJob.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert "worker:SendEmailJob" in ids
+
+    def test_http_facade(self, recognizer):
+        content = """
+$response = Http::post('https://api.stripe.com/v1/charges');
+"""
+        result = recognizer.recognize(Path("app/Services/PaymentService.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert any("api.stripe.com" in nid for nid in ids)
+
+    def test_class_fallback(self, recognizer):
+        content = """
+class PaymentService {
+    public function charge($amount) { }
+}
+"""
+        result = recognizer.recognize(Path("app/Services/PaymentService.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:PaymentService" in ids
+
+    def test_eloquent_model_not_duplicated_as_service(self, recognizer):
+        """Eloquent models should be tables, not also service fallbacks."""
+        content = """
+class Order extends Model {
+    protected $fillable = ['total'];
+}
+"""
+        result = recognizer.recognize(Path("app/Models/Order.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert any("table:" in nid for nid in ids)
+        assert "service:Order" not in ids
+
+    def test_queue_job_not_duplicated_as_service(self, recognizer):
+        """Queue jobs should be workers, not also service fallbacks."""
+        content = """
+class ProcessPayment extends Job implements ShouldQueue {
+    public function handle() { }
+}
+"""
+        result = recognizer.recognize(Path("app/Jobs/ProcessPayment.php"), content)
+        ids = {n.id for n in result.nodes}
+        assert "worker:ProcessPayment" in ids
+        assert "service:ProcessPayment" not in ids
+
+
+class TestRubyRecognizer:
+    @pytest.fixture
+    def recognizer(self):
+        return RubyRecognizer()
+
+    def test_rails_routes(self, recognizer):
+        content = """
+get '/api/users'
+post '/api/sessions'
+"""
+        result = recognizer.recognize(Path("config/routes.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/users" in ids
+        assert "endpoint:/api/sessions" in ids
+
+    def test_resource_routes(self, recognizer):
+        content = """
+resources :orders
+resource :profile
+"""
+        result = recognizer.recognize(Path("config/routes.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/orders" in ids
+        assert "endpoint:/profile" in ids
+
+    def test_activerecord_model(self, recognizer):
+        content = """
+class UserProfile < ApplicationRecord
+  has_many :orders
+end
+"""
+        result = recognizer.recognize(Path("app/models/user_profile.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:user_profiles" in ids
+
+    def test_activerecord_base(self, recognizer):
+        content = """
+class Order < ActiveRecord::Base
+  belongs_to :user
+end
+"""
+        result = recognizer.recognize(Path("app/models/order.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:orders" in ids
+
+    def test_sidekiq_worker(self, recognizer):
+        content = """
+class EmailWorker
+  include Sidekiq::Worker
+
+  def perform(user_id)
+  end
+end
+"""
+        result = recognizer.recognize(Path("app/workers/email_worker.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "worker:EmailWorker" in ids
+
+    def test_sidekiq_job(self, recognizer):
+        content = """
+class NotificationJob
+  include Sidekiq::Job
+
+  def perform(msg)
+  end
+end
+"""
+        result = recognizer.recognize(Path("app/jobs/notification_job.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "worker:NotificationJob" in ids
+
+    def test_env_access(self, recognizer):
+        content = """
+db_url = ENV['DATABASE_URL']
+secret = ENV.fetch('SECRET_KEY')
+redis = ENV["REDIS_URL"]
+"""
+        result = recognizer.recognize(Path("config/application.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "env:DATABASE_URL" in ids
+        assert "env:SECRET_KEY" in ids
+        assert "env:REDIS_URL" in ids
+
+    def test_http_calls(self, recognizer):
+        content = """
+response = Net::HTTP.get(URI('https://api.example.com/data'))
+result = HTTParty.get('https://hooks.slack.com/services/abc')
+"""
+        result = recognizer.recognize(Path("app/services/api_client.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert any("api.example.com" in nid for nid in ids)
+        assert any("hooks.slack.com" in nid for nid in ids)
+
+    def test_class_fallback(self, recognizer):
+        content = """
+class PaymentService
+  def charge(amount)
+  end
+end
+"""
+        result = recognizer.recognize(Path("app/services/payment_service.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:PaymentService" in ids
+
+    def test_activerecord_model_not_duplicated_as_service(self, recognizer):
+        """ActiveRecord models should be tables, not also service fallbacks."""
+        content = """
+class Product < ApplicationRecord
+  has_many :reviews
+end
+"""
+        result = recognizer.recognize(Path("app/models/product.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:products" in ids
+        assert "service:Product" not in ids
+
+    def test_sidekiq_worker_not_duplicated_as_service(self, recognizer):
+        """Sidekiq workers should not also appear as fallback services."""
+        content = """
+class ReportWorker
+  include Sidekiq::Worker
+
+  def perform
+  end
+end
+"""
+        result = recognizer.recognize(Path("app/workers/report_worker.rb"), content)
+        ids = {n.id for n in result.nodes}
+        assert "worker:ReportWorker" in ids
+        assert "service:ReportWorker" not in ids

@@ -1,11 +1,11 @@
 # Code Giraffe Development Guidelines
 
 ## Active Technologies
-- **Version**: 0.4.0
+- **Version**: 0.5.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - **Storage**: JSON files + SQLite + Neo4j (optional)
-- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (505+ tests)
+- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (566+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
 
@@ -33,9 +33,13 @@ src/codegiraffe/          # Main package
     ├── typescript.py
     ├── go.py
     ├── rust.py
-    └── java.py
+    ├── java.py
+    ├── cpp.py
+    ├── csharp.py
+    ├── php.py
+    └── ruby.py
 
-tests/                    # 505+ tests
+tests/                    # 566+ tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 
@@ -87,4 +91,5 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
+- v0.5.0: 4 new language recognizers (C#, C/C++, PHP, Ruby — now 9 languages); 3 new dashboard layouts (grid, concentric, breadthfirst); dashboard improvements (legend, stats, edge tooltips, refined colors); 566+ tests
 - v0.4.0 (005-scanner-intelligence): Scanner intelligence -- test file exclusion, import detection, inheritance detection, module nodes; new schema types (`module`, `imports`, `implements`, `contains`); `include_tests` parameter on `codegiraffe_init` and `codegiraffe_sync`; 505+ tests
