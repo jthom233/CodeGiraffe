@@ -20,6 +20,7 @@ _MERMAID_SHAPES: dict[str, tuple[str, str]] = {
     NodeType.FRONTEND_COMPONENT: (">", "]"),  # asymmetric
     NodeType.EVENT: ("([", "])"),  # stadium
     NodeType.EXTERNAL_API: ("((", "))"),  # circle
+    NodeType.CONTRACT: ("{{", "}}"),  # hexagon
 }
 
 _DEFAULT_SHAPE = ("[", "]")

@@ -279,11 +279,12 @@ body {
     service: '#4A90D9', endpoint: '#7B68EE', database_table: '#2ECC71',
     queue: '#E67E22', env_var: '#F39C12', config: '#D4AC0D',
     worker: '#E74C3C', frontend_component: '#9B59B6', event: '#1ABC9C',
-    external_api: '#95A5A6', module: '#D35400'
+    external_api: '#95A5A6', module: '#D35400', contract: '#8E44AD'
   };
   const TYPE_SHAPES = {
     endpoint: 'diamond', database_table: 'barrel', worker: 'hexagon',
-    queue: 'rectangle', event: 'ellipse', module: 'round-rectangle'
+    queue: 'rectangle', event: 'ellipse', module: 'round-rectangle',
+    contract: 'hexagon'
   };
   const DEFAULT_COLOR = '#4A90D9';
   const DEFAULT_SHAPE = 'round-rectangle';
@@ -431,6 +432,42 @@ body {
             'target-arrow-color': '#2ECC71',
             'line-style': 'dotted'
           }
+        },
+        {
+          selector: 'edge[type="produces"]',
+          style: {
+            'line-style': 'solid',
+            'width': 3,
+            'line-color': '#8E44AD',
+            'target-arrow-color': '#8E44AD'
+          }
+        },
+        {
+          selector: 'edge[type="consumes_contract"]',
+          style: {
+            'line-style': 'dashed',
+            'width': 2,
+            'line-color': '#9B59B6',
+            'target-arrow-color': '#9B59B6'
+          }
+        },
+        {
+          selector: 'edge[type="validates"]',
+          style: {
+            'line-style': 'dotted',
+            'width': 2,
+            'line-color': '#27AE60',
+            'target-arrow-color': '#27AE60'
+          }
+        },
+        {
+          selector: 'edge[type="violates"]',
+          style: {
+            'line-style': 'solid',
+            'width': 3,
+            'line-color': '#E74C3C',
+            'target-arrow-color': '#E74C3C'
+          }
         }
       ],
       layout: { name: 'cose', animate: false, nodeDimensionsIncludeLabels: true }
@@ -442,10 +479,19 @@ body {
       if (evt.target === cy) closeDetail();
     });
 
+    const EDGE_LABELS = {
+        produces: 'Produces',
+        consumes_contract: 'Consumes Contract',
+        validates: 'Validates',
+        violates: 'Violates'
+    };
+
     cy.on('mouseover', 'edge', function(evt) {
         const edge = evt.target;
         const tip = document.getElementById('edge-tooltip');
-        tip.textContent = edge.data('type') + ': ' + edge.data('source') + ' → ' + edge.data('target');
+        const edgeType = edge.data('type');
+        const displayLabel = EDGE_LABELS[edgeType] || edgeType;
+        tip.textContent = displayLabel + ': ' + edge.data('source') + ' → ' + edge.data('target');
         tip.style.display = 'block';
         const pos = evt.renderedPosition || evt.position;
         const container = document.getElementById('cy-container');
@@ -641,6 +687,10 @@ body {
         imports: { color: '#E67E22', style: 'dashed' },
         implements: { color: '#9B59B6', style: '' },
         contains: { color: '#2ECC71', style: 'dotted' },
+        produces: { color: '#8E44AD', style: '' },
+        consumes_contract: { color: '#9B59B6', style: 'dashed' },
+        validates: { color: '#27AE60', style: 'dotted' },
+        violates: { color: '#E74C3C', style: '' },
         default: { color: '#2a3a5e', style: '' }
     };
     Object.keys(edgeStyles).forEach(t => {

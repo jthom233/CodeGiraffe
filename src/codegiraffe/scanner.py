@@ -994,6 +994,347 @@ def _infer_inheritance_edges_universal(
 
 
 # ---------------------------------------------------------------------------
+# Contract inference
+# ---------------------------------------------------------------------------
+
+
+def _infer_api_contracts(result: ScanResult) -> None:
+    """Infer API contracts from matching endpoint and external_api nodes.
+
+    When an external_api node's URL contains a path that matches an endpoint
+    node's path, a contract node with ``produces`` and ``consumes_contract``
+    edges is created.
+    """
+    existing_node_ids = {n.id for n in result.nodes}
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    # Collect endpoint nodes and extract their paths
+    endpoints: list[tuple[Node, str]] = []
+    for node in result.nodes:
+        if node.type == NodeType.ENDPOINT.value:
+            # Node id format: "endpoint:METHOD /path" or "endpoint:/path"
+            raw = node.id
+            if raw.startswith("endpoint:"):
+                raw = raw[len("endpoint:"):]
+            # Strip method prefix if present (e.g. "GET /api/users" -> "/api/users")
+            parts = raw.strip().split(None, 1)
+            path = parts[-1] if parts else raw
+            if path:
+                endpoints.append((node, path))
+
+    # Collect external_api nodes and extract their URLs/paths
+    externals: list[tuple[Node, str]] = []
+    for node in result.nodes:
+        if node.type == NodeType.EXTERNAL_API.value:
+            url = node.label or node.id
+            if url.startswith("external_api:"):
+                url = url[len("external_api:"):]
+            externals.append((node, url))
+
+    for ep_node, ep_path in endpoints:
+        consumers: list[Node] = []
+        for ext_node, ext_url in externals:
+            if ep_path in ext_url:
+                consumers.append(ext_node)
+
+        if not consumers:
+            continue
+
+        contract_id = f"contract:api:{ep_path}"
+        if contract_id in existing_node_ids:
+            continue
+
+        contract_node = Node(
+            id=contract_id,
+            type=NodeType.CONTRACT.value,
+            label=f"API: {ep_path}",
+            metadata={
+                "contract_type": "api",
+                "producer": ep_node.id,
+                "consumers": [c.id for c in consumers],
+                "status": "active",
+                "inferred": True,
+            },
+        )
+        result.nodes.append(contract_node)
+        existing_node_ids.add(contract_id)
+
+        # Producer edge
+        edge_key = (ep_node.id, contract_id, EdgeType.PRODUCES.value)
+        if edge_key not in existing_edges:
+            result.edges.append(Edge(
+                source=ep_node.id,
+                target=contract_id,
+                type=EdgeType.PRODUCES.value,
+                metadata={"inferred": True},
+            ))
+            existing_edges.add(edge_key)
+
+        # Consumer edges
+        for consumer in consumers:
+            edge_key = (consumer.id, contract_id, EdgeType.CONSUMES_CONTRACT.value)
+            if edge_key not in existing_edges:
+                result.edges.append(Edge(
+                    source=consumer.id,
+                    target=contract_id,
+                    type=EdgeType.CONSUMES_CONTRACT.value,
+                    metadata={"inferred": True},
+                ))
+                existing_edges.add(edge_key)
+
+
+def _infer_event_contracts(result: ScanResult) -> None:
+    """Infer event contracts from event nodes with matching labels.
+
+    Groups event nodes by label.  When two or more share the same label a
+    contract is created.  If one of the nodes has an incoming ``publishes``
+    edge it is treated as the producer; otherwise the first node is used.
+    """
+    existing_node_ids = {n.id for n in result.nodes}
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    # Group event nodes by label
+    event_groups: dict[str, list[Node]] = {}
+    for node in result.nodes:
+        if node.type == NodeType.EVENT.value:
+            event_groups.setdefault(node.label, []).append(node)
+
+    # Build lookup: nodes that have an incoming "publishes" edge
+    publishers: set[str] = set()
+    for edge in result.edges:
+        if edge.type == EdgeType.PUBLISHES.value:
+            # The *source* of a publishes edge is the publisher; the target is
+            # the event.  But for producer detection we want the event node
+            # that *receives* a publishes edge (i.e. the target).
+            publishers.add(edge.target)
+
+    for label, nodes in event_groups.items():
+        if len(nodes) < 2:
+            continue
+
+        contract_id = f"contract:event:{label}"
+        if contract_id in existing_node_ids:
+            continue
+
+        # Determine producer: prefer the node targeted by a publishes edge
+        producer: Node | None = None
+        for n in nodes:
+            if n.id in publishers:
+                producer = n
+                break
+        if producer is None:
+            producer = nodes[0]
+
+        consumers = [n for n in nodes if n.id != producer.id]
+
+        contract_node = Node(
+            id=contract_id,
+            type=NodeType.CONTRACT.value,
+            label=f"Event: {label}",
+            metadata={
+                "contract_type": "event",
+                "producer": producer.id,
+                "consumers": [c.id for c in consumers],
+                "status": "active",
+                "inferred": True,
+            },
+        )
+        result.nodes.append(contract_node)
+        existing_node_ids.add(contract_id)
+
+        # Producer edge
+        edge_key = (producer.id, contract_id, EdgeType.PRODUCES.value)
+        if edge_key not in existing_edges:
+            result.edges.append(Edge(
+                source=producer.id,
+                target=contract_id,
+                type=EdgeType.PRODUCES.value,
+                metadata={"inferred": True},
+            ))
+            existing_edges.add(edge_key)
+
+        # Consumer edges
+        for consumer in consumers:
+            edge_key = (consumer.id, contract_id, EdgeType.CONSUMES_CONTRACT.value)
+            if edge_key not in existing_edges:
+                result.edges.append(Edge(
+                    source=consumer.id,
+                    target=contract_id,
+                    type=EdgeType.CONSUMES_CONTRACT.value,
+                    metadata={"inferred": True},
+                ))
+                existing_edges.add(edge_key)
+
+
+def _infer_config_contracts(result: ScanResult) -> None:
+    """Infer config contracts when an env_var is referenced by 2+ distinct services.
+
+    Any edge whose source or target is an ``env_var`` node counts as a
+    reference.  When two or more *distinct* source/target nodes reference the
+    same env_var, a config contract is created.  The producer is the
+    alphabetically first referencing node.
+    """
+    existing_node_ids = {n.id for n in result.nodes}
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    env_vars: dict[str, Node] = {}
+    for node in result.nodes:
+        if node.type == NodeType.ENV_VAR.value:
+            env_vars[node.id] = node
+
+    if not env_vars:
+        return
+
+    # For each env_var, find distinct nodes connected to it via any edge
+    for env_id, env_node in env_vars.items():
+        referencing_nodes: set[str] = set()
+        for edge in result.edges:
+            if edge.source == env_id and edge.target != env_id:
+                referencing_nodes.add(edge.target)
+            elif edge.target == env_id and edge.source != env_id:
+                referencing_nodes.add(edge.source)
+
+        if len(referencing_nodes) < 2:
+            continue
+
+        label = env_node.label
+        contract_id = f"contract:config:{label}"
+        if contract_id in existing_node_ids:
+            continue
+
+        sorted_refs = sorted(referencing_nodes)
+        producer_id = sorted_refs[0]
+        consumer_ids = sorted_refs[1:]
+
+        contract_node = Node(
+            id=contract_id,
+            type=NodeType.CONTRACT.value,
+            label=f"Config: {label}",
+            metadata={
+                "contract_type": "config",
+                "producer": producer_id,
+                "consumers": consumer_ids,
+                "status": "active",
+                "inferred": True,
+            },
+        )
+        result.nodes.append(contract_node)
+        existing_node_ids.add(contract_id)
+
+        edge_key = (producer_id, contract_id, EdgeType.PRODUCES.value)
+        if edge_key not in existing_edges:
+            result.edges.append(Edge(
+                source=producer_id,
+                target=contract_id,
+                type=EdgeType.PRODUCES.value,
+                metadata={"inferred": True},
+            ))
+            existing_edges.add(edge_key)
+
+        for cid in consumer_ids:
+            edge_key = (cid, contract_id, EdgeType.CONSUMES_CONTRACT.value)
+            if edge_key not in existing_edges:
+                result.edges.append(Edge(
+                    source=cid,
+                    target=contract_id,
+                    type=EdgeType.CONSUMES_CONTRACT.value,
+                    metadata={"inferred": True},
+                ))
+                existing_edges.add(edge_key)
+
+
+def _infer_data_contracts(result: ScanResult) -> None:
+    """Infer data contracts when a database_table has distinct writers and readers.
+
+    A node with a ``writes`` edge to the table is a writer; one with a
+    ``reads`` edge is a reader.  When at least one writer and one reader exist
+    and they are *different* nodes, a data contract is created.
+    """
+    existing_node_ids = {n.id for n in result.nodes}
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    tables: dict[str, Node] = {}
+    for node in result.nodes:
+        if node.type == NodeType.DATABASE_TABLE.value:
+            tables[node.id] = node
+
+    if not tables:
+        return
+
+    for table_id, table_node in tables.items():
+        writers: set[str] = set()
+        readers: set[str] = set()
+        for edge in result.edges:
+            if edge.target == table_id and edge.type == EdgeType.WRITES.value:
+                writers.add(edge.source)
+            elif edge.target == table_id and edge.type == EdgeType.READS.value:
+                readers.add(edge.source)
+
+        # Only create a contract if there are writers and readers that differ
+        distinct_readers = readers - writers
+        if not writers or not distinct_readers:
+            continue
+
+        label = table_node.label
+        contract_id = f"contract:data:{label}"
+        if contract_id in existing_node_ids:
+            continue
+
+        sorted_writers = sorted(writers)
+        sorted_readers = sorted(distinct_readers)
+
+        contract_node = Node(
+            id=contract_id,
+            type=NodeType.CONTRACT.value,
+            label=f"Data: {label}",
+            metadata={
+                "contract_type": "data",
+                "producer": sorted_writers[0],
+                "consumers": sorted_readers,
+                "status": "active",
+                "inferred": True,
+            },
+        )
+        result.nodes.append(contract_node)
+        existing_node_ids.add(contract_id)
+
+        for writer_id in sorted_writers:
+            edge_key = (writer_id, contract_id, EdgeType.PRODUCES.value)
+            if edge_key not in existing_edges:
+                result.edges.append(Edge(
+                    source=writer_id,
+                    target=contract_id,
+                    type=EdgeType.PRODUCES.value,
+                    metadata={"inferred": True},
+                ))
+                existing_edges.add(edge_key)
+
+        for reader_id in sorted_readers:
+            edge_key = (reader_id, contract_id, EdgeType.CONSUMES_CONTRACT.value)
+            if edge_key not in existing_edges:
+                result.edges.append(Edge(
+                    source=reader_id,
+                    target=contract_id,
+                    type=EdgeType.CONSUMES_CONTRACT.value,
+                    metadata={"inferred": True},
+                ))
+                existing_edges.add(edge_key)
+
+
+def _infer_contract_edges(result: ScanResult) -> None:
+    """Orchestrate all contract inference passes.
+
+    Detects cross-component agreements (API, event, config, and data
+    contracts) and materializes them as ``contract`` nodes with ``produces``
+    and ``consumes_contract`` edges.
+    """
+    _infer_api_contracts(result)
+    _infer_event_contracts(result)
+    _infer_config_contracts(result)
+    _infer_data_contracts(result)
+
+
+# ---------------------------------------------------------------------------
 # Project scanner
 # ---------------------------------------------------------------------------
 
@@ -1165,5 +1506,8 @@ def scan_project(
 
     # Python-specific inheritance inference (backward compat)
     _infer_inheritance_edges(merged, class_registry, file_contents)
+
+    # Contract inference (detects cross-component agreements)
+    _infer_contract_edges(merged)
 
     return merged

@@ -21,6 +21,7 @@ class NodeType(StrEnum):
     EVENT = "event"
     EXTERNAL_API = "external_api"
     MODULE = "module"
+    CONTRACT = "contract"
 
 
 class EdgeType(StrEnum):
@@ -42,3 +43,7 @@ class EdgeType(StrEnum):
     CROSS_REPO_DEPENDS_ON = "cross_repo_depends_on"
     CROSS_REPO_PUBLISHES = "cross_repo_publishes"
     CROSS_REPO_CONSUMES = "cross_repo_consumes"
+    PRODUCES = "produces"
+    CONSUMES_CONTRACT = "consumes_contract"
+    VALIDATES = "validates"
+    VIOLATES = "violates"

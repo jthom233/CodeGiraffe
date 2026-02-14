@@ -29,6 +29,7 @@ class TestNodeTypeEnum:
             (NodeType.EVENT, "event"),
             (NodeType.EXTERNAL_API, "external_api"),
             (NodeType.MODULE, "module"),
+            (NodeType.CONTRACT, "contract"),
         ],
     )
     def test_node_type_values(self, member, expected):
@@ -77,11 +78,34 @@ class TestEdgeTypeEnum:
             (EdgeType.CROSS_REPO_DEPENDS_ON, "cross_repo_depends_on"),
             (EdgeType.CROSS_REPO_PUBLISHES, "cross_repo_publishes"),
             (EdgeType.CROSS_REPO_CONSUMES, "cross_repo_consumes"),
+            (EdgeType.PRODUCES, "produces"),
+            (EdgeType.CONSUMES_CONTRACT, "consumes_contract"),
+            (EdgeType.VALIDATES, "validates"),
+            (EdgeType.VIOLATES, "violates"),
         ],
     )
     def test_edge_type_values(self, member, expected):
         assert member == expected
         assert member.value == expected
+
+
+class TestContractSchemaTypes:
+    """Verify v0.8.0 contract-related schema types."""
+
+    def test_contract_node_type_exists(self):
+        assert NodeType.CONTRACT == "contract"
+
+    def test_produces_edge_type_exists(self):
+        assert EdgeType.PRODUCES == "produces"
+
+    def test_consumes_contract_edge_type_exists(self):
+        assert EdgeType.CONSUMES_CONTRACT == "consumes_contract"
+
+    def test_validates_edge_type_exists(self):
+        assert EdgeType.VALIDATES == "validates"
+
+    def test_violates_edge_type_exists(self):
+        assert EdgeType.VIOLATES == "violates"
 
 
 class TestEnumStringBehavior:

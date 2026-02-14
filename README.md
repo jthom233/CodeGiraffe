@@ -98,7 +98,7 @@ Add to your `claude_desktop_config.json`:
 
 ## MCP Tools
 
-Code Giraffe exposes 22 tools that any MCP client can call:
+Code Giraffe exposes 25 tools that any MCP client can call:
 
 ### `codegiraffe_init`
 
@@ -288,6 +288,7 @@ Export the architecture graph as a visualization format for documentation or das
 | `event` | Stadium |
 | `external_api` | Circle |
 | `module` | Rectangle |
+| `contract` | Hexagon |
 
 **D3 format** generates a JSON structure compatible with D3.js force-directed graph visualizations, suitable for embedding in web dashboards.
 
@@ -555,11 +556,72 @@ codegiraffe_cycles(project_path="/home/user/my-project", max_cycles=10)
 
 ---
 
+### `codegiraffe_contracts`
+
+List and filter cross-system contracts in the architecture graph. Contracts represent API schemas, event schemas, configuration contracts, and data contracts that couple different parts of the system.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `contract_type` | `str \| None` | `None` | Filter by contract type: `"api"`, `"event"`, `"config"`, `"data"` |
+| `status` | `str \| None` | `None` | Filter by validation status |
+
+**Example:**
+```
+codegiraffe_contracts(project_path="/home/user/my-project", contract_type="api")
+--> [{"id": "contract:api:/api/users", "type": "api", "producers": [...], "consumers": [...], "status": "valid"}]
+```
+
+---
+
+### `codegiraffe_validate_contracts`
+
+Validate the integrity of cross-system contracts. Checks that all contract producers and consumers exist, that contracts have at least one producer, and detects orphaned or broken contracts.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+
+**Example:**
+```
+codegiraffe_validate_contracts(project_path="/home/user/my-project")
+--> {"valid": 12, "warnings": 2, "errors": 1, "details": [...]}
+```
+
+---
+
+### `codegiraffe_add_contract`
+
+Manually create a cross-system contract node with its producer and consumer relationships. The contract node and its edges are marked as manual so they survive re-scans.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `contract_id` | `str` | required | Unique contract identifier |
+| `contract_type` | `str` | required | Contract type: `"api"`, `"event"`, `"config"`, `"data"` |
+| `producers` | `list[str]` | `[]` | Node IDs that produce/define this contract |
+| `consumers` | `list[str]` | `[]` | Node IDs that consume/depend on this contract |
+| `metadata` | `str` | `"{}"` | JSON string of extra key-value pairs |
+
+**Example:**
+```
+codegiraffe_add_contract(
+  project_path="/home/user/my-project",
+  contract_id="contract:api:user-schema",
+  contract_type="api",
+  producers=["endpoint:/api/users"],
+  consumers=["component:UserList", "service:UserSync"]
+)
+--> "Created contract contract:api:user-schema with 1 producer(s) and 2 consumer(s)"
+```
+
+---
+
 ## Architecture
 
 ```
 src/codegiraffe/
-├── server.py            # FastMCP server + 22 tool definitions
+├── server.py            # FastMCP server + 25 tool definitions
 ├── graph.py             # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph engine
 ├── storage.py           # StorageBackend protocol + JSON file implementation
 ├── sqlite_storage.py    # SQLite storage backend for larger graphs
@@ -616,9 +678,9 @@ src/codegiraffe/
 
 ### Built-in Types
 
-**Node types:** `service`, `endpoint`, `database_table`, `queue`, `env_var`, `config`, `worker`, `frontend_component`, `event`, `external_api`, `module`
+**Node types:** `service`, `endpoint`, `database_table`, `queue`, `env_var`, `config`, `worker`, `frontend_component`, `event`, `external_api`, `module`, `contract`
 
-**Edge types:** `calls`, `reads`, `writes`, `publishes`, `consumes`, `depends_on`, `configures`, `owns`, `triggers`, `imports`, `implements`, `contains`, `cross_repo_calls`, `cross_repo_depends_on`, `cross_repo_publishes`, `cross_repo_consumes`
+**Edge types:** `calls`, `reads`, `writes`, `publishes`, `consumes`, `depends_on`, `configures`, `owns`, `triggers`, `imports`, `implements`, `contains`, `produces`, `consumes_contract`, `validates`, `violates`, `cross_repo_calls`, `cross_repo_depends_on`, `cross_repo_publishes`, `cross_repo_consumes`
 
 Custom types are fully supported -- any string works as a node or edge type.
 
@@ -986,6 +1048,26 @@ Before modifying any code:
    --> Visualize the subgraph for documentation or review
 ```
 
+### Cross-System Contracts
+
+Code Giraffe models cross-system contracts -- API schemas, event schemas, configuration contracts, and data contracts -- as first-class `contract` nodes in the architecture graph. Contracts capture the coupling between producers (who define the contract) and consumers (who depend on it), making it possible to understand the full impact of schema changes, API modifications, and event format updates.
+
+The scanner automatically infers contracts from detected patterns (e.g., API endpoints become API contracts, event emitters become event contracts). You can also create contracts manually:
+
+```
+1. codegiraffe_add_contract(contract_id="contract:api:user-schema", contract_type="api",
+     producers=["endpoint:/api/users"], consumers=["component:UserList"])
+   --> Create a contract with explicit producer/consumer relationships
+
+2. codegiraffe_contracts(contract_type="api")
+   --> List all API contracts with their producers and consumers
+
+3. codegiraffe_validate_contracts()
+   --> Check contract integrity (orphaned consumers, missing producers, etc.)
+```
+
+Contract-aware blast radius analysis automatically flags contract consumers as **critical** severity, ensuring that changes to shared contracts surface all downstream impact.
+
 ### Multi-Agent Development
 
 When running multiple agents in parallel:
@@ -1006,7 +1088,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-754+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers (all 9 languages with import/implementation detection), query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, web dashboard, blast radius analysis, risk assessment, and cycle detection.
+791+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers (all 9 languages with import/implementation detection), query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, web dashboard, blast radius analysis, risk assessment, cycle detection, and cross-system contracts.
 
 ### Project Constitution
 
@@ -1081,6 +1163,16 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Enhanced `codegiraffe_context_for` with `include_impact` parameter for blast radius + risk on top nodes
 - [x] Enhanced `codegiraffe_hotspots` with `metrics` parameter for multi-metric analysis
 - [x] 754+ tests
+
+### v0.8.0 (completed)
+
+- [x] 3 new MCP tools: `codegiraffe_contracts`, `codegiraffe_validate_contracts`, `codegiraffe_add_contract` (25 tools total)
+- [x] Cross-system contract modeling: `contract` node type with `produces`, `consumes_contract`, `validates`, `violates` edge types
+- [x] Contract inference: automatic detection of API, event, config, and data contracts from scanned patterns
+- [x] Contract-aware blast radius: contract consumers receive critical severity in impact analysis
+- [x] Contract validation: integrity checks for producer/consumer relationships
+- [x] Dashboard contract styling: hexagonal purple nodes for contract visualization
+- [x] 791+ tests
 
 ### Future
 

@@ -21,8 +21,10 @@ from codegiraffe.query import (
     context_for_task,
     detect_drift,
     generate_impact_summary,
+    get_contracts,
     query_by_node,
     query_by_type,
+    validate_contracts,
 )
 from codegiraffe.scanner import scan_project
 from codegiraffe.storage import JSONStorage, StorageBackend
@@ -542,6 +544,239 @@ def codegiraffe_cycles(project_path: str, max_cycles: int = 20) -> str:
         return "\n".join(lines)
     except Exception as exc:
         return f"Error detecting cycles: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Contract tools
+# ---------------------------------------------------------------------------
+
+VALID_CONTRACT_TYPES = {"api", "event", "data", "config"}
+
+
+@mcp.tool()
+def codegiraffe_contracts(
+    project_path: str,
+    contract_type: str | None = None,
+    status: str | None = None,
+    node_id: str | None = None,
+) -> str:
+    """List all contracts in the architecture graph.
+
+    Contracts represent agreements between components (APIs, events, data
+    schemas, config). Optionally filter by contract_type, status, or a
+    specific producer/consumer node_id.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+        contracts = get_contracts(
+            graph,
+            contract_type=contract_type,
+            status=status,
+            node_id=node_id,
+        )
+        if not contracts:
+            return (
+                "No contracts found. Use `codegiraffe_add_contract` to register "
+                "a contract between components."
+            )
+        lines = ["## Contracts", ""]
+        lines.append(f"**{len(contracts)} contract(s) found**")
+        lines.append("")
+        for c in contracts:
+            lines.append(f"### {c['label']}")
+            lines.append(f"- **Type:** {c['contract_type']}")
+            lines.append(f"- **Status:** {c['status']}")
+            if c.get("version"):
+                lines.append(f"- **Version:** {c['version']}")
+            prod = c["producer"]
+            lines.append(
+                f"- **Producer:** {prod['label']}"
+                + (f" ({prod.get('type', '')})" if prod.get("type") else "")
+            )
+            if c["consumers"]:
+                lines.append("- **Consumers:**")
+                for consumer in c["consumers"]:
+                    lines.append(
+                        f"  - {consumer['label']}"
+                        + (f" ({consumer.get('type', '')})" if consumer.get("type") else "")
+                    )
+            else:
+                lines.append("- **Consumers:** none")
+            lines.append("")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error listing contracts: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_validate_contracts(project_path: str) -> str:
+    """Validate all contracts in the architecture graph.
+
+    Checks whether producer and consumer nodes referenced by each contract
+    still exist in the graph. Reports valid, broken, orphaned, and
+    deprecated-with-active-consumers contracts.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+        result = validate_contracts(graph)
+        total = result["total_contracts"]
+        if total == 0:
+            return (
+                "No contracts found to validate. Use `codegiraffe_add_contract` "
+                "to register contracts first."
+            )
+        lines = ["## Contract Validation Report", ""]
+        lines.append(f"**Total contracts:** {total}")
+        lines.append("")
+
+        if result["valid"]:
+            lines.append(f"### Valid ({len(result['valid'])})")
+            lines.append("")
+            for c in result["valid"]:
+                lines.append(f"- **{c['label']}** ({c['contract_type']})")
+            lines.append("")
+
+        if result["broken"]:
+            lines.append(f"### Broken -- Producer Missing ({len(result['broken'])})")
+            lines.append("")
+            for c in result["broken"]:
+                lines.append(
+                    f"- **{c['label']}** -- producer `{c['producer']}` not in graph"
+                )
+            lines.append("")
+
+        if result["orphaned"]:
+            lines.append(f"### Orphaned -- All Consumers Missing ({len(result['orphaned'])})")
+            lines.append("")
+            for c in result["orphaned"]:
+                lines.append(
+                    f"- **{c['label']}** -- consumers {c['consumers']} not in graph"
+                )
+            lines.append("")
+
+        if result["deprecated_with_consumers"]:
+            lines.append(
+                f"### Deprecated With Active Consumers "
+                f"({len(result['deprecated_with_consumers'])})"
+            )
+            lines.append("")
+            for c in result["deprecated_with_consumers"]:
+                lines.append(
+                    f"- **{c['label']}** -- deprecated but still consumed by "
+                    f"{c['consumers_existing']}"
+                )
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error validating contracts: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_add_contract(
+    project_path: str,
+    name: str,
+    contract_type: str,
+    producer: str,
+    consumers: str,
+    version: str = "",
+    metadata: str = "{}",
+) -> str:
+    """Add a contract to the architecture graph.
+
+    A contract represents an agreement between a producer and one or more
+    consumers (e.g. an API contract, event schema, data format, config).
+
+    *consumers* is a comma-separated string of node IDs.
+    *contract_type* must be one of: api, event, data, config.
+    *metadata* is a JSON string of extra key/value pairs.
+    """
+    try:
+        if contract_type not in VALID_CONTRACT_TYPES:
+            return (
+                f"Error: invalid contract_type '{contract_type}'. "
+                f"Must be one of: {', '.join(sorted(VALID_CONTRACT_TYPES))}"
+            )
+
+        graph = _ensure_graph(project_path)
+
+        # Parse metadata JSON
+        try:
+            extra_meta = json.loads(metadata)
+        except json.JSONDecodeError:
+            return "Error: metadata is not valid JSON"
+
+        consumer_list = [c.strip() for c in consumers.split(",") if c.strip()]
+
+        contract_id = f"contract:{name}"
+
+        # Build contract metadata
+        contract_meta: dict = {
+            "contract_type": contract_type,
+            "producer": producer,
+            "consumers": consumer_list,
+            "version": version,
+            "status": "active",
+            **extra_meta,
+        }
+
+        # Create contract node
+        graph.add_node(
+            Node(
+                id=contract_id,
+                type="contract",
+                label=name,
+                metadata=contract_meta,
+                manual=True,
+            )
+        )
+
+        # Collect warnings for missing nodes
+        warnings: list[str] = []
+
+        # Create produces edge: producer -> contract
+        if producer not in graph.graph:
+            warnings.append(f"Warning: producer '{producer}' not found in graph")
+        graph.add_edge(
+            Edge(
+                source=producer,
+                target=contract_id,
+                type="produces",
+                manual=True,
+            )
+        )
+
+        # Create consumes_contract edges: consumer -> contract
+        for cid in consumer_list:
+            if cid not in graph.graph:
+                warnings.append(f"Warning: consumer '{cid}' not found in graph")
+            graph.add_edge(
+                Edge(
+                    source=cid,
+                    target=contract_id,
+                    type="consumes_contract",
+                    manual=True,
+                )
+            )
+
+        # Persist
+        _storage.save(project_path, graph.to_data())
+
+        result_lines = [
+            f"Added contract '{name}' ({contract_type}): "
+            f"{producer} --[produces]--> {contract_id}"
+        ]
+        for cid in consumer_list:
+            result_lines.append(
+                f"  {cid} --[consumes_contract]--> {contract_id}"
+            )
+        if warnings:
+            result_lines.append("")
+            result_lines.extend(warnings)
+
+        return "\n".join(result_lines)
+    except Exception as exc:
+        return f"Error adding contract: {exc}"
 
 
 # ---------------------------------------------------------------------------

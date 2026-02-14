@@ -324,3 +324,85 @@ class TestBlastRadiusEdgeCases:
         assert result["downstream"] == []
         assert "upstream" in result
         assert len(result["upstream"]) == 4  # A, B, C, D
+
+
+# ---------------------------------------------------------------------------
+# TestContractAwareBlastRadius
+# ---------------------------------------------------------------------------
+
+
+class TestContractAwareBlastRadius:
+    """Tests for contract-aware blast radius computation."""
+
+    @pytest.fixture
+    def contract_graph(self):
+        """Build a graph: svc:A produces contract:api consumed by svc:B and svc:C."""
+        g = ArchGraph()
+        g.add_node(
+            Node(id="svc:A", type=NodeType.SERVICE, label="Service A", file_path="a.py")
+        )
+        g.add_node(
+            Node(id="svc:B", type=NodeType.SERVICE, label="Service B", file_path="b.py")
+        )
+        g.add_node(
+            Node(id="svc:C", type=NodeType.SERVICE, label="Service C", file_path="c.py")
+        )
+        g.add_node(
+            Node(
+                id="contract:api",
+                type=NodeType.CONTRACT,
+                label="User API Contract",
+                metadata={
+                    "producer": "svc:A",
+                    "consumers": ["svc:B", "svc:C"],
+                    "contract_type": "REST",
+                },
+            )
+        )
+        # Edge from A to the contract (produces) — optional structural edge
+        g.add_edge(
+            Edge(source="svc:A", target="contract:api", type=EdgeType.PRODUCES)
+        )
+        return g
+
+    def test_blast_radius_includes_contract_consumers(self, contract_graph):
+        """Blast radius of A should include B and C with severity 'critical'."""
+        result = compute_blast_radius(contract_graph, "svc:A")
+        ci = result["contract_impact"]
+        consumer_ids = {item["node_id"] for item in ci}
+        assert "svc:B" in consumer_ids
+        assert "svc:C" in consumer_ids
+        for item in ci:
+            assert item["severity"] == "critical"
+            assert item["distance"] == "contract"
+
+    def test_blast_radius_no_contract_impact_without_contracts(self, linear_chain_graph):
+        """Graph without contracts should have empty contract_impact."""
+        result = compute_blast_radius(linear_chain_graph, "mod:A")
+        assert result["contract_impact"] == []
+
+    def test_blast_radius_contract_impact_count_in_total(self, contract_graph):
+        """total_impact_count should include contract consumers."""
+        result = compute_blast_radius(contract_graph, "svc:A")
+        downstream_count = len(result["downstream"])
+        contract_count = len(result["contract_impact"])
+        assert contract_count == 2  # svc:B and svc:C
+        assert result["total_impact_count"] == downstream_count + contract_count
+
+    def test_impact_summary_includes_contract_section(self, contract_graph):
+        """Markdown output should contain 'Contract Impact' section."""
+        blast = compute_blast_radius(contract_graph, "svc:A")
+        summary = generate_impact_summary(blast, contract_graph)
+        assert "### Contract Impact" in summary
+        assert "consumers at risk" in summary
+        assert "Service B" in summary
+        assert "Service C" in summary
+        assert "REST" in summary
+        assert "User API Contract" in summary
+        assert "CRITICAL" in summary
+
+    def test_impact_summary_no_contract_section_without_contracts(self, linear_chain_graph):
+        """No contracts in graph means no 'Contract Impact' section."""
+        blast = compute_blast_radius(linear_chain_graph, "mod:A")
+        summary = generate_impact_summary(blast, linear_chain_graph)
+        assert "### Contract Impact" not in summary
