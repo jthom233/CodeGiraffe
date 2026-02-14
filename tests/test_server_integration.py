@@ -320,3 +320,39 @@ class TestSyncVersioning:
         messages = [entry["message"] for entry in history]
         assert "Init" in messages
         assert "Sync" in messages
+
+
+# ---------------------------------------------------------------------------
+# include_tests parameter tests
+# ---------------------------------------------------------------------------
+
+
+class TestIncludeTests:
+    def test_init_accepts_include_tests(self, tmp_path):
+        """T023: codegiraffe_init accepts include_tests parameter."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_app.py").write_text("class TestAppService:\n    pass\n")
+
+        # Without include_tests (default)
+        result = codegiraffe_init(str(tmp_path))
+        assert "Initialized graph" in result
+
+    def test_init_with_include_tests_true(self, tmp_path):
+        """T023: codegiraffe_init with include_tests=True includes test nodes."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_app.py").write_text("class TestAppService:\n    pass\n")
+
+        result = codegiraffe_init(str(tmp_path), include_tests=True)
+        assert "Initialized graph" in result
+
+    def test_sync_accepts_include_tests(self, tmp_path):
+        """T023: codegiraffe_sync accepts include_tests parameter."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+
+        codegiraffe_init(str(tmp_path))
+        result = codegiraffe_sync(str(tmp_path), include_tests=False)
+        assert "Sync complete" in result
