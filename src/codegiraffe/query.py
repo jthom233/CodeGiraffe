@@ -478,6 +478,46 @@ def _context_for_task_keywords(
 # ---------------------------------------------------------------------------
 
 
+def _compute_contract_impact(graph: ArchGraph, node_id: str) -> list[dict[str, Any]]:
+    """Find consumers of contracts produced by *node_id*.
+
+    Walks all ``contract`` nodes whose ``metadata["producer"]`` equals
+    *node_id*, then collects every consumer listed in
+    ``metadata["consumers"]`` that exists in the graph.
+
+    Returns a list of impact entries with ``severity="critical"`` and
+    ``distance="contract"``.
+    """
+    impact: list[dict[str, Any]] = []
+    for nid, data in graph.graph.nodes(data=True):
+        node_obj = data.get("node")
+        if node_obj is None:
+            continue
+        if node_obj.type != "contract":
+            continue
+        if node_obj.metadata.get("producer") != node_id:
+            continue
+        contract_id = nid
+        consumers = node_obj.metadata.get("consumers", [])
+        for consumer_id in consumers:
+            if consumer_id not in graph.graph:
+                continue
+            consumer_data = graph.graph.nodes[consumer_id].get("node")
+            if consumer_data is None:
+                continue
+            impact.append({
+                "node_id": consumer_id,
+                "label": consumer_data.label,
+                "type": consumer_data.type,
+                "distance": "contract",
+                "severity": "critical",
+                "path": [node_id, contract_id, consumer_id],
+                "contract_name": node_obj.label,
+                "contract_type": node_obj.metadata.get("contract_type", "unknown"),
+            })
+    return impact
+
+
 def compute_blast_radius(
     graph: ArchGraph,
     node_id: str,
@@ -607,10 +647,14 @@ def compute_blast_radius(
                     "centrality": round(score, 4),
                 })
 
+    # Contract impact — consumers of contracts produced by this node
+    contract_impact = _compute_contract_impact(graph, node_id)
+
     result: dict[str, Any] = {
         "target_node": target_info,
         "downstream": downstream,
-        "total_impact_count": len(downstream),
+        "total_impact_count": len(downstream) + len(contract_impact),
+        "contract_impact": contract_impact,
         "cycles": relevant_cycles,
         "critical_paths": critical_paths,
     }
@@ -722,8 +766,23 @@ def generate_impact_summary(blast_radius: dict[str, Any], graph: ArchGraph) -> s
             )
         lines.append("")
 
+    # --- Contract Impact ---
+    contract_impact = blast_radius.get("contract_impact", [])
+    if contract_impact:
+        lines.append(f"\n### Contract Impact ({len(contract_impact)} consumers at risk)")
+        lines.append("")
+        for item in contract_impact:
+            contract_name = item.get("contract_name", "unknown")
+            contract_type = item.get("contract_type", "unknown")
+            lines.append(f"- **{item['label']}** ({item['type']}) — CRITICAL: consumes {contract_type} contract \"{contract_name}\"")
+        lines.append("")
+
     # --- Recommendations ---
     recommendations: list[str] = []
+    if contract_impact:
+        recommendations.append(
+            f"**CRITICAL:** Changing this node breaks {len(contract_impact)} contract consumer(s). Coordinate with dependent teams before proceeding."
+        )
     if direct:
         # Recommend testing the direct dep with the highest downstream reach
         most_connected = max(
@@ -758,6 +817,164 @@ def generate_impact_summary(blast_radius: dict[str, Any], graph: ArchGraph) -> s
         lines.append("")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Contract queries
+# ---------------------------------------------------------------------------
+
+
+def get_contracts(
+    graph: ArchGraph,
+    contract_type: str | None = None,
+    status: str | None = None,
+    node_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Get all contract nodes from the graph, with optional filtering.
+
+    Parameters
+    ----------
+    graph:
+        The architecture graph to query.
+    contract_type:
+        Filter by contract type (e.g. "api", "event", "data", "config").
+    status:
+        Filter by contract status (e.g. "active", "deprecated").
+    node_id:
+        Filter to contracts where *node_id* is the producer or a consumer.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        List of enriched contract dicts with producer/consumer details.
+    """
+    contracts: list[dict[str, Any]] = []
+
+    for nid in graph.graph.nodes:
+        node_data = graph.graph.nodes[nid].get("node")
+        if node_data is None or node_data.type != "contract":
+            continue
+
+        meta = node_data.metadata
+
+        # Filter by contract_type
+        if contract_type is not None and meta.get("contract_type") != contract_type:
+            continue
+
+        # Filter by status
+        if status is not None and meta.get("status") != status:
+            continue
+
+        # Filter by node_id (producer or consumer)
+        if node_id is not None:
+            producer_id = meta.get("producer", "")
+            consumer_ids = meta.get("consumers", [])
+            if node_id != producer_id and node_id not in consumer_ids:
+                continue
+
+        # Resolve producer details
+        producer_id = meta.get("producer", "")
+        producer_info: dict[str, Any] = {"id": producer_id, "label": producer_id}
+        if producer_id and producer_id in graph.graph:
+            p_node = graph.graph.nodes[producer_id].get("node")
+            if p_node is not None:
+                producer_info = {
+                    "id": producer_id,
+                    "label": p_node.label,
+                    "file_path": p_node.file_path,
+                    "type": p_node.type,
+                }
+
+        # Resolve consumer details
+        consumer_ids = meta.get("consumers", [])
+        consumers_info: list[dict[str, Any]] = []
+        for cid in consumer_ids:
+            c_info: dict[str, Any] = {"id": cid, "label": cid}
+            if cid in graph.graph:
+                c_node = graph.graph.nodes[cid].get("node")
+                if c_node is not None:
+                    c_info = {
+                        "id": cid,
+                        "label": c_node.label,
+                        "file_path": c_node.file_path,
+                        "type": c_node.type,
+                    }
+            consumers_info.append(c_info)
+
+        contracts.append({
+            "id": nid,
+            "label": node_data.label,
+            "contract_type": meta.get("contract_type", "unknown"),
+            "status": meta.get("status", "unknown"),
+            "producer": producer_info,
+            "consumers": consumers_info,
+            "version": meta.get("version", ""),
+        })
+
+    return contracts
+
+
+def validate_contracts(graph: ArchGraph) -> dict[str, Any]:
+    """Validate all contract nodes in the graph.
+
+    Checks that producer and consumer nodes referenced by each contract
+    actually exist in the graph.
+
+    Returns
+    -------
+    dict[str, Any]
+        Classification of contracts into valid, broken, orphaned, and
+        deprecated_with_consumers, plus total_contracts count.
+    """
+    valid: list[dict[str, Any]] = []
+    broken: list[dict[str, Any]] = []
+    orphaned: list[dict[str, Any]] = []
+    deprecated_with_consumers: list[dict[str, Any]] = []
+
+    for nid in graph.graph.nodes:
+        node_data = graph.graph.nodes[nid].get("node")
+        if node_data is None or node_data.type != "contract":
+            continue
+
+        meta = node_data.metadata
+        producer_id = meta.get("producer", "")
+        consumer_ids = meta.get("consumers", [])
+
+        producer_exists = producer_id != "" and producer_id in graph.graph
+        consumers_exist = [cid for cid in consumer_ids if cid in graph.graph]
+        all_consumers_missing = len(consumer_ids) > 0 and len(consumers_exist) == 0
+
+        entry = {
+            "id": nid,
+            "label": node_data.label,
+            "contract_type": meta.get("contract_type", "unknown"),
+            "status": meta.get("status", "unknown"),
+            "producer": producer_id,
+            "consumers": consumer_ids,
+            "producer_exists": producer_exists,
+            "consumers_existing": consumers_exist,
+        }
+
+        # Check for deprecated with active consumers
+        if meta.get("status") == "deprecated" and len(consumers_exist) > 0:
+            deprecated_with_consumers.append(entry)
+        # Check for broken (producer missing)
+        elif not producer_exists:
+            broken.append(entry)
+        # Check for orphaned (all consumers missing)
+        elif all_consumers_missing:
+            orphaned.append(entry)
+        # Otherwise valid
+        else:
+            valid.append(entry)
+
+    return {
+        "valid": valid,
+        "broken": broken,
+        "orphaned": orphaned,
+        "deprecated_with_consumers": deprecated_with_consumers,
+        "total_contracts": len(valid) + len(broken) + len(orphaned) + len(deprecated_with_consumers),
+    }
 
 
 def detect_drift(

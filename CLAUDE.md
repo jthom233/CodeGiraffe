@@ -1,11 +1,11 @@
 # Code Giraffe Development Guidelines
 
 ## Active Technologies
-- **Version**: 0.7.0
+- **Version**: 0.8.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - **Storage**: JSON files + SQLite + Neo4j (optional)
-- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (754+ tests)
+- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (791+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
 
@@ -13,7 +13,7 @@
 
 ```text
 src/codegiraffe/          # Main package
-├── server.py             # FastMCP server + 22 MCP tool definitions
+├── server.py             # FastMCP server + 25 MCP tool definitions
 ├── graph.py              # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph
 ├── storage.py            # StorageBackend protocol + JSONStorage
 ├── sqlite_storage.py     # SQLiteStorage implementation
@@ -39,7 +39,7 @@ src/codegiraffe/          # Main package
     ├── php.py
     └── ruby.py
 
-tests/                    # 754+ tests
+tests/                    # 791+ tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 
@@ -69,6 +69,7 @@ python src/codegiraffe/server.py
 - `schema.py` (not types.py) to avoid stdlib shadow
 - Node types include `module` (v0.4.0); edge types include `imports`, `implements`, `contains` (v0.4.0)
 - Recognizers return `ScanResult` with `ImportInfo` and `ImplementationInfo` data classes for language-agnostic import/implementation detection (v0.6.0)
+- `contract` node type with `produces`, `consumes_contract`, `validates`, `violates` edge types for cross-system contract modeling (v0.8.0)
 
 ## Key Patterns
 
@@ -92,6 +93,7 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
+- v0.8.0: Cross-system contracts -- `codegiraffe_contracts` (list/filter), `codegiraffe_validate_contracts` (integrity check), `codegiraffe_add_contract` (manual creation); contract inference for API, event, config, and data contracts; contract-aware blast radius with critical severity for contract consumers; dashboard contract styling (hexagonal purple nodes); 25 MCP tools total; 791+ tests
 - v0.7.0: Impact analysis tools -- `codegiraffe_blast_radius` (downstream impact by severity), `codegiraffe_risk_assessment` (composite risk scoring), `codegiraffe_cycles` (circular dependency detection); enhanced `codegiraffe_context_for` with `include_impact` parameter; enhanced `codegiraffe_hotspots` with `metrics` parameter; 22 MCP tools total; 754+ tests
 - v0.6.0 (006-language-agnostic-intelligence): Language-agnostic scanner intelligence -- universal module nodes, `contains` edges, import detection, and implementation/inheritance detection for all 9 languages; `ImportInfo` and `ImplementationInfo` data classes on `ScanResult` for structured recognizer output; Go `go.mod`-aware import parsing and interface implementation detection; test file exclusion extended to all languages; 698+ tests
 - v0.5.0: 4 new language recognizers (C#, C/C++, PHP, Ruby — now 9 languages); 3 new dashboard layouts (grid, concentric, breadthfirst); dashboard improvements (legend, stats, edge tooltips, refined colors); 566+ tests

@@ -15,9 +15,11 @@ import pytest
 
 import codegiraffe.server as server_module
 from codegiraffe.server import (
+    codegiraffe_add_contract,
     codegiraffe_add_relation,
     codegiraffe_blast_radius,
     codegiraffe_context_for,
+    codegiraffe_contracts,
     codegiraffe_cross_edges,
     codegiraffe_cross_query,
     codegiraffe_cycles,
@@ -31,6 +33,7 @@ from codegiraffe.server import (
     codegiraffe_risk_assessment,
     codegiraffe_snapshot,
     codegiraffe_sync,
+    codegiraffe_validate_contracts,
 )
 from codegiraffe.storage import JSONStorage
 from codegiraffe.versioning import VersionStore
@@ -611,3 +614,133 @@ class TestEnhancedHotspots:
         for item in data:
             assert "node_id" in item
             assert "score" in item
+
+
+class TestContractTools:
+    """Tests for the contract MCP tools."""
+
+    def _init_project(self, tmp_path):
+        """Create a minimal project with a couple of service nodes."""
+        (tmp_path / "app.py").write_text(
+            "class AppService:\n    pass\n"
+        )
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        # Add some service nodes to act as producer/consumers
+        codegiraffe_add_relation(project_path, "svc-orders", "svc-payments", "calls")
+        codegiraffe_add_relation(project_path, "svc-orders", "svc-inventory", "calls")
+        return project_path
+
+    def test_contracts_tool_returns_markdown(self, tmp_path):
+        """Add a contract and verify the contracts tool returns markdown."""
+        project_path = self._init_project(tmp_path)
+        codegiraffe_add_contract(
+            project_path,
+            name="OrderCreated",
+            contract_type="event",
+            producer="svc-orders",
+            consumers="svc-payments,svc-inventory",
+        )
+        result = codegiraffe_contracts(project_path)
+        assert "## Contracts" in result
+        assert "OrderCreated" in result
+
+    def test_contracts_tool_no_contracts_helpful_message(self, tmp_path):
+        """No contracts returns a helpful message mentioning codegiraffe_add_contract."""
+        (tmp_path / "app.py").write_text("class Svc:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        result = codegiraffe_contracts(project_path)
+        assert "codegiraffe_add_contract" in result
+
+    def test_contracts_tool_filter_by_type(self, tmp_path):
+        """Filter contracts by type returns only matching contracts."""
+        project_path = self._init_project(tmp_path)
+        codegiraffe_add_contract(
+            project_path,
+            name="OrderCreated",
+            contract_type="event",
+            producer="svc-orders",
+            consumers="svc-payments",
+        )
+        codegiraffe_add_contract(
+            project_path,
+            name="OrderAPI",
+            contract_type="api",
+            producer="svc-orders",
+            consumers="svc-inventory",
+        )
+        # Filter by api only
+        result = codegiraffe_contracts(project_path, contract_type="api")
+        assert "OrderAPI" in result
+        assert "OrderCreated" not in result
+
+    def test_validate_contracts_tool_valid(self, tmp_path):
+        """Validate returns valid contracts when producer/consumers exist."""
+        project_path = self._init_project(tmp_path)
+        codegiraffe_add_contract(
+            project_path,
+            name="OrderCreated",
+            contract_type="event",
+            producer="svc-orders",
+            consumers="svc-payments,svc-inventory",
+        )
+        result = codegiraffe_validate_contracts(project_path)
+        assert "## Contract Validation Report" in result
+        assert "Valid" in result
+
+    def test_add_contract_creates_nodes_and_edges(self, tmp_path):
+        """Adding a contract creates the contract node with correct metadata and edges."""
+        project_path = self._init_project(tmp_path)
+        codegiraffe_add_contract(
+            project_path,
+            name="PaymentSchema",
+            contract_type="data",
+            producer="svc-payments",
+            consumers="svc-orders",
+            version="1.0.0",
+        )
+        # Reload graph and inspect
+        from codegiraffe.server import _ensure_graph
+        graph = _ensure_graph(project_path)
+
+        # Contract node exists
+        assert "contract:PaymentSchema" in graph.graph
+        node_data = graph.graph.nodes["contract:PaymentSchema"].get("node")
+        assert node_data is not None
+        assert node_data.type == "contract"
+        assert node_data.metadata["contract_type"] == "data"
+        assert node_data.metadata["producer"] == "svc-payments"
+        assert "svc-orders" in node_data.metadata["consumers"]
+        assert node_data.metadata["version"] == "1.0.0"
+        assert node_data.metadata["status"] == "active"
+        assert node_data.manual is True
+
+        # Produces edge exists
+        edge_data = graph.graph.edges.get(
+            ("svc-payments", "contract:PaymentSchema"), {}
+        )
+        edge_obj = edge_data.get("edge")
+        assert edge_obj is not None
+        assert edge_obj.type == "produces"
+
+        # Consumes_contract edge exists
+        edge_data = graph.graph.edges.get(
+            ("svc-orders", "contract:PaymentSchema"), {}
+        )
+        edge_obj = edge_data.get("edge")
+        assert edge_obj is not None
+        assert edge_obj.type == "consumes_contract"
+
+    def test_add_contract_invalid_type_returns_error(self, tmp_path):
+        """Invalid contract_type returns an error string, does not crash."""
+        project_path = self._init_project(tmp_path)
+        result = codegiraffe_add_contract(
+            project_path,
+            name="BadContract",
+            contract_type="invalid_type",
+            producer="svc-orders",
+            consumers="svc-payments",
+        )
+        assert "Error" in result
+        assert "invalid_type" in result
