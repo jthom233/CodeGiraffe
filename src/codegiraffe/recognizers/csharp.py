@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -75,6 +75,10 @@ _CS_CLASS_RE = re.compile(
 )
 
 
+_CS_USING_STMT_RE = re.compile(r'using\s+([\w.]+)\s*;', re.MULTILINE)
+_CS_NAMESPACE_DECL_RE = re.compile(r'namespace\s+([\w.]+)', re.MULTILINE)
+_CS_CLASS_INHERITANCE_RE = re.compile(r'class\s+(\w+)(?:<[^>]*>)?\s*:\s*([\w\s,.<>]+?)(?:\s*\{|\s*where)')
+
 # ---------------------------------------------------------------------------
 # Recognizer
 # ---------------------------------------------------------------------------
@@ -93,6 +97,22 @@ class CSharpRecognizer:
         - DI registrations                     -> ``service`` nodes
         - Class definitions (fallback)         -> ``service`` nodes
     """
+
+    def __init__(self) -> None:
+        self._project_namespaces: set[str] = set()
+
+    def set_project_root(self, project_root: str) -> None:
+        self._project_namespaces = set()
+        root = Path(project_root)
+        for cs_file in root.rglob("*.cs"):
+            try:
+                text = cs_file.read_text(encoding="utf-8", errors="replace")[:1000]
+                for match in _CS_NAMESPACE_DECL_RE.finditer(text):
+                    parts = match.group(1).split(".")
+                    if parts:
+                        self._project_namespaces.add(parts[0])
+            except OSError:
+                continue
 
     def recognize(self, file_path: Path, content: str) -> ScanResult:
         """Scan *content* of a C# file and return discovered nodes/edges."""
@@ -284,4 +304,19 @@ class CSharpRecognizer:
                         )
                     )
 
-        return ScanResult(nodes=nodes, edges=edges)
+        imports: list[ImportInfo] = []
+        _external_ns = {"System", "Microsoft", "Newtonsoft", "NUnit", "Xunit"}
+        for match in _CS_USING_STMT_RE.finditer(content):
+            using_path = match.group(1)
+            root_ns = using_path.split(".")[0]
+            if root_ns in self._project_namespaces and root_ns not in _external_ns:
+                imports.append(ImportInfo(module_path=using_path, symbols=[using_path.split(".")[-1]], style="absolute"))
+
+        implementations: list[ImplementationInfo] = []
+        for match in _CS_CLASS_INHERITANCE_RE.finditer(content):
+            child = match.group(1)
+            for base in [b.strip().split("<")[0].strip() for b in match.group(2).split(",") if b.strip()]:
+                if base and base[0].isupper():
+                    implementations.append(ImplementationInfo(child_class=child, parent_class=base, file_path=str(file_path)))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

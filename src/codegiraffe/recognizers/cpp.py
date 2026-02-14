@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -56,6 +56,9 @@ _CPP_DEFINE_RE = re.compile(r"#define\s+(\w+)\s+(.+)")
 
 # Include guard suffixes to exclude from config nodes
 _CPP_INCLUDE_GUARD_SUFFIXES = ("_H", "_H_", "_HPP", "_HPP_")
+
+_CPP_CLASS_INHERITANCE_RE = re.compile(r'class\s+(\w+)\s*:\s*((?:(?:public|private|protected)\s+\w+\s*,?\s*)+)')
+_CPP_BASE_CLASS_RE = re.compile(r'(?:public|private|protected)\s+(\w+)')
 
 
 # ---------------------------------------------------------------------------
@@ -218,4 +221,22 @@ class CppRecognizer:
                     )
                 )
 
-        return ScanResult(nodes=nodes, edges=edges)
+        imports: list[ImportInfo] = []
+        # Re-scan for local includes to generate ImportInfo
+        for match in _CPP_INCLUDE_RE.finditer(content):
+            include_path = match.group(1)
+            # Strip header extension before converting path separators
+            for ext in (".h", ".hpp", ".hxx", ".hh"):
+                if include_path.endswith(ext):
+                    include_path = include_path[: -len(ext)]
+                    break
+            module_path = include_path.replace("/", ".")
+            imports.append(ImportInfo(module_path=module_path, style="absolute"))
+
+        implementations: list[ImplementationInfo] = []
+        for match in _CPP_CLASS_INHERITANCE_RE.finditer(content):
+            child = match.group(1)
+            for base_match in _CPP_BASE_CLASS_RE.finditer(match.group(2)):
+                implementations.append(ImplementationInfo(child_class=child, parent_class=base_match.group(1), file_path=str(file_path)))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

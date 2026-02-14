@@ -608,14 +608,26 @@ All backends implement the `StorageBackend` protocol, so switching between them 
 
 Code Giraffe uses a plugin-based scanner architecture built on the `RecognizerRegistry`. Each language has a dedicated recognizer that detects framework-specific patterns using regex matching (not AST parsing) for speed and simplicity. The Python recognizer is built into the core scanner; additional languages are provided by recognizer plugins registered by file extension.
 
-### Scanner Intelligence (v0.4.0)
+### Scanner Intelligence (v0.4.0 -- v0.6.0)
 
-The scanner includes several intelligence features that produce a richer, more accurate architecture graph:
+The scanner includes several intelligence features that produce a richer, more accurate architecture graph. Originally introduced for Python in v0.4.0, these capabilities were extended to all 9 supported languages in v0.6.0 via the `ImportInfo` and `ImplementationInfo` data classes on `ScanResult`.
 
-- **Test file exclusion** -- Test files (`test_*.py`, `*_test.py`, `conftest.py`) and test directories (`tests/`, `test/`) are excluded by default. Pass `include_tests=true` to include them; test-sourced nodes are tagged with `"source": "test"` metadata.
-- **Module nodes** -- Each Python file produces a `module` node (e.g., `mod:codegiraffe.scanner`) with `contains` edges to every entity defined in that file.
-- **Import detection** -- The scanner parses absolute and relative import statements, resolves them to project-internal modules (skipping stdlib and third-party), and creates `imports` edges between `module` nodes with metadata listing the imported symbols.
-- **Inheritance detection** -- Class definitions with base classes produce `implements` edges from child to parent when both classes are defined within the project. External base classes are silently skipped.
+- **Test file exclusion** -- Test files are excluded by default across all languages (Python: `test_*.py`, `*_test.py`, `conftest.py`; Go: `*_test.go`; Java: `*Test.java`; Rust: test modules; TypeScript: `*.spec.ts`, `*.test.ts`; etc.). Pass `include_tests=true` to include them; test-sourced nodes are tagged with `"source": "test"` metadata.
+- **Module nodes** -- Each source file produces a `module` node (e.g., `mod:codegiraffe.scanner` for Python, `mod:github.com/user/pkg` for Go) with `contains` edges to every entity defined in that file.
+- **Import detection** -- The scanner detects import statements in all 9 languages, resolves them to project-internal modules (skipping standard library and third-party dependencies), and creates `imports` edges between `module` nodes with metadata listing the imported symbols. Go uses `go.mod`-aware module path resolution.
+- **Inheritance / implementation detection** -- Class definitions with base classes (or interface implementations in Go) produce `implements` edges from child to parent when both are defined within the project. External base classes are silently skipped.
+
+| Language | Module Nodes | Import Detection | Implementation Detection | Test Exclusion |
+|---|---|---|---|---|
+| Python | Yes | Yes (absolute + relative) | Yes (class inheritance) | Yes |
+| TypeScript | Yes | Yes (`import`/`require`) | Yes (`extends`/`implements`) | Yes |
+| Go | Yes | Yes (`go.mod`-aware) | Yes (interface implementation) | Yes |
+| Rust | Yes | Yes (`use`/`mod`) | Yes (`impl Trait for`) | Yes |
+| Java | Yes | Yes (`import`) | Yes (`extends`/`implements`) | Yes |
+| C/C++ | Yes | Yes (`#include`) | Yes (class inheritance) | Yes |
+| C# | Yes | Yes (`using`) | Yes (class/interface inheritance) | Yes |
+| PHP | Yes | Yes (`use`/`namespace`) | Yes (`extends`/`implements`) | Yes |
+| Ruby | Yes | Yes (`require`/`require_relative`) | Yes (class inheritance, module `include`) | Yes |
 
 ### Python (.py, .pyi)
 
@@ -935,7 +947,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-566+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers, query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, and web dashboard.
+698+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers (all 9 languages with import/implementation detection), query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, and web dashboard.
 
 ### Project Constitution
 
@@ -992,6 +1004,14 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] 3 new dashboard layouts: grid, concentric, breadthfirst (now 5 total)
 - [x] Dashboard improvements: legend, stats panel, edge tooltips, refined color palette
 - [x] 566+ tests
+
+### v0.6.0 (completed)
+
+- [x] Language-agnostic scanner intelligence: universal module nodes, `contains` edges, import detection, and implementation/inheritance detection for all 9 languages
+- [x] `ImportInfo` and `ImplementationInfo` data classes on `ScanResult` for structured recognizer output
+- [x] Go `go.mod`-aware import path resolution and interface implementation detection
+- [x] Test file exclusion extended to all 9 languages
+- [x] 698+ tests
 
 ### Future
 

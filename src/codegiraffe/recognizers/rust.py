@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -73,6 +73,10 @@ _RS_STRUCT_RE = re.compile(
     r"""(?:pub\s+)?struct\s+(\w+)""",
 )
 
+
+_RS_USE_CRATE_RE = re.compile(r'use\s+crate::([^\s;{]+)(?:\s*;|\s*\{)', re.MULTILINE)
+_RS_USE_SUPER_RE = re.compile(r'use\s+super::([^\s;{]+)(?:\s*;|\s*\{)', re.MULTILINE)
+_RS_IMPL_TRAIT_RE = re.compile(r'impl\s+(\w+)\s+for\s+(\w+)')
 
 # ---------------------------------------------------------------------------
 # Recognizer
@@ -283,4 +287,16 @@ class RustRecognizer:
                         )
                     )
 
-        return ScanResult(nodes=nodes, edges=edges)
+        imports: list[ImportInfo] = []
+        for match in _RS_USE_CRATE_RE.finditer(content):
+            full_path = match.group(1).replace("::", ".")
+            imports.append(ImportInfo(module_path=full_path, style="absolute"))
+        for match in _RS_USE_SUPER_RE.finditer(content):
+            full_path = match.group(1).replace("::", ".")
+            imports.append(ImportInfo(module_path=full_path, style="relative"))
+
+        implementations: list[ImplementationInfo] = []
+        for match in _RS_IMPL_TRAIT_RE.finditer(content):
+            implementations.append(ImplementationInfo(child_class=match.group(2), parent_class=match.group(1), file_path=str(file_path)))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

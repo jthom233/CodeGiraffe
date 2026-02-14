@@ -20,6 +20,29 @@ if TYPE_CHECKING:
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
+# Structured data from recognizers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ImportInfo:
+    """Structured import information returned by recognizers."""
+
+    module_path: str  # Dotted module path (project-relative)
+    symbols: list[str] = field(default_factory=list)
+    style: str = "absolute"  # "absolute" | "relative" | "wildcard"
+
+
+@dataclass
+class ImplementationInfo:
+    """Structured inheritance/implementation info returned by recognizers."""
+
+    child_class: str  # Name of the implementing class/struct
+    parent_class: str  # Name of the base class/interface/trait
+    file_path: str  # Relative path where child is defined
+
+
+# ---------------------------------------------------------------------------
 # Scan result container
 # ---------------------------------------------------------------------------
 
@@ -30,6 +53,8 @@ class ScanResult:
 
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
+    imports: list[ImportInfo] = field(default_factory=list)
+    implementations: list[ImplementationInfo] = field(default_factory=list)
 
     def merge(self, other: ScanResult) -> None:
         """Merge another ScanResult into this one, deduplicating by node id."""
@@ -45,6 +70,9 @@ class ScanResult:
             if key not in seen_edges:
                 self.edges.append(edge)
                 seen_edges.add(key)
+
+        self.imports.extend(other.imports)
+        self.implementations.extend(other.implementations)
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +181,37 @@ _IGNORE_DIRS: frozenset[str] = frozenset(
 )
 
 # Directory names that indicate test code
-_TEST_DIRS: frozenset[str] = frozenset({"tests", "test"})
+_TEST_DIRS: frozenset[str] = frozenset({"tests", "test", "__tests__", "spec"})
+
+# ---------------------------------------------------------------------------
+# Language suffix mapping
+# ---------------------------------------------------------------------------
+
+_SUFFIX_TO_LANGUAGE: dict[str, str] = {
+    ".py": "python",
+    ".pyi": "python",
+    ".go": "go",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".rs": "rust",
+    ".java": "java",
+    ".cs": "csharp",
+    ".c": "c",
+    ".cpp": "cpp",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".php": "php",
+    ".rb": "ruby",
+}
+
+
+def _suffix_to_language(suffix: str) -> str:
+    """Map a file suffix to a language name."""
+    return _SUFFIX_TO_LANGUAGE.get(suffix, "unknown")
 
 
 def _file_to_module_path(file_path: Path, project_path: str) -> str:
@@ -189,18 +247,81 @@ def _file_to_module_path(file_path: Path, project_path: str) -> str:
     return ".".join(parts)
 
 
-def _is_test_file(file_path: Path) -> bool:
-    """Return True if *file_path* looks like a test file.
+def _file_to_module_path_universal(file_path: Path, project_path: str, suffix: str) -> str:
+    """Convert a file path to a dotted module path for any language."""
+    if suffix in (".py", ".pyi"):
+        return _file_to_module_path(file_path, project_path)
 
-    Matches: ``test_*.py``, ``*_test.py``, ``conftest.py``.
-    """
+    rel = file_path.relative_to(project_path)
+    parts = list(rel.parts)
+
+    # Strip common source layout prefixes
+    if parts and parts[0] in ("src", "lib", "app", "pkg", "cmd", "internal"):
+        parts = parts[1:]
+
+    # Remove extension from last component
+    if parts:
+        parts[-1] = Path(parts[-1]).stem
+
+    return ".".join(parts)
+
+
+def _is_test_file(file_path: Path) -> bool:
+    """Return True if *file_path* looks like a test file for any language."""
     name = file_path.name
-    if name == "conftest.py":
+    suffix = file_path.suffix.lower()
+
+    # Python-specific patterns (preserved from v0.4.0)
+    if suffix in (".py", ".pyi"):
+        if name == "conftest.py":
+            return True
+        if name.startswith("test_") and name.endswith(".py"):
+            return True
+        if name.endswith("_test.py"):
+            return True
+        return False
+
+    # Go: *_test.go
+    if suffix == ".go" and name.endswith("_test.go"):
         return True
-    if name.startswith("test_") and name.endswith(".py"):
-        return True
-    if name.endswith("_test.py"):
-        return True
+
+    # TypeScript/JavaScript: *.test.ts, *.spec.ts, *.test.tsx, *.spec.tsx
+    if suffix in (".ts", ".tsx", ".mts", ".cts"):
+        base = name.rsplit(".", 1)[0] if "." in name else name
+        if base.endswith((".test", ".spec")):
+            return True
+
+    # Java: *Test.java, *Tests.java
+    if suffix == ".java":
+        stem = Path(name).stem
+        if stem.endswith(("Test", "Tests")):
+            return True
+
+    # C#: *Test.cs, *Tests.cs
+    if suffix == ".cs":
+        stem = Path(name).stem
+        if stem.endswith(("Test", "Tests")):
+            return True
+
+    # C/C++: *_test.cpp, *_test.c, test_*.cpp, test_*.c
+    if suffix in (".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"):
+        stem = Path(name).stem
+        if stem.endswith("_test") or stem.startswith("test_"):
+            return True
+
+    # PHP: *Test.php
+    if suffix == ".php":
+        stem = Path(name).stem
+        if stem.endswith("Test"):
+            return True
+
+    # Ruby: *_test.rb, *_spec.rb
+    if suffix == ".rb":
+        stem = Path(name).stem
+        if stem.endswith(("_test", "_spec")):
+            return True
+
+    # Rust: no file naming convention, but tests/ dir handled by _is_in_test_dir
     return False
 
 
@@ -214,8 +335,12 @@ def _should_skip(path: Path) -> bool:
 
 def _is_in_test_dir(path: Path) -> bool:
     """Return True if any component of *path* is a test directory."""
-    for part in path.parts:
+    parts = path.parts
+    for i, part in enumerate(parts):
         if part in _TEST_DIRS:
+            return True
+        # Java: src/test/ directory
+        if part == "src" and i + 1 < len(parts) and parts[i + 1] == "test":
             return True
     return False
 
@@ -783,6 +908,92 @@ def _infer_inheritance_edges(
 
 
 # ---------------------------------------------------------------------------
+# Universal inference (language-agnostic)
+# ---------------------------------------------------------------------------
+
+
+def _infer_import_edges_universal(
+    result: ScanResult,
+    per_file_results: dict[Path, ScanResult],
+) -> None:
+    """Create imports edges from recognizer-provided ImportInfo data."""
+    module_ids: set[str] = {n.id for n in result.nodes if n.type == NodeType.MODULE.value}
+
+    file_to_mod_id: dict[str, str] = {}
+    for node in result.nodes:
+        if node.type == NodeType.MODULE.value and node.file_path:
+            file_to_mod_id[node.file_path] = node.id
+
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    for rel_path, file_result in per_file_results.items():
+        source_mod_id = file_to_mod_id.get(str(rel_path))
+        if not source_mod_id or not file_result.imports:
+            continue
+
+        for imp in file_result.imports:
+            target_mod_id = f"mod:{imp.module_path}"
+            if target_mod_id not in module_ids:
+                continue
+            if source_mod_id == target_mod_id:
+                continue
+
+            edge_key = (source_mod_id, target_mod_id, EdgeType.IMPORTS.value)
+            if edge_key not in existing_edges:
+                result.edges.append(Edge(
+                    source=source_mod_id,
+                    target=target_mod_id,
+                    type=EdgeType.IMPORTS.value,
+                    metadata={
+                        "symbols": imp.symbols,
+                        "style": imp.style,
+                        "inferred": True,
+                    },
+                ))
+                existing_edges.add(edge_key)
+
+
+def _infer_inheritance_edges_universal(
+    result: ScanResult,
+    per_file_results: dict[Path, ScanResult],
+) -> None:
+    """Create implements edges from recognizer-provided ImplementationInfo data."""
+    class_registry: dict[str, str] = {}
+    for node in result.nodes:
+        if node.type == NodeType.SERVICE.value:
+            class_name = node.metadata.get("class_name") or node.metadata.get("struct_name") or node.label
+            class_registry[class_name] = node.id
+
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    for rel_path, file_result in per_file_results.items():
+        for impl in file_result.implementations:
+            child_id = class_registry.get(impl.child_class)
+            parent_id = class_registry.get(impl.parent_class)
+
+            if not child_id or not parent_id or child_id == parent_id:
+                continue
+
+            edge_key = (child_id, parent_id, EdgeType.IMPLEMENTS.value)
+            if edge_key not in existing_edges:
+                child_node = next((n for n in result.nodes if n.id == child_id), None)
+                parent_node = next((n for n in result.nodes if n.id == parent_id), None)
+                same_file = (child_node and parent_node and
+                             child_node.file_path == parent_node.file_path)
+
+                result.edges.append(Edge(
+                    source=child_id,
+                    target=parent_id,
+                    type=EdgeType.IMPLEMENTS.value,
+                    metadata={
+                        "inferred": True,
+                        "cross_file": not same_file,
+                    },
+                ))
+                existing_edges.add(edge_key)
+
+
+# ---------------------------------------------------------------------------
 # Project scanner
 # ---------------------------------------------------------------------------
 
@@ -837,6 +1048,17 @@ def scan_project(
     root = Path(project_path)
     merged = ScanResult()
     file_contents: dict[Path, str] = {}
+    per_file_results: dict[Path, ScanResult] = {}
+
+    # Set project root on recognizers that support it (e.g., GoRecognizer)
+    _seen_recognizers: set[int] = set()
+    for ext in active_registry.registered_extensions:
+        for recognizer in active_registry.get_recognizers(Path(f"dummy{ext}")):
+            rid = id(recognizer)
+            if rid not in _seen_recognizers:
+                _seen_recognizers.add(rid)
+                if hasattr(recognizer, "set_project_root"):
+                    recognizer.set_project_root(project_path)
 
     # Determine which extensions to scan
     extensions = active_registry.registered_extensions
@@ -870,54 +1092,65 @@ def scan_project(
         rel_path = source_file.relative_to(root)
         file_contents[rel_path] = content
 
-        # Collect all nodes/edges from recognizers for this file
+        # Collect all nodes/edges/imports/implementations from recognizers
         file_nodes: list[Node] = []
         file_edges: list[Edge] = []
+        file_imports: list[ImportInfo] = []
+        file_implementations: list[ImplementationInfo] = []
         for recognizer in applicable:
             file_result = recognizer.recognize(rel_path, content)
             file_nodes.extend(file_result.nodes)
             file_edges.extend(file_result.edges)
+            file_imports.extend(file_result.imports)
+            file_implementations.extend(file_result.implementations)
 
         # Tag nodes from test files with source: test metadata
         if is_test and include_tests:
             for node in file_nodes:
                 node.metadata["source"] = "test"
 
-        # T050: Create module node for Python files
-        if suffix in (".py", ".pyi"):
-            module_path = _file_to_module_path(source_file, project_path)
-            module_id = f"mod:{module_path}"
-            module_label = module_path.rsplit(".", 1)[-1] if "." in module_path else module_path
+        # Create module node for ALL scanned languages (universal)
+        module_path = _file_to_module_path_universal(source_file, project_path, suffix)
+        module_id = f"mod:{module_path}"
+        module_label = module_path.rsplit(".", 1)[-1] if "." in module_path else module_path
 
-            module_node = Node(
-                id=module_id,
-                type=NodeType.MODULE.value,
-                label=module_label,
-                file_path=str(rel_path),
-                metadata={
-                    "package": module_path.rsplit(".", 1)[0] if "." in module_path else "",
-                    "source": "test" if is_test else "production",
-                },
-            )
-            file_nodes.append(module_node)
+        module_node = Node(
+            id=module_id,
+            type=NodeType.MODULE.value,
+            label=module_label,
+            file_path=str(rel_path),
+            metadata={
+                "package": module_path.rsplit(".", 1)[0] if "." in module_path else "",
+                "source": "test" if is_test else "production",
+                "language": _suffix_to_language(suffix),
+            },
+        )
+        file_nodes.append(module_node)
 
-            # T051: Create contains edges from module to all entities in this file
-            for node in file_nodes:
-                if node.id != module_id:
-                    file_edges.append(Edge(
-                        source=module_id,
-                        target=node.id,
-                        type=EdgeType.CONTAINS.value,
-                        metadata={"inferred": True},
-                    ))
+        # Create contains edges from module to all entities in this file
+        for node in file_nodes:
+            if node.id != module_id:
+                file_edges.append(Edge(
+                    source=module_id,
+                    target=node.id,
+                    type=EdgeType.CONTAINS.value,
+                    metadata={"inferred": True},
+                ))
 
-        combined = ScanResult(nodes=file_nodes, edges=file_edges)
+        combined = ScanResult(
+            nodes=file_nodes,
+            edges=file_edges,
+            imports=file_imports,
+            implementations=file_implementations,
+        )
+        per_file_results[rel_path] = combined
         merged.merge(combined)
 
-    # Second pass: infer cross-file edges
-    _infer_cross_file_edges(merged, file_contents)
+    # Universal import inference (processes ScanResult.imports from all languages)
+    _infer_import_edges_universal(merged, per_file_results)
 
-    # Third pass: infer import edges between modules
+    # Python-specific import inference (backward compat, fills gaps)
+    _infer_cross_file_edges(merged, file_contents)
     _infer_import_edges(merged, file_contents, project_path)
 
     # Build class registry for inheritance resolution
@@ -927,7 +1160,10 @@ def scan_project(
             class_name = node.metadata.get("class_name") or node.label
             class_registry[class_name] = node.id
 
-    # Third pass: infer inheritance edges
+    # Universal inheritance inference (processes ScanResult.implementations)
+    _infer_inheritance_edges_universal(merged, per_file_results)
+
+    # Python-specific inheritance inference (backward compat)
     _infer_inheritance_edges(merged, class_registry, file_contents)
 
     return merged

@@ -13,7 +13,7 @@ from codegiraffe.recognizers import (
     PhpRecognizer,
     RubyRecognizer,
 )
-from codegiraffe.scanner import ScanResult, scan_project
+from codegiraffe.scanner import ScanResult, scan_project, ImportInfo, ImplementationInfo
 from codegiraffe.registry import RecognizerRegistry
 from codegiraffe.schema import NodeType, EdgeType
 
@@ -401,6 +401,177 @@ type TickMsg struct{}
         ids = {n.id for n in result.nodes}
         assert "event:TickMsg" in ids
         assert "service:TickMsg" not in ids
+
+
+class TestGoRecognizerImports:
+    """Tests for Go recognizer v0.6.0 import parsing and classification."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return GoRecognizer()
+
+    def test_parse_imports_single_line(self, recognizer):
+        """Single-line import statement should be extracted."""
+        content = '''
+package main
+
+import "fmt"
+
+func main() {}
+'''
+        imports = recognizer._parse_imports(content)
+        assert imports == ["fmt"]
+
+    def test_parse_imports_grouped(self, recognizer):
+        """Grouped import block should extract all paths."""
+        content = '''
+package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {}
+'''
+        imports = recognizer._parse_imports(content)
+        assert "fmt" in imports
+        assert "os" in imports
+        assert len(imports) == 2
+
+    def test_is_internal_import_true(self, recognizer, tmp_path):
+        """Internal imports matching the go.mod module path should return True."""
+        go_mod = tmp_path / "go.mod"
+        go_mod.write_text("module github.com/myorg/myproject\n\ngo 1.21\n")
+        recognizer.set_project_root(str(tmp_path))
+        assert recognizer._is_internal_import("github.com/myorg/myproject/internal/store") is True
+        assert recognizer._is_internal_import("github.com/myorg/myproject/pkg/utils") is True
+
+    def test_is_internal_import_false_stdlib(self, recognizer, tmp_path):
+        """Standard library and third-party imports should return False."""
+        go_mod = tmp_path / "go.mod"
+        go_mod.write_text("module github.com/myorg/myproject\n\ngo 1.21\n")
+        recognizer.set_project_root(str(tmp_path))
+        assert recognizer._is_internal_import("fmt") is False
+        assert recognizer._is_internal_import("os") is False
+        assert recognizer._is_internal_import("net/http") is False
+        assert recognizer._is_internal_import("github.com/gin-gonic/gin") is False
+
+    def test_import_to_module_path(self, recognizer, tmp_path):
+        """Go import paths should be converted to dotted module paths."""
+        go_mod = tmp_path / "go.mod"
+        go_mod.write_text("module github.com/myorg/myproject\n\ngo 1.21\n")
+        recognizer.set_project_root(str(tmp_path))
+        result = recognizer._import_to_module_path("github.com/myorg/myproject/internal/store")
+        assert result == "internal.store"
+        result2 = recognizer._import_to_module_path("github.com/myorg/myproject/pkg/utils/log")
+        assert result2 == "pkg.utils.log"
+
+    def test_recognize_returns_import_info_for_internal(self, recognizer, tmp_path):
+        """recognize() should return ImportInfo for internal imports when project root is set."""
+        go_mod = tmp_path / "go.mod"
+        go_mod.write_text("module github.com/myorg/myproject\n\ngo 1.21\n")
+        recognizer.set_project_root(str(tmp_path))
+
+        content = '''
+package main
+
+import (
+    "fmt"
+    "github.com/myorg/myproject/internal/store"
+    "github.com/myorg/myproject/pkg/config"
+)
+
+func main() {}
+'''
+        result = recognizer.recognize(Path("cmd/main.go"), content)
+        assert len(result.imports) == 2
+        module_paths = {imp.module_path for imp in result.imports}
+        assert "internal.store" in module_paths
+        assert "pkg.config" in module_paths
+        # All should be absolute style
+        assert all(imp.style == "absolute" for imp in result.imports)
+        # Go imports entire packages, so symbols should be empty
+        assert all(imp.symbols == [] for imp in result.imports)
+
+    def test_recognize_no_import_info_for_stdlib(self, recognizer, tmp_path):
+        """recognize() should NOT return ImportInfo for stdlib imports."""
+        go_mod = tmp_path / "go.mod"
+        go_mod.write_text("module github.com/myorg/myproject\n\ngo 1.21\n")
+        recognizer.set_project_root(str(tmp_path))
+
+        content = '''
+package main
+
+import (
+    "fmt"
+    "os"
+    "net/http"
+)
+
+func main() {}
+'''
+        result = recognizer.recognize(Path("main.go"), content)
+        assert len(result.imports) == 0
+
+
+class TestGoRecognizerImplementations:
+    """Tests for Go recognizer v0.6.0 interface implementation detection."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return GoRecognizer()
+
+    def test_struct_implementing_interface(self, recognizer):
+        """A struct with methods matching an interface should produce ImplementationInfo."""
+        content = '''
+package store
+
+type Repository interface {
+    Get(id string) (Item, error)
+    Save(item Item) error
+}
+
+type SQLRepository struct {
+    db *sql.DB
+}
+
+func (r *SQLRepository) Get(id string) (Item, error) {
+    return Item{}, nil
+}
+
+func (r *SQLRepository) Save(item Item) error {
+    return nil
+}
+'''
+        result = recognizer.recognize(Path("store.go"), content)
+        assert len(result.implementations) == 1
+        impl = result.implementations[0]
+        assert impl.child_class == "SQLRepository"
+        assert impl.parent_class == "Repository"
+        assert impl.file_path == "store.go"
+
+    def test_struct_not_implementing_all_methods(self, recognizer):
+        """A struct missing interface methods should NOT produce ImplementationInfo."""
+        content = '''
+package store
+
+type Repository interface {
+    Get(id string) (Item, error)
+    Save(item Item) error
+    Delete(id string) error
+}
+
+type PartialRepo struct {
+    db *sql.DB
+}
+
+func (r *PartialRepo) Get(id string) (Item, error) {
+    return Item{}, nil
+}
+'''
+        result = recognizer.recognize(Path("store.go"), content)
+        assert len(result.implementations) == 0
 
 
 class TestRustRecognizer:

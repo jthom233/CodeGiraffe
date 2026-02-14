@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,11 @@ _JAVA_CLASS_RE = re.compile(
 )
 
 
+_JAVA_IMPORT_STMT_RE = re.compile(r'import\s+([\w.]+)\s*;', re.MULTILINE)
+_JAVA_PACKAGE_DECL_RE = re.compile(r'package\s+([\w.]+)\s*;', re.MULTILINE)
+_JAVA_CLASS_EXTENDS_RE = re.compile(r'class\s+(\w+)\s+extends\s+(\w+)')
+_JAVA_CLASS_IMPLEMENTS_RE = re.compile(r'class\s+(\w+)\s+(?:extends\s+\w+\s+)?implements\s+([\w,\s]+?)(?:\s*\{)')
+
 # ---------------------------------------------------------------------------
 # Recognizer
 # ---------------------------------------------------------------------------
@@ -103,6 +108,23 @@ class JavaRecognizer:
         - @EventListener                             -> ``event`` nodes
         - Class definitions (fallback)               -> ``service`` nodes
     """
+
+    def __init__(self) -> None:
+        self._project_packages: set[str] = set()
+
+    def set_project_root(self, project_root: str) -> None:
+        self._project_packages = set()
+        root = Path(project_root)
+        for java_file in root.rglob("*.java"):
+            try:
+                text = java_file.read_text(encoding="utf-8", errors="replace")[:500]
+                match = _JAVA_PACKAGE_DECL_RE.search(text)
+                if match:
+                    parts = match.group(1).split(".")
+                    if len(parts) >= 2:
+                        self._project_packages.add(".".join(parts[:2]))
+            except OSError:
+                continue
 
     def recognize(self, file_path: Path, content: str) -> ScanResult:
         """Scan *content* of a Java file and return discovered nodes/edges."""
@@ -310,4 +332,18 @@ class JavaRecognizer:
                         )
                     )
 
-        return ScanResult(nodes=nodes, edges=edges)
+        imports: list[ImportInfo] = []
+        for match in _JAVA_IMPORT_STMT_RE.finditer(content):
+            import_path = match.group(1)
+            if any(import_path.startswith(pkg) for pkg in self._project_packages):
+                imports.append(ImportInfo(module_path=import_path, symbols=[import_path.split(".")[-1]], style="absolute"))
+
+        implementations: list[ImplementationInfo] = []
+        for match in _JAVA_CLASS_EXTENDS_RE.finditer(content):
+            implementations.append(ImplementationInfo(child_class=match.group(1), parent_class=match.group(2), file_path=str(file_path)))
+        for match in _JAVA_CLASS_IMPLEMENTS_RE.finditer(content):
+            child = match.group(1)
+            for parent in [p.strip() for p in match.group(2).split(",") if p.strip()]:
+                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)
