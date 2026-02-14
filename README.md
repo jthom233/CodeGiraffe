@@ -98,7 +98,7 @@ Add to your `claude_desktop_config.json`:
 
 ## MCP Tools
 
-Code Giraffe exposes 25 tools that any MCP client can call:
+Code Giraffe exposes **28 tools** that any MCP client can call:
 
 ### `codegiraffe_init`
 
@@ -183,9 +183,12 @@ The killer tool. Given a natural-language task description, returns the minimal 
 | `task` | `str` | required | Natural language task description |
 | `max_nodes` | `int` | `20` | Maximum nodes to return |
 | `use_embeddings` | `bool` | `true` | Use embedding-based semantic scoring when available |
-| `include_impact` | `bool` | `false` | Include blast radius and risk assessment for top nodes |
+| `include_impact` | `bool` | `false` | Augment nodes with `_blast_radius_count` and `_risk_score` metadata |
+| `include_changes` | `bool` | `false` | Boost nodes affected by uncommitted git changes (adds `_recently_changed` and `_in_change_blast_radius` metadata) |
 
 When `sentence-transformers` is installed and `use_embeddings` is `true`, scoring uses embedding-based semantic similarity for significantly better relevance ranking. Otherwise, it falls back to keyword overlap scoring. See the [Embedding-Based Scoring](#embedding-based-scoring) section for details.
+
+When `include_changes` is `true`, nodes affected by uncommitted git changes receive a +0.3 score boost (directly changed) or +0.15 boost (in blast radius of changes), ensuring change-relevant context surfaces first.
 
 **Example:**
 ```
@@ -233,7 +236,7 @@ Identify the most coupled, change-prone areas of the architecture. Ranks nodes b
 |---|---|---|---|
 | `project_path` | `str` | required | Root directory of the project |
 | `top_n` | `int` | `10` | Number of hotspots to return |
-| `metrics` | `list[str] \| None` | `None` | Metrics to include: `"degree"`, `"betweenness"`, `"risk"` (None = degree only) |
+| `metrics` | `str` | `"degree"` | Ranking strategy: `"degree"` (degree centrality), `"betweenness"` (bottleneck nodes), or `"combined"` (0.5×degree + 0.5×betweenness) |
 
 **Example:**
 ```
@@ -565,11 +568,21 @@ List and filter cross-system contracts in the architecture graph. Contracts repr
 | `project_path` | `str` | required | Root directory of the project |
 | `contract_type` | `str \| None` | `None` | Filter by contract type: `"api"`, `"event"`, `"config"`, `"data"` |
 | `status` | `str \| None` | `None` | Filter by validation status |
+| `node_id` | `str \| None` | `None` | Filter to contracts involving a specific producer or consumer node |
 
 **Example:**
 ```
 codegiraffe_contracts(project_path="/home/user/my-project", contract_type="api")
---> [{"id": "contract:api:/api/users", "type": "api", "producers": [...], "consumers": [...], "status": "valid"}]
+--> ## Contracts
+    **2 contract(s) found**
+
+    ### User API
+    - **Type:** api
+    - **Status:** active
+    - **Producer:** GET /api/users (endpoint)
+    - **Consumers:**
+      - UserList (frontend_component)
+      - UserSync (service)
 ```
 
 ---
@@ -597,22 +610,118 @@ Manually create a cross-system contract node with its producer and consumer rela
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_path` | `str` | required | Root directory of the project |
-| `contract_id` | `str` | required | Unique contract identifier |
+| `name` | `str` | required | Contract name (used to generate node ID `contract:{name}`) |
 | `contract_type` | `str` | required | Contract type: `"api"`, `"event"`, `"config"`, `"data"` |
-| `producers` | `list[str]` | `[]` | Node IDs that produce/define this contract |
-| `consumers` | `list[str]` | `[]` | Node IDs that consume/depend on this contract |
+| `producer` | `str` | required | Node ID of the producer that defines this contract |
+| `consumers` | `str` | required | Comma-separated node IDs that consume/depend on this contract |
+| `version` | `str` | `""` | Optional contract version string |
 | `metadata` | `str` | `"{}"` | JSON string of extra key-value pairs |
+
+The contract node and its edges are marked as `manual=true` so they survive re-scans.
 
 **Example:**
 ```
 codegiraffe_add_contract(
   project_path="/home/user/my-project",
-  contract_id="contract:api:user-schema",
+  name="UserService API",
   contract_type="api",
-  producers=["endpoint:/api/users"],
-  consumers=["component:UserList", "service:UserSync"]
+  producer="endpoint:/api/users",
+  consumers="component:UserList,service:UserSync"
 )
---> "Created contract contract:api:user-schema with 1 producer(s) and 2 consumer(s)"
+--> "Added contract 'UserService API' (api): endpoint:/api/users --[produces]--> contract:UserService API
+     component:UserList --[consumes_contract]--> contract:UserService API
+     service:UserSync --[consumes_contract]--> contract:UserService API"
+```
+
+---
+
+### `codegiraffe_validate_changes`
+
+Analyze uncommitted (or arbitrary) changes against the architecture graph to detect incomplete modifications. Parses a diff, maps changed files to graph nodes, computes blast radius, and reports potentially missing changes and contract violations.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `diff` | `str \| None` | `None` | Raw unified diff string to analyze |
+| `auto` | `bool` | `true` | When `true` and `diff` is not provided, reads uncommitted changes from git automatically |
+
+**Example:**
+```
+codegiraffe_validate_changes(project_path="/home/user/my-project")
+--> ## Change Validation Report
+    **Changed files:** 3
+    **Total blast radius:** 12 nodes affected
+    **Covered:** 5 (also changed in diff)
+    **Potentially missing:** 7 nodes
+
+    ### Recommendations
+    - Consider updating service:PaymentService (direct dependency)
+    - Contract violation: changed producer endpoint:/api/users but consumer component:UserList unchanged
+```
+
+---
+
+### `codegiraffe_suggest_tests`
+
+Suggest test files to run based on uncommitted (or arbitrary) changes. Uses graph relationships, naming conventions, and blast radius analysis to identify the most relevant tests.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `diff` | `str \| None` | `None` | Raw unified diff string to analyze |
+| `auto` | `bool` | `true` | When `true` and `diff` is not provided, reads uncommitted changes from git automatically |
+| `max_suggestions` | `int` | `20` | Maximum number of test files to suggest |
+
+Tests are scored by three strategies:
+- **Graph-based (0.9)** -- Test nodes with import edges to/from changed nodes
+- **Naming convention (0.6)** -- Test files matching common naming patterns for changed sources
+- **Blast radius (0.3)** -- Test nodes in transitive dependency set of changes
+
+**Example:**
+```
+codegiraffe_suggest_tests(project_path="/home/user/my-project")
+--> ## Test Suggestions
+    **3 test(s) suggested**
+
+    ### High Relevance (score >= 0.7)
+    - tests/test_auth.py (0.90) — graph: imports changed module [graph]
+
+    ### Medium Relevance (0.3 <= score < 0.7)
+    - tests/test_users.py (0.60) — naming: matches changed file users.py [naming]
+
+    ### Low Relevance (score < 0.3)
+    - tests/test_api.py (0.30) — blast radius: transitive dependency [blast_radius]
+```
+
+---
+
+### `codegiraffe_file_coupling`
+
+Analyze file coupling from git co-change history. Mines recent commits to find files that frequently change together, then cross-references with the architecture graph to detect implicit coupling not captured in the graph.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `file_path` | `str \| None` | `None` | Focus on a specific file's coupling partners |
+| `depth` | `int` | `100` | Number of recent commits to analyze |
+| `min_commits` | `int` | `3` | Minimum co-change count to report |
+| `min_coupling` | `float` | `0.1` | Minimum coupling ratio (0.0-1.0) to report |
+
+Coupling ratio = co-change count / max(changes in file A, changes in file B).
+
+**Example:**
+```
+codegiraffe_file_coupling(project_path="/home/user/my-project", depth=50)
+--> ## File Coupling Analysis
+    **6 coupled pair(s) found**
+
+    | Coupled File | Co-Changes | Coupling | In Graph? |
+    |---|---|---|---|
+    | auth.py ↔ users.py | 8 | 0.73 | Yes |
+    | config.py ↔ settings.py | 5 | 0.50 | No |
+
+    ### Implicit Coupling (not in graph)
+    - config.py ↔ settings.py: 50% coupling over 5 co-changes — consider adding a graph relationship
 ```
 
 ---
@@ -621,13 +730,15 @@ codegiraffe_add_contract(
 
 ```
 src/codegiraffe/
-├── server.py            # FastMCP server + 25 tool definitions
+├── server.py            # FastMCP server + 28 MCP tool definitions
 ├── graph.py             # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph engine
 ├── storage.py           # StorageBackend protocol + JSON file implementation
 ├── sqlite_storage.py    # SQLite storage backend for larger graphs
 ├── scanner.py           # Multi-language codebase scanner (dispatches to recognizers)
 ├── registry.py          # RecognizerRegistry plugin system with extension mapping
-├── query.py             # Subgraph extraction, keyword scoring, drift detection
+├── query.py             # Subgraph extraction, scoring, drift, blast radius, risk, cycles, change validation
+├── diff_parser.py       # Unified diff parsing + data models for change impact analysis
+├── git_utils.py         # Git CLI subprocess wrappers for change detection
 ├── embeddings.py        # Optional embedding-based semantic scoring (sentence-transformers)
 ├── export.py            # Graph visualization export (Mermaid + D3.js JSON)
 ├── coordination.py      # Multi-agent claim/status coordination with TTL
@@ -729,26 +840,27 @@ All backends implement the `StorageBackend` protocol, so switching between them 
 
 Code Giraffe uses a plugin-based scanner architecture built on the `RecognizerRegistry`. Each language has a dedicated recognizer that detects framework-specific patterns using regex matching (not AST parsing) for speed and simplicity. The Python recognizer is built into the core scanner; additional languages are provided by recognizer plugins registered by file extension.
 
-### Scanner Intelligence (v0.4.0 -- v0.6.0)
+### Scanner Intelligence (v0.4.0 -- v0.9.0)
 
-The scanner includes several intelligence features that produce a richer, more accurate architecture graph. Originally introduced for Python in v0.4.0, these capabilities were extended to all 9 supported languages in v0.6.0 via the `ImportInfo` and `ImplementationInfo` data classes on `ScanResult`.
+The scanner includes several intelligence features that produce a richer, more accurate architecture graph. Originally introduced for Python in v0.4.0, these capabilities were extended to all 9 supported languages in v0.6.0 via the `ImportInfo` and `ImplementationInfo` data classes on `ScanResult`. Call-graph analysis was added in v0.9.0 via `CallInfo`, `InterfaceInfo`, and `MethodSetEntry` data classes.
 
 - **Test file exclusion** -- Test files are excluded by default across all languages (Python: `test_*.py`, `*_test.py`, `conftest.py`; Go: `*_test.go`; Java: `*Test.java`; Rust: test modules; TypeScript: `*.spec.ts`, `*.test.ts`; etc.). Pass `include_tests=true` to include them; test-sourced nodes are tagged with `"source": "test"` metadata.
 - **Module nodes** -- Each source file produces a `module` node (e.g., `mod:codegiraffe.scanner` for Python, `mod:github.com/user/pkg` for Go) with `contains` edges to every entity defined in that file.
 - **Import detection** -- The scanner detects import statements in all 9 languages, resolves them to project-internal modules (skipping standard library and third-party dependencies), and creates `imports` edges between `module` nodes with metadata listing the imported symbols. Go uses `go.mod`-aware module path resolution.
-- **Inheritance / implementation detection** -- Class definitions with base classes (or interface implementations in Go) produce `implements` edges from child to parent when both are defined within the project. External base classes are silently skipped.
+- **Inheritance / implementation detection** -- Class definitions with base classes (or interface implementations in Go) produce `implements` edges from child to parent when both are defined within the project. External base classes are silently skipped. Go interface satisfaction is detected via duck-type method set matching across files.
+- **Call-graph edges (v0.9.0)** -- The scanner detects function and method calls in Go, Python, and TypeScript (via both regex and tree-sitter AST when available), creating `calls` edges between service/module nodes. Demand-driven method nodes (e.g., `service:Parent.Method`) are created for call-graph participants. The `_infer_call_edges()` pipeline step resolves callee names to graph nodes and produces typed edges.
 
-| Language | Module Nodes | Import Detection | Implementation Detection | Test Exclusion |
-|---|---|---|---|---|
-| Python | Yes | Yes (absolute + relative) | Yes (class inheritance) | Yes |
-| TypeScript | Yes | Yes (`import`/`require`) | Yes (`extends`/`implements`) | Yes |
-| Go | Yes | Yes (`go.mod`-aware) | Yes (interface implementation) | Yes |
-| Rust | Yes | Yes (`use`/`mod`) | Yes (`impl Trait for`) | Yes |
-| Java | Yes | Yes (`import`) | Yes (`extends`/`implements`) | Yes |
-| C/C++ | Yes | Yes (`#include`) | Yes (class inheritance) | Yes |
-| C# | Yes | Yes (`using`) | Yes (class/interface inheritance) | Yes |
-| PHP | Yes | Yes (`use`/`namespace`) | Yes (`extends`/`implements`) | Yes |
-| Ruby | Yes | Yes (`require`/`require_relative`) | Yes (class inheritance, module `include`) | Yes |
+| Language | Module Nodes | Import Detection | Implementation Detection | Call Detection | Test Exclusion |
+|---|---|---|---|---|---|
+| Python | Yes | Yes (absolute + relative) | Yes (class inheritance) | Yes (regex + AST) | Yes |
+| TypeScript | Yes | Yes (`import`/`require`) | Yes (`extends`/`implements`) | Yes (regex + AST) | Yes |
+| Go | Yes | Yes (`go.mod`-aware) | Yes (interface satisfaction) | Yes (regex + AST) | Yes |
+| Rust | Yes | Yes (`use`/`mod`) | Yes (`impl Trait for`) | — | Yes |
+| Java | Yes | Yes (`import`) | Yes (`extends`/`implements`) | — | Yes |
+| C/C++ | Yes | Yes (`#include`) | Yes (class inheritance) | — | Yes |
+| C# | Yes | Yes (`using`) | Yes (class/interface inheritance) | — | Yes |
+| PHP | Yes | Yes (`use`/`namespace`) | Yes (`extends`/`implements`) | — | Yes |
+| Ruby | Yes | Yes (`require`/`require_relative`) | Yes (class inheritance, module `include`) | — | Yes |
 
 ### Python (.py, .pyi)
 
@@ -847,7 +959,7 @@ Then use `scanner_mode="ast"` when initializing:
 codegiraffe_init(project_path="/home/user/my-project", scanner_mode="ast")
 ```
 
-AST scanning detects the same patterns as regex scanning but with higher accuracy -- it understands actual syntax trees rather than pattern matching raw text. Particularly useful for complex nested patterns and avoiding false positives.
+AST scanning detects the same patterns as regex scanning but with higher accuracy -- it understands actual syntax trees rather than pattern matching raw text. Particularly useful for complex nested patterns, avoiding false positives, and call-graph detection (v0.9.0). When tree-sitter is available, the scanner uses AST-based call detection in Go, Python, and TypeScript for more accurate `calls` edges.
 
 ## Embedding-Based Scoring
 
@@ -1000,6 +1112,7 @@ Then open `http://localhost:8000/dashboard` in your browser.
 - **5 layout algorithms** — Force-directed (cose), circular, grid, concentric, and breadthfirst layouts
 - **Legend & stats** — Visual legend of node types and real-time graph statistics
 - **Edge tooltips** — Hover edges to see relationship type and metadata
+- **Styled edge types** — Color-coded edges: orange dashed (imports), purple solid (implements), blue solid (calls), green dotted (contains), and contract-specific styles (produces, consumes_contract, validates, violates)
 - **PNG export** — Download the current view as an image
 - **Dark theme** — Developer-friendly dark interface with refined color palette
 
@@ -1040,11 +1153,15 @@ The most powerful pattern is using Code Giraffe as context for an orchestrator t
 Before modifying any code:
 
 ```
-1. codegiraffe_query(node_id="endpoint:/api/payments", depth=3)
-   --> See everything connected to the endpoint within 3 hops
-2. codegiraffe_hotspots(top_n=5)
+1. codegiraffe_blast_radius(node_id="endpoint:/api/payments")
+   --> See downstream impact ranked by severity (direct, transitive, indirect)
+2. codegiraffe_risk_assessment(node_ids=["endpoint:/api/payments"])
+   --> Get composite risk score (degree + betweenness + descendants)
+3. codegiraffe_hotspots(top_n=5, metrics="combined")
    --> Know which areas are most coupled and risky to change
-3. codegiraffe_export(format="mermaid", node_id="endpoint:/api/payments", depth=2)
+4. codegiraffe_cycles()
+   --> Detect circular dependencies that amplify change risk
+5. codegiraffe_export(format="mermaid", node_id="endpoint:/api/payments", depth=2)
    --> Visualize the subgraph for documentation or review
 ```
 
@@ -1055,8 +1172,8 @@ Code Giraffe models cross-system contracts -- API schemas, event schemas, config
 The scanner automatically infers contracts from detected patterns (e.g., API endpoints become API contracts, event emitters become event contracts). You can also create contracts manually:
 
 ```
-1. codegiraffe_add_contract(contract_id="contract:api:user-schema", contract_type="api",
-     producers=["endpoint:/api/users"], consumers=["component:UserList"])
+1. codegiraffe_add_contract(name="User API", contract_type="api",
+     producer="endpoint:/api/users", consumers="component:UserList,service:UserSync")
    --> Create a contract with explicit producer/consumer relationships
 
 2. codegiraffe_contracts(contract_type="api")
@@ -1067,6 +1184,24 @@ The scanner automatically infers contracts from detected patterns (e.g., API end
 ```
 
 Contract-aware blast radius analysis automatically flags contract consumers as **critical** severity, ensuring that changes to shared contracts surface all downstream impact.
+
+### Change Impact Validation
+
+Before committing changes, validate completeness and identify the right tests to run:
+
+```
+1. codegiraffe_validate_changes(project_path="...")
+   --> Detect incomplete modifications: maps your diff to graph nodes,
+       computes blast radius, and flags potentially missing changes
+
+2. codegiraffe_suggest_tests(project_path="...")
+   --> Get prioritized test file recommendations based on graph relationships,
+       naming conventions, and blast radius analysis
+
+3. codegiraffe_file_coupling(project_path="...", depth=50)
+   --> Discover implicit coupling from git history: files that always change
+       together but aren't connected in the graph
+```
 
 ### Multi-Agent Development
 
@@ -1088,7 +1223,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-791+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers (all 9 languages with import/implementation detection), query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, web dashboard, blast radius analysis, risk assessment, cycle detection, and cross-system contracts.
+979+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, call-graph detection, and intelligence features), recognizers (all 9 languages with import/implementation/call detection), query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, web dashboard, blast radius analysis, risk assessment, cycle detection, cross-system contracts, change impact validation, test suggestions, and file coupling analysis.
 
 ### Project Constitution
 
