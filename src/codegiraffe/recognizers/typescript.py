@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo
+from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo, CallInfo
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,70 @@ _TS_NAMED_IMPORT_RE = re.compile(r"""import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)[
 _TS_DEFAULT_IMPORT_RE = re.compile(r"""import\s+(\w+)\s+from\s+['"]([^'"]+)['"]""")
 _TS_NAMESPACE_IMPORT_RE = re.compile(r"""import\s+\*\s+as\s+\w+\s+from\s+['"]([^'"]+)['"]""")
 _TS_CLASS_EXTENDS_RE = re.compile(r'class\s+(\w+)\s+extends\s+(\w+)')
-_TS_CLASS_IMPLEMENTS_RE = re.compile(r'class\s+(\w+)\s+implements\s+([\w,\s]+?)(?:\s*\{|\s*extends)')
+_TS_CLASS_IMPLEMENTS_RE = re.compile(r'class\s+(\w+)\s+(?:extends\s+\w+\s+)?implements\s+([\w,\s<>]+?)(?:\s*\{)')
+
+# ---------------------------------------------------------------------------
+# TypeScript call detection (v0.9.0)
+# ---------------------------------------------------------------------------
+
+_TS_METHOD_CALL_RE = re.compile(r'(?:(\w+)\.)?(\w+)\s*\(')
+_TS_FUNC_DEF_RE = re.compile(
+    r'(?:(?:async\s+)?function\s+(\w+)|(?:export\s+)?(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*[\w<>\[\]|&\s]+)?\s*\{)',
+    re.MULTILINE,
+)
+_TS_CLASS_DEF_RE = re.compile(r'(?:export\s+)?class\s+(\w+)', re.MULTILINE)
+_TS_NEW_CONSTRUCTOR_RE = re.compile(r'new\s+(\w+)\s*\(')
+
+_TS_BUILTINS = frozenset({
+    "console", "JSON", "Math", "Object", "Array", "String", "Number",
+    "Boolean", "Date", "RegExp", "Error", "Promise", "Map", "Set",
+    "parseInt", "parseFloat", "isNaN", "isFinite", "setTimeout",
+    "setInterval", "clearTimeout", "clearInterval", "fetch",
+    "require", "module", "exports",
+})
+
+
+def _find_ts_enclosing_context(content: str) -> dict[int, tuple[str, str]]:
+    """Build a mapping of line_number -> (enclosing_class, enclosing_function).
+
+    For methods inside a class, returns e.g. ("App", "render").
+    For top-level functions, returns ("", "handler").
+    """
+    result: dict[int, tuple[str, str]] = {}
+    lines = content.split('\n')
+
+    class_ranges: list[tuple[int, str]] = []
+    func_ranges: list[tuple[int, str]] = []
+
+    for match in _TS_CLASS_DEF_RE.finditer(content):
+        class_name = match.group(1)
+        start_line = content[:match.start()].count('\n')
+        class_ranges.append((start_line, class_name))
+
+    for match in _TS_FUNC_DEF_RE.finditer(content):
+        func_name = match.group(1) or match.group(2) or ""
+        if func_name:
+            start_line = content[:match.start()].count('\n')
+            func_ranges.append((start_line, func_name))
+
+    for line_no in range(len(lines)):
+        current_class = ""
+        for cls_start, cls_name in class_ranges:
+            if cls_start <= line_no:
+                current_class = cls_name
+            else:
+                break
+
+        current_func = ""
+        for func_start, func_name in func_ranges:
+            if func_start <= line_no:
+                current_func = func_name
+            else:
+                break
+
+        result[line_no] = (current_class, current_func)
+
+    return result
 
 
 def _is_internal_ts_import(import_path: str) -> bool:
@@ -335,7 +398,74 @@ class TypeScriptRecognizer:
             implementations.append(ImplementationInfo(child_class=match.group(1), parent_class=match.group(2), file_path=str(file_path)))
         for match in _TS_CLASS_IMPLEMENTS_RE.finditer(content):
             child = match.group(1)
-            for parent in [p.strip() for p in match.group(2).split(",") if p.strip()]:
-                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
+            for parent in [p.strip().split("<")[0].strip() for p in match.group(2).split(",") if p.strip()]:
+                if parent:
+                    implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
 
-        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)
+        # --- Call detection (v0.9.0) ---
+        calls: list[CallInfo] = []
+        enclosing_ctx = _find_ts_enclosing_context(content)
+        rel_path_str = str(file_path)
+
+        # Detect "new Constructor()" calls
+        for match in _TS_NEW_CONSTRUCTOR_RE.finditer(content):
+            callee = match.group(1)
+            if callee in _TS_BUILTINS:
+                continue
+            line_no = content[:match.start()].count('\n')
+            enc_class, enc_func = enclosing_ctx.get(line_no, ("", ""))
+            caller = f"{enc_class}.{enc_func}" if enc_class and enc_func else enc_func
+            calls.append(CallInfo(
+                caller=caller,
+                callee=callee,
+                receiver="",
+                file_path=rel_path_str,
+                style="constructor",
+            ))
+
+        # Detect regular method/function calls
+        for match in _TS_METHOD_CALL_RE.finditer(content):
+            receiver = match.group(1) or ""
+            callee = match.group(2)
+
+            # Skip builtins (both as receiver and callee)
+            if receiver in _TS_BUILTINS or callee in _TS_BUILTINS:
+                continue
+            # Skip "this" as callee itself
+            if callee == "this":
+                continue
+
+            # Skip import/export/function/class declaration lines
+            line_start = content.rfind('\n', 0, match.start()) + 1
+            line_prefix = content[line_start:match.start()].lstrip()
+            if line_prefix.startswith(('import ', 'export ', 'function ', 'class ', 'interface ')):
+                continue
+            # Skip "new X(" — already handled above
+            pre_text = content[max(0, match.start() - 4):match.start()]
+            if pre_text.rstrip().endswith('new'):
+                continue
+
+            line_no = content[:match.start()].count('\n')
+            enc_class, enc_func = enclosing_ctx.get(line_no, ("", ""))
+            caller = f"{enc_class}.{enc_func}" if enc_class and enc_func else enc_func
+
+            # Determine style
+            if receiver == "this":
+                style = "method"
+                receiver = enc_class
+            elif receiver:
+                style = "method"
+            elif callee[0:1].isupper():
+                style = "constructor"
+            else:
+                style = "direct"
+
+            calls.append(CallInfo(
+                caller=caller,
+                callee=callee,
+                receiver=receiver,
+                file_path=rel_path_str,
+                style=style,
+            ))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations, calls=calls)

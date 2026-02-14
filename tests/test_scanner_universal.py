@@ -11,6 +11,9 @@ from pathlib import Path
 from codegiraffe.scanner import (
     ImportInfo,
     ImplementationInfo,
+    CallInfo,
+    InterfaceInfo,
+    MethodSetEntry,
     ScanResult,
     scan_project,
     _file_to_module_path_universal,
@@ -857,3 +860,93 @@ class TestUniversalTestExclusion:
         # The test file should NOT be present
         test_module_ids = [mid for mid in module_ids if "ButtonTest" in mid or "Button.test" in mid]
         assert len(test_module_ids) == 0
+
+
+# ---------------------------------------------------------------------------
+# 11. CallInfo, InterfaceInfo, MethodSetEntry dataclasses
+# ---------------------------------------------------------------------------
+
+
+class TestCallInfo:
+    """Test CallInfo dataclass construction and defaults."""
+
+    def test_basic_construction(self):
+        info = CallInfo(caller="App.Update", callee="Save")
+        assert info.caller == "App.Update"
+        assert info.callee == "Save"
+        assert info.receiver == ""
+        assert info.file_path == ""
+        assert info.style == "direct"
+
+    def test_with_receiver(self):
+        info = CallInfo(caller="App.Update", callee="Save", receiver="Store")
+        assert info.receiver == "Store"
+
+    def test_method_style(self):
+        info = CallInfo(caller="main", callee="NewConfig", style="method")
+        assert info.style == "method"
+
+    def test_constructor_style(self):
+        info = CallInfo(caller="main", callee="MyService", style="constructor")
+        assert info.style == "constructor"
+
+
+class TestInterfaceInfo:
+    """Test InterfaceInfo dataclass construction and defaults."""
+
+    def test_basic_construction(self):
+        info = InterfaceInfo(name="Store")
+        assert info.name == "Store"
+        assert info.methods == []
+        assert info.file_path == ""
+
+    def test_with_methods(self):
+        info = InterfaceInfo(name="Store", methods=["Get", "Put", "Delete"])
+        assert info.methods == ["Get", "Put", "Delete"]
+
+    def test_with_file_path(self):
+        info = InterfaceInfo(name="Store", file_path="store/store.go")
+        assert info.file_path == "store/store.go"
+
+
+class TestMethodSetEntry:
+    """Test MethodSetEntry dataclass construction and defaults."""
+
+    def test_basic_construction(self):
+        entry = MethodSetEntry(struct_name="SQLiteStore", method_name="Get")
+        assert entry.struct_name == "SQLiteStore"
+        assert entry.method_name == "Get"
+        assert entry.file_path == ""
+
+    def test_with_file_path(self):
+        entry = MethodSetEntry(struct_name="SQLiteStore", method_name="Get", file_path="store/sqlite.go")
+        assert entry.file_path == "store/sqlite.go"
+
+
+class TestScanResultMergeNewFields:
+    """Test that ScanResult.merge handles calls, interfaces, and method_sets."""
+
+    def test_merge_calls(self):
+        a = ScanResult(calls=[CallInfo("main", "Foo")])
+        b = ScanResult(calls=[CallInfo("main", "Bar"), CallInfo("init", "Baz")])
+        a.merge(b)
+        assert len(a.calls) == 3
+        assert [c.callee for c in a.calls] == ["Foo", "Bar", "Baz"]
+
+    def test_merge_interfaces(self):
+        a = ScanResult(interfaces=[InterfaceInfo("Store")])
+        b = ScanResult(interfaces=[InterfaceInfo("Vault")])
+        a.merge(b)
+        assert len(a.interfaces) == 2
+
+    def test_merge_method_sets(self):
+        a = ScanResult(method_sets=[MethodSetEntry("Foo", "Get")])
+        b = ScanResult(method_sets=[MethodSetEntry("Bar", "Put")])
+        a.merge(b)
+        assert len(a.method_sets) == 2
+
+    def test_default_empty_lists(self):
+        r = ScanResult()
+        assert r.calls == []
+        assert r.interfaces == []
+        assert r.method_sets == []

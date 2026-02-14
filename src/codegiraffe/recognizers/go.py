@@ -23,7 +23,14 @@ from collections import defaultdict
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ImplementationInfo, ImportInfo, ScanResult
+from codegiraffe.scanner import (
+    CallInfo,
+    ImplementationInfo,
+    ImportInfo,
+    InterfaceInfo,
+    MethodSetEntry,
+    ScanResult,
+)
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -113,6 +120,60 @@ _GO_INTERFACE_BODY_RE = re.compile(
 
 # Method signature inside interface body
 _GO_INTERFACE_METHOD_RE = re.compile(r'(\w+)\s*\(')
+
+# Call detection (v0.9.0)
+_GO_FUNC_CALL_RE = re.compile(
+    r'(?:(\w+)\.)?(\w+)\s*\(',  # Optional receiver.Method(
+)
+_GO_FUNC_DEF_RE = re.compile(
+    r'^func\s+(?:\(\s*\w+\s+\*?\w+\s*\)\s+)?(\w+)\s*\(',
+    re.MULTILINE,
+)
+_GO_STDLIB_PACKAGES = frozenset({
+    "fmt", "log", "os", "io", "net", "http", "strings", "strconv",
+    "bytes", "bufio", "context", "crypto", "encoding", "errors",
+    "flag", "math", "path", "reflect", "regexp", "runtime", "sort",
+    "sync", "testing", "time", "unicode", "unsafe", "filepath",
+    "json", "xml", "sql", "template", "exec", "signal", "atomic",
+    "slog", "slices", "maps", "cmp",
+})
+
+
+def _find_enclosing_func(content: str) -> dict[int, str]:
+    """Build a mapping of line_number -> enclosing function name.
+
+    For method receivers like ``func (a *App) Update()``, returns "App.Update".
+    For plain functions like ``func main()``, returns "main".
+    """
+    result: dict[int, str] = {}
+    func_ranges: list[tuple[int, str]] = []
+
+    lines = content.split('\n')
+
+    for match in _GO_FUNC_DEF_RE.finditer(content):
+        func_name = match.group(1)
+        start_line = content[:match.start()].count('\n')
+
+        # Check if it's a method receiver
+        line = lines[start_line] if start_line < len(lines) else ""
+        receiver_match = re.match(r'func\s+\(\s*\w+\s+\*?(\w+)\s*\)\s+(\w+)', line)
+        if receiver_match:
+            func_name = f"{receiver_match.group(1)}.{receiver_match.group(2)}"
+
+        func_ranges.append((start_line, func_name))
+
+    # For each line, find the most recent func definition before it
+    for line_no in range(len(lines)):
+        current_func = ""
+        for func_start, func_name in func_ranges:
+            if func_start <= line_no:
+                current_func = func_name
+            else:
+                break
+        if current_func:
+            result[line_no] = current_func
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -530,4 +591,73 @@ class GoRecognizer:
                         file_path=rel_path,
                     ))
 
-        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)
+        # --- Call detection (v0.9.0) ---
+        calls: list[CallInfo] = []
+        enclosing = _find_enclosing_func(content)
+        rel_path_str = str(rel_path)
+
+        for match in _GO_FUNC_CALL_RE.finditer(content):
+            receiver = match.group(1) or ""
+            callee = match.group(2)
+
+            # Skip stdlib packages
+            if receiver.lower() in _GO_STDLIB_PACKAGES or receiver in _GO_STDLIB_PACKAGES:
+                continue
+            # Skip common Go builtins
+            if callee in (
+                "make", "append", "len", "cap", "copy", "delete",
+                "close", "panic", "recover", "new", "print", "println",
+            ):
+                continue
+            # Skip lowercase-only callees that look like local vars (Go exports are uppercase)
+            # But allow if there's a receiver
+            if not receiver and callee[0:1].islower():
+                continue
+
+            line_no = content[:match.start()].count('\n')
+            caller = enclosing.get(line_no, "")
+            style = "method" if receiver else "direct"
+
+            calls.append(CallInfo(
+                caller=caller,
+                callee=callee,
+                receiver=receiver,
+                file_path=rel_path_str,
+                style=style,
+            ))
+
+        # --- Interface info (v0.9.0) ---
+        interfaces: list[InterfaceInfo] = []
+        for match in _GO_INTERFACE_RE.finditer(content):
+            iface_name = match.group(1)
+            body_match = _GO_INTERFACE_BODY_RE.search(content[match.start():])
+            iface_methods: list[str] = []
+            if body_match:
+                for method_match in _GO_INTERFACE_METHOD_RE.finditer(body_match.group(2)):
+                    iface_methods.append(method_match.group(1))
+            interfaces.append(InterfaceInfo(
+                name=iface_name,
+                methods=iface_methods,
+                file_path=rel_path_str,
+            ))
+
+        # --- Method set entries (v0.9.0) ---
+        method_sets: list[MethodSetEntry] = []
+        for match in _GO_METHOD_RECEIVER_RE.finditer(content):
+            struct_name = match.group(1)
+            method_name = match.group(2)
+            method_sets.append(MethodSetEntry(
+                struct_name=struct_name,
+                method_name=method_name,
+                file_path=rel_path_str,
+            ))
+
+        return ScanResult(
+            nodes=nodes,
+            edges=edges,
+            imports=imports,
+            implementations=implementations,
+            calls=calls,
+            interfaces=interfaces,
+            method_sets=method_sets,
+        )

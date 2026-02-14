@@ -1174,13 +1174,14 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Dashboard contract styling: hexagonal purple nodes for contract visualization
 - [x] 791+ tests
 
-### v0.9.0 (planned — Scanner Depth)
+### v0.9.0 — Scanner Depth
 
-- [ ] Call-graph edges: detect function/method calls across Go, Python, TypeScript (minimum)
-- [ ] Enhanced Go interface/implementation tracking (duck-type satisfaction detection)
-- [ ] Demand-driven method-level nodes for call-graph participants
-- [ ] Tree-sitter AST call detection support
-- [ ] 860+ tests
+- [x] Call-graph edges: detect function/method calls across Go, Python, TypeScript (regex + AST)
+- [x] Enhanced Go interface/implementation tracking (duck-type satisfaction detection)
+- [x] Demand-driven method-level nodes for call-graph participants
+- [x] Tree-sitter AST call detection support
+- [x] Improved TypeScript multi-interface and generic `implements` handling
+- [x] 874+ tests
 
 ### v0.10.0 (planned — Change Impact Validation)
 
