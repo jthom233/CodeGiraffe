@@ -15,16 +15,22 @@ import pytest
 
 import codegiraffe.server as server_module
 from codegiraffe.server import (
-    codegiraffe_init,
-    codegiraffe_sync,
-    codegiraffe_history,
-    codegiraffe_diff,
-    codegiraffe_snapshot,
-    codegiraffe_restore,
-    codegiraffe_federate,
-    codegiraffe_cross_query,
+    codegiraffe_add_relation,
+    codegiraffe_blast_radius,
+    codegiraffe_context_for,
     codegiraffe_cross_edges,
+    codegiraffe_cross_query,
+    codegiraffe_cycles,
     codegiraffe_cypher,
+    codegiraffe_diff,
+    codegiraffe_federate,
+    codegiraffe_history,
+    codegiraffe_hotspots,
+    codegiraffe_init,
+    codegiraffe_restore,
+    codegiraffe_risk_assessment,
+    codegiraffe_snapshot,
+    codegiraffe_sync,
 )
 from codegiraffe.storage import JSONStorage
 from codegiraffe.versioning import VersionStore
@@ -356,3 +362,252 @@ class TestIncludeTests:
         codegiraffe_init(str(tmp_path))
         result = codegiraffe_sync(str(tmp_path), include_tests=False)
         assert "Sync complete" in result
+
+
+# ---------------------------------------------------------------------------
+# Blast radius tool tests (v0.7.0)
+# ---------------------------------------------------------------------------
+
+
+class TestBlastRadiusTool:
+    """Tests for the codegiraffe_blast_radius MCP tool."""
+
+    def _build_chain_project(self, tmp_path):
+        """Create a project with a chain: A -> B -> C -> D."""
+        (tmp_path / "app.py").write_text(
+            "class AppService:\n    pass\n"
+        )
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        # Build a chain manually: A -> B -> C -> D
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+        codegiraffe_add_relation(project_path, "B", "C", "calls")
+        codegiraffe_add_relation(project_path, "C", "D", "calls")
+        return project_path
+
+    def test_blast_radius_returns_markdown(self, tmp_path):
+        """Blast radius returns a markdown impact report."""
+        project_path = self._build_chain_project(tmp_path)
+        result = codegiraffe_blast_radius(project_path, node_id="A")
+        assert "## Impact Analysis" in result
+
+    def test_blast_radius_missing_node(self, tmp_path):
+        """Blast radius handles missing node gracefully (no exception)."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        result = codegiraffe_blast_radius(project_path, node_id="nonexistent_node")
+        # Should return an error string, not raise an exception
+        assert isinstance(result, str)
+        assert "not found" in result.lower()
+
+    def test_blast_radius_with_upstream(self, tmp_path):
+        """Blast radius with include_upstream=True adds upstream section."""
+        project_path = self._build_chain_project(tmp_path)
+        result = codegiraffe_blast_radius(
+            project_path, node_id="B", include_upstream=True
+        )
+        assert "## Impact Analysis" in result
+        # Upstream section should appear since A -> B exists
+        assert "Upstream" in result
+
+    def test_blast_radius_with_max_depth(self, tmp_path):
+        """Blast radius with max_depth limits results."""
+        project_path = self._build_chain_project(tmp_path)
+        # A -> B -> C -> D: max_depth=1 from A should only reach B
+        result_limited = codegiraffe_blast_radius(
+            project_path, node_id="A", max_depth=1
+        )
+        result_full = codegiraffe_blast_radius(
+            project_path, node_id="A"
+        )
+        assert "## Impact Analysis" in result_limited
+        assert "## Impact Analysis" in result_full
+        # The limited version should have fewer downstream nodes
+        # D is 3 hops away, so it should be excluded at max_depth=1
+        assert "D" not in result_limited or result_limited.count("D") < result_full.count("D")
+
+
+# ---------------------------------------------------------------------------
+# Risk assessment tool tests (v0.7.0)
+# ---------------------------------------------------------------------------
+
+
+class TestRiskAssessmentTool:
+    """Tests for the codegiraffe_risk_assessment MCP tool."""
+
+    def test_risk_assessment_default(self, tmp_path):
+        """Risk assessment returns top-10 markdown report."""
+        (tmp_path / "app.py").write_text(
+            "class AppService:\n    pass\n\n"
+            "class UserService:\n    pass\n"
+        )
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+        codegiraffe_add_relation(project_path, "B", "C", "calls")
+
+        result = codegiraffe_risk_assessment(project_path)
+        assert "## Risk Assessment Report" in result
+        assert "**Graph size:**" in result
+        assert "**Nodes assessed:**" in result
+
+    def test_risk_assessment_specific_nodes(self, tmp_path):
+        """Risk assessment with specific node_ids returns only those nodes."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+        codegiraffe_add_relation(project_path, "B", "C", "calls")
+
+        result = codegiraffe_risk_assessment(project_path, node_ids=["A"])
+        assert "## Risk Assessment Report" in result
+        # Only node A should be assessed
+        assert "**Nodes assessed:** 1" in result
+
+    def test_risk_assessment_empty_graph(self, tmp_path):
+        """Risk assessment on empty graph returns appropriate message."""
+        # Create an empty directory with no Python files
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        # The graph may have some scanned nodes, but if the graph is truly
+        # empty we should get the right message. Let's force an empty graph.
+        server_module._graph = None
+        from codegiraffe.graph import ArchGraph, GraphData
+        empty_data = GraphData(project_path=project_path)
+        empty_graph = ArchGraph(empty_data)
+        server_module._graph = empty_graph
+
+        result = codegiraffe_risk_assessment(project_path)
+        assert "Graph is empty" in result
+
+
+# ---------------------------------------------------------------------------
+# Cycles tool tests (v0.7.0)
+# ---------------------------------------------------------------------------
+
+
+class TestCyclesTool:
+    """Tests for the codegiraffe_cycles MCP tool."""
+
+    def test_no_cycles(self, tmp_path):
+        """No cycles returns appropriate message."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        # Add a simple chain (no cycles): A -> B -> C
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+        codegiraffe_add_relation(project_path, "B", "C", "calls")
+
+        result = codegiraffe_cycles(project_path)
+        assert "No circular dependencies detected." == result
+
+    def test_with_cycles(self, tmp_path):
+        """Cycles tool detects and formats cycles in markdown."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        # Create a cycle: X -> Y -> Z -> X
+        codegiraffe_add_relation(project_path, "X", "Y", "calls")
+        codegiraffe_add_relation(project_path, "Y", "Z", "calls")
+        codegiraffe_add_relation(project_path, "Z", "X", "calls")
+
+        result = codegiraffe_cycles(project_path)
+        assert "## Circular Dependencies" in result
+        assert "cycle(s) detected" in result
+
+
+# ---------------------------------------------------------------------------
+# Enhanced context_for tool tests (v0.7.0)
+# ---------------------------------------------------------------------------
+
+
+class TestEnhancedContextFor:
+    """Tests for the enhanced codegiraffe_context_for with include_impact."""
+
+    def test_context_for_default_unchanged(self, project_dir):
+        """Default behavior (include_impact=False) is unchanged."""
+        codegiraffe_init(project_dir)
+        result = codegiraffe_context_for(project_dir, task="user API")
+        data = json.loads(result)
+        # Should still return valid GraphData JSON
+        assert "nodes" in data
+        assert "edges" in data
+        # No impact metadata by default
+        for node_data in data.get("nodes", {}).values():
+            meta = node_data.get("metadata", {})
+            assert "_blast_radius_count" not in meta
+            assert "_risk_score" not in meta
+
+    def test_context_for_with_impact(self, project_dir):
+        """include_impact=True augments nodes with _blast_radius_count and _risk_score."""
+        codegiraffe_init(project_dir)
+        result = codegiraffe_context_for(
+            project_dir, task="user API", include_impact=True
+        )
+        data = json.loads(result)
+        assert "nodes" in data
+        # All returned nodes should have impact metadata
+        for node_data in data.get("nodes", {}).values():
+            meta = node_data.get("metadata", {})
+            assert "_blast_radius_count" in meta
+            assert "_risk_score" in meta
+
+
+# ---------------------------------------------------------------------------
+# Enhanced hotspots tool tests (v0.7.0)
+# ---------------------------------------------------------------------------
+
+
+class TestEnhancedHotspots:
+    """Tests for the enhanced codegiraffe_hotspots with metrics parameter."""
+
+    def _build_project(self, tmp_path):
+        """Create a project with several nodes and edges."""
+        (tmp_path / "app.py").write_text(
+            "class AppService:\n    pass\n\n"
+            "class UserService:\n    pass\n"
+        )
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+        codegiraffe_add_relation(project_path, "B", "C", "calls")
+        codegiraffe_add_relation(project_path, "A", "C", "calls")
+        codegiraffe_add_relation(project_path, "C", "D", "calls")
+        return project_path
+
+    def test_hotspots_default_unchanged(self, tmp_path):
+        """Default behavior (metrics='degree') unchanged."""
+        project_path = self._build_project(tmp_path)
+        result = codegiraffe_hotspots(project_path)
+        data = json.loads(result)
+        assert isinstance(data, list)
+        assert len(data) > 0
+        # Each entry has node_id, label, type, score
+        for item in data:
+            assert "node_id" in item
+            assert "label" in item
+            assert "type" in item
+            assert "score" in item
+
+    def test_hotspots_betweenness(self, tmp_path):
+        """metrics='betweenness' returns results ranked by betweenness centrality."""
+        project_path = self._build_project(tmp_path)
+        result = codegiraffe_hotspots(project_path, metrics="betweenness")
+        data = json.loads(result)
+        assert isinstance(data, list)
+        assert len(data) > 0
+        for item in data:
+            assert "node_id" in item
+            assert "score" in item
+
+    def test_hotspots_combined(self, tmp_path):
+        """metrics='combined' returns results."""
+        project_path = self._build_project(tmp_path)
+        result = codegiraffe_hotspots(project_path, metrics="combined")
+        data = json.loads(result)
+        assert isinstance(data, list)
+        assert len(data) > 0
+        for item in data:
+            assert "node_id" in item
+            assert "score" in item

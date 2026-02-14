@@ -12,6 +12,8 @@ import string
 import subprocess
 from typing import Any
 
+import networkx as nx
+
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 from codegiraffe import embeddings as _embeddings_mod
 
@@ -75,6 +77,21 @@ def _similarity(a: str, b: str) -> float:
                     max_len = curr[j]
         prev = curr
     return max_len / max(n, m)
+
+
+def _compute_severity(distance: int) -> str:
+    """Map hop distance to a severity tier.
+
+    - ``"direct"`` for distance 1 (immediate neighbors)
+    - ``"transitive"`` for distances 2-3 (short propagation chains)
+    - ``"indirect"`` for distance > 3 (long propagation chains)
+    """
+    if distance == 1:
+        return "direct"
+    elif distance <= 3:
+        return "transitive"
+    else:
+        return "indirect"
 
 
 def _detect_git_renames(project_path: str, since: str | None = None) -> dict[str, str]:
@@ -453,6 +470,294 @@ def _context_for_task_keywords(
     )
 
     return merged
+
+
+
+# ---------------------------------------------------------------------------
+# Blast radius & impact analysis
+# ---------------------------------------------------------------------------
+
+
+def compute_blast_radius(
+    graph: ArchGraph,
+    node_id: str,
+    include_upstream: bool = False,
+    max_depth: int | None = None,
+) -> dict[str, Any]:
+    """Compute the blast radius of changing *node_id*.
+
+    Returns a dict describing all downstream (and optionally upstream) nodes
+    affected by a change to the target node, along with cycle information
+    and critical-path hotspots within the impact zone.
+
+    Parameters
+    ----------
+    graph:
+        The architecture graph to analyze.
+    node_id:
+        The node whose blast radius should be computed.
+    include_upstream:
+        If ``True``, also compute upstream (ancestor) impact.
+    max_depth:
+        If set, limit the blast radius to nodes within this many hops.
+
+    Raises
+    ------
+    ValueError
+        If *node_id* is not present in the graph (includes fuzzy suggestions).
+    """
+    # Validate node exists
+    if node_id not in graph.graph:
+        candidates = _all_node_ids(graph)
+        suggestions = _fuzzy_suggestions(node_id, candidates)
+        msg = f"Node '{node_id}' not found in graph."
+        if suggestions:
+            suggestion_str = ", ".join(f"'{s}'" for s in suggestions)
+            msg += f" Did you mean one of: {suggestion_str}?"
+        raise ValueError(msg)
+
+    # Target node data
+    target_node_data = graph.graph.nodes[node_id].get("node")
+    target_info: dict[str, Any] = {
+        "id": node_id,
+        "label": target_node_data.label if target_node_data else node_id,
+        "type": target_node_data.type if target_node_data else "unknown",
+        "file_path": target_node_data.file_path if target_node_data else None,
+    }
+
+    # --- Downstream impact ---
+    all_descendants = graph.get_all_descendants(node_id)
+
+    # Efficient single-BFS for all distances and paths
+    distances = dict(nx.single_source_shortest_path_length(graph.graph, node_id))
+    paths = dict(nx.single_source_shortest_path(graph.graph, node_id))
+
+    downstream: list[dict[str, Any]] = []
+    for desc_id in sorted(all_descendants):
+        dist = distances.get(desc_id)
+        if dist is None:
+            continue
+        if max_depth is not None and dist > max_depth:
+            continue
+        desc_node = graph.graph.nodes[desc_id].get("node")
+        if desc_node is None:
+            continue
+        downstream.append({
+            "node_id": desc_id,
+            "label": desc_node.label,
+            "type": desc_node.type,
+            "distance": dist,
+            "severity": _compute_severity(dist),
+            "path": paths.get(desc_id, []),
+            "file_path": desc_node.file_path,
+        })
+
+    downstream.sort(key=lambda x: (x["distance"], x["node_id"]))
+
+    # --- Upstream impact (optional) ---
+    upstream: list[dict[str, Any]] = []
+    if include_upstream:
+        all_ancestors = graph.get_all_ancestors(node_id)
+        rev = graph.graph.reverse()
+        up_distances = dict(nx.single_source_shortest_path_length(rev, node_id))
+        up_paths = dict(nx.single_source_shortest_path(rev, node_id))
+
+        for anc_id in sorted(all_ancestors):
+            dist = up_distances.get(anc_id)
+            if dist is None:
+                continue
+            if max_depth is not None and dist > max_depth:
+                continue
+            anc_node = graph.graph.nodes[anc_id].get("node")
+            if anc_node is None:
+                continue
+            upstream.append({
+                "node_id": anc_id,
+                "label": anc_node.label,
+                "type": anc_node.type,
+                "distance": dist,
+                "severity": _compute_severity(dist),
+                "path": up_paths.get(anc_id, []),
+                "file_path": anc_node.file_path,
+            })
+
+        upstream.sort(key=lambda x: (x["distance"], x["node_id"]))
+
+    # --- Cycle detection ---
+    all_cycles = graph.detect_cycles(max_cycles=50)
+    relevant_cycles = [c for c in all_cycles if node_id in c]
+
+    # --- Critical paths (betweenness in impact subgraph) ---
+    impact_ids = all_descendants | {node_id}
+    # Filter to nodes actually in downstream (respecting max_depth)
+    if max_depth is not None:
+        downstream_ids = {item["node_id"] for item in downstream}
+        impact_ids = downstream_ids | {node_id}
+    sub = graph.graph.subgraph(impact_ids)
+    critical_paths: list[dict[str, Any]] = []
+    if len(sub) > 1:
+        betweenness = nx.betweenness_centrality(sub)
+        critical = sorted(betweenness.items(), key=lambda x: x[1], reverse=True)[:5]
+        for nid, score in critical:
+            cp_node = graph.graph.nodes[nid].get("node")
+            if cp_node is not None:
+                critical_paths.append({
+                    "node_id": nid,
+                    "label": cp_node.label,
+                    "centrality": round(score, 4),
+                })
+
+    result: dict[str, Any] = {
+        "target_node": target_info,
+        "downstream": downstream,
+        "total_impact_count": len(downstream),
+        "cycles": relevant_cycles,
+        "critical_paths": critical_paths,
+    }
+    if include_upstream:
+        result["upstream"] = upstream
+
+    return result
+
+
+def generate_impact_summary(blast_radius: dict[str, Any], graph: ArchGraph) -> str:
+    """Generate a human-readable markdown impact report from *blast_radius* data.
+
+    Sections are omitted when they contain no items.
+
+    Parameters
+    ----------
+    blast_radius:
+        The dict returned by :func:`compute_blast_radius`.
+    graph:
+        The architecture graph (used to look up edge types for direct deps).
+    """
+    target = blast_radius["target_node"]
+    downstream = blast_radius["downstream"]
+    upstream = blast_radius.get("upstream", [])
+    cycles = blast_radius.get("cycles", [])
+    critical_paths = blast_radius.get("critical_paths", [])
+    total = blast_radius["total_impact_count"]
+
+    lines: list[str] = []
+    lines.append(f"## Impact Analysis: {target['label']}")
+    lines.append("")
+    lines.append(f"**Total blast radius:** {total} nodes affected")
+    lines.append("")
+
+    # Group downstream by severity
+    direct = [n for n in downstream if n["severity"] == "direct"]
+    transitive = [n for n in downstream if n["severity"] == "transitive"]
+    indirect = [n for n in downstream if n["severity"] == "indirect"]
+
+    target_id = target["id"]
+
+    # --- Direct Dependencies ---
+    if direct:
+        lines.append(f"### Direct Dependencies ({len(direct)})")
+        lines.append("")
+        for item in direct:
+            edge_data = graph.graph.edges.get((target_id, item["node_id"]), {})
+            edge_obj = edge_data.get("edge")
+            edge_type = edge_obj.type if edge_obj else "unknown"
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(
+                f"- **{item['label']}** ({item['type']}) -- via {edge_type} edge{fp}"
+            )
+        lines.append("")
+
+    # --- Transitive Impact ---
+    if transitive:
+        lines.append(f"### Transitive Impact ({len(transitive)})")
+        lines.append("")
+        for item in transitive:
+            path_summary = " -> ".join(item["path"])
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(
+                f"- **{item['label']}** ({item['type']}) -- "
+                f"{item['distance']} hops via {path_summary}{fp}"
+            )
+        lines.append("")
+
+    # --- Indirect Impact ---
+    if indirect:
+        lines.append(f"### Indirect Impact ({len(indirect)})")
+        lines.append("")
+        for item in indirect:
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(
+                f"- **{item['label']}** ({item['type']}) -- "
+                f"{item['distance']} hops{fp}"
+            )
+        lines.append("")
+
+    # --- Upstream Dependencies ---
+    if upstream:
+        lines.append(f"### Upstream Dependencies ({len(upstream)})")
+        lines.append("")
+        for item in upstream:
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(
+                f"- **{item['label']}** ({item['type']}) -- "
+                f"{item['distance']} hops upstream{fp}"
+            )
+        lines.append("")
+
+    # --- Circular Dependencies ---
+    if cycles:
+        lines.append(f"### Circular Dependencies")
+        lines.append("")
+        for cycle in cycles:
+            display = cycle + [cycle[0]]
+            lines.append(f"- {' -> '.join(display)}")
+        lines.append("")
+
+    # --- Hotspots in Impact Zone ---
+    if critical_paths:
+        lines.append("### Hotspots in Impact Zone")
+        lines.append("")
+        for cp in critical_paths:
+            lines.append(
+                f"- **{cp['label']}** (centrality: {cp['centrality']:.4f})"
+            )
+        lines.append("")
+
+    # --- Recommendations ---
+    recommendations: list[str] = []
+    if direct:
+        # Recommend testing the direct dep with the highest downstream reach
+        most_connected = max(
+            direct,
+            key=lambda d: len(graph.get_all_descendants(d["node_id"])),
+        )
+        desc_count = len(graph.get_all_descendants(most_connected["node_id"]))
+        if desc_count > 0:
+            recommendations.append(
+                f"Consider testing **{most_connected['label']}** -- it is a direct "
+                f"dependency with {desc_count} downstream dependents"
+            )
+    if cycles:
+        for cycle in cycles:
+            display = cycle + [cycle[0]]
+            recommendations.append(
+                f"Warning: circular dependency detected: {' -> '.join(display)}"
+            )
+    if critical_paths:
+        top_hotspot = critical_paths[0]
+        if top_hotspot["centrality"] > 0:
+            recommendations.append(
+                f"**{top_hotspot['label']}** is the highest-centrality node in the "
+                f"impact zone -- changes here amplify blast radius"
+            )
+
+    if recommendations:
+        lines.append("### Recommendations")
+        lines.append("")
+        for rec in recommendations:
+            lines.append(f"- {rec}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def detect_drift(

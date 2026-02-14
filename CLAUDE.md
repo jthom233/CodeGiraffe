@@ -1,11 +1,11 @@
 # Code Giraffe Development Guidelines
 
 ## Active Technologies
-- **Version**: 0.6.0
+- **Version**: 0.7.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - **Storage**: JSON files + SQLite + Neo4j (optional)
-- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (698+ tests)
+- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (754+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
 
@@ -13,13 +13,13 @@
 
 ```text
 src/codegiraffe/          # Main package
-├── server.py             # FastMCP server + 19 MCP tool definitions
+├── server.py             # FastMCP server + 22 MCP tool definitions
 ├── graph.py              # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph
 ├── storage.py            # StorageBackend protocol + JSONStorage
 ├── sqlite_storage.py     # SQLiteStorage implementation
 ├── scanner.py            # Scanner pipeline + PythonRecognizer
 ├── registry.py           # RecognizerRegistry plugin system
-├── query.py              # Subgraph extraction, scoring, drift detection
+├── query.py              # Subgraph extraction, scoring, drift detection, blast radius, risk, cycles
 ├── schema.py             # Node/edge type enums
 ├── export.py             # Mermaid + D3.js graph export
 ├── embeddings.py         # Embedding-based scoring + cache
@@ -39,7 +39,7 @@ src/codegiraffe/          # Main package
     ├── php.py
     └── ruby.py
 
-tests/                    # 698+ tests
+tests/                    # 754+ tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 
@@ -92,6 +92,7 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
+- v0.7.0: Impact analysis tools -- `codegiraffe_blast_radius` (downstream impact by severity), `codegiraffe_risk_assessment` (composite risk scoring), `codegiraffe_cycles` (circular dependency detection); enhanced `codegiraffe_context_for` with `include_impact` parameter; enhanced `codegiraffe_hotspots` with `metrics` parameter; 22 MCP tools total; 754+ tests
 - v0.6.0 (006-language-agnostic-intelligence): Language-agnostic scanner intelligence -- universal module nodes, `contains` edges, import detection, and implementation/inheritance detection for all 9 languages; `ImportInfo` and `ImplementationInfo` data classes on `ScanResult` for structured recognizer output; Go `go.mod`-aware import parsing and interface implementation detection; test file exclusion extended to all languages; 698+ tests
 - v0.5.0: 4 new language recognizers (C#, C/C++, PHP, Ruby — now 9 languages); 3 new dashboard layouts (grid, concentric, breadthfirst); dashboard improvements (legend, stats, edge tooltips, refined colors); 566+ tests
 - v0.4.0 (005-scanner-intelligence): Scanner intelligence -- test file exclusion, import detection, inheritance detection, module nodes; new schema types (`module`, `imports`, `implements`, `contains`); `include_tests` parameter on `codegiraffe_init` and `codegiraffe_sync`; 505+ tests

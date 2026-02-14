@@ -98,7 +98,7 @@ Add to your `claude_desktop_config.json`:
 
 ## MCP Tools
 
-Code Giraffe exposes 19 tools that any MCP client can call:
+Code Giraffe exposes 22 tools that any MCP client can call:
 
 ### `codegiraffe_init`
 
@@ -183,6 +183,7 @@ The killer tool. Given a natural-language task description, returns the minimal 
 | `task` | `str` | required | Natural language task description |
 | `max_nodes` | `int` | `20` | Maximum nodes to return |
 | `use_embeddings` | `bool` | `true` | Use embedding-based semantic scoring when available |
+| `include_impact` | `bool` | `false` | Include blast radius and risk assessment for top nodes |
 
 When `sentence-transformers` is installed and `use_embeddings` is `true`, scoring uses embedding-based semantic similarity for significantly better relevance ranking. Otherwise, it falls back to keyword overlap scoring. See the [Embedding-Based Scoring](#embedding-based-scoring) section for details.
 
@@ -232,6 +233,7 @@ Identify the most coupled, change-prone areas of the architecture. Ranks nodes b
 |---|---|---|---|
 | `project_path` | `str` | required | Root directory of the project |
 | `top_n` | `int` | `10` | Number of hotspots to return |
+| `metrics` | `list[str] \| None` | `None` | Metrics to include: `"degree"`, `"betweenness"`, `"risk"` (None = degree only) |
 
 **Example:**
 ```
@@ -496,11 +498,68 @@ codegiraffe_cypher(project_path="/home/user/my-project", query="MATCH (n:endpoin
 --> [{"n.label": "GET /api/users", "n.id": "endpoint:/api/users"}, ...]
 ```
 
+### `codegiraffe_blast_radius`
+
+Analyze the blast radius of changing a specific node. Returns what breaks downstream, ranked by severity (direct, transitive, indirect), plus any circular dependencies and hotspots.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `node_id` | `str` | required | Node to analyze blast radius for |
+| `include_upstream` | `bool` | `false` | Include upstream dependencies |
+| `max_depth` | `int \| None` | `None` | Limit analysis to N hops |
+
+**Example:**
+```
+codegiraffe_blast_radius(
+  project_path="/home/user/my-project",
+  node_id="service:AuthService",
+  include_upstream=true
+)
+--> {"node_id": "service:AuthService", "direct": [...], "transitive": [...], "indirect": [...], "hotspots": [...], "cycles": [...]}
+```
+
+---
+
+### `codegiraffe_risk_assessment`
+
+Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4) + (descendants/total * 0.2).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `node_ids` | `list[str] \| None` | `None` | Specific nodes to assess (None = top 10) |
+
+**Example:**
+```
+codegiraffe_risk_assessment(project_path="/home/user/my-project")
+--> [{"node_id": "service:AuthService", "risk_score": 0.82, "degree": 12, "betweenness": 0.45, "descendants": 8}, ...]
+```
+
+---
+
+### `codegiraffe_cycles`
+
+Detect circular dependencies in the architecture graph.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `max_cycles` | `int` | `20` | Maximum number of cycles to detect |
+
+**Example:**
+```
+codegiraffe_cycles(project_path="/home/user/my-project", max_cycles=10)
+--> [{"cycle": ["service:A", "service:B", "service:C", "service:A"], "length": 3}, ...]
+```
+
+---
+
 ## Architecture
 
 ```
 src/codegiraffe/
-├── server.py            # FastMCP server + 19 tool definitions
+├── server.py            # FastMCP server + 22 tool definitions
 ├── graph.py             # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph engine
 ├── storage.py           # StorageBackend protocol + JSON file implementation
 ├── sqlite_storage.py    # SQLite storage backend for larger graphs
@@ -947,7 +1006,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-698+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers (all 9 languages with import/implementation detection), query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, and web dashboard.
+754+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers (all 9 languages with import/implementation detection), query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, web dashboard, blast radius analysis, risk assessment, and cycle detection.
 
 ### Project Constitution
 
@@ -1012,6 +1071,16 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Go `go.mod`-aware import path resolution and interface implementation detection
 - [x] Test file exclusion extended to all 9 languages
 - [x] 698+ tests
+
+### v0.7.0 (completed)
+
+- [x] 3 new MCP tools: `codegiraffe_blast_radius`, `codegiraffe_risk_assessment`, `codegiraffe_cycles` (22 tools total)
+- [x] Blast radius analysis: downstream impact ranked by severity (direct, transitive, indirect)
+- [x] Risk assessment: composite score from degree centrality, betweenness centrality, and descendant count
+- [x] Cycle detection: find circular dependencies in the architecture graph
+- [x] Enhanced `codegiraffe_context_for` with `include_impact` parameter for blast radius + risk on top nodes
+- [x] Enhanced `codegiraffe_hotspots` with `metrics` parameter for multi-metric analysis
+- [x] 754+ tests
 
 ### Future
 
