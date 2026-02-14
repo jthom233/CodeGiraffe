@@ -1183,13 +1183,14 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Improved TypeScript multi-interface and generic `implements` handling
 - [x] 874+ tests
 
-### v0.10.0 (planned — Change Impact Validation)
+### v0.10.0 — Change Impact Validation
 
-- [ ] `codegiraffe_validate_changes`: detect missing changes from a git diff
-- [ ] `codegiraffe_suggest_tests`: recommend test files to run for a given change
-- [ ] `codegiraffe_file_coupling`: mine git history for co-changed file pairs
-- [ ] Enhanced `codegiraffe_context_for` with change-aware scoring
-- [ ] 890+ tests
+- [x] `codegiraffe_validate_changes`: detect missing changes from a git diff
+- [x] `codegiraffe_suggest_tests`: recommend test files to run for a given change
+- [x] `codegiraffe_file_coupling`: mine git history for co-changed file pairs
+- [x] Enhanced `codegiraffe_context_for` with `include_changes` parameter
+- [x] New modules: `diff_parser.py`, `git_utils.py`
+- [x] 979+ tests
 
 ### Future
 

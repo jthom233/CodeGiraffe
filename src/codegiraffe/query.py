@@ -7,10 +7,19 @@ and the actual codebase.
 
 from __future__ import annotations
 
+import os
 import re
 import string
 import subprocess
 from typing import Any
+
+from codegiraffe.diff_parser import (
+    ChangeReport,
+    CouplingPair,
+    DiffFile,
+    TestSuggestion,
+)
+from codegiraffe.git_utils import get_commit_file_history, is_git_repo
 
 import networkx as nx
 
@@ -1155,3 +1164,486 @@ def detect_drift(
     drifts.extend(_detect_edge_drift(graph_edges_auto, scanned_result.edges))
 
     return drifts
+
+
+# ---------------------------------------------------------------------------
+# Change impact validation
+# ---------------------------------------------------------------------------
+
+
+def map_files_to_nodes(
+    graph: ArchGraph, file_paths: list[str]
+) -> dict[str, list[str]]:
+    """Map file paths to graph node IDs.
+
+    For each file path the following matching strategies are tried:
+
+    1. **Exact match** -- the node's ``file_path`` attribute equals the query
+       path exactly.
+    2. **Suffix match** -- the node's ``file_path`` ends with the query path
+       (handles absolute vs. relative differences).
+    3. **Module ID match** -- the query path is converted to a dotted module
+       name and compared against node IDs prefixed with ``mod:``.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Mapping of each input *file_path* to the list of matching node IDs.
+        Unmatched paths map to empty lists.
+    """
+    result: dict[str, list[str]] = {fp: [] for fp in file_paths}
+
+    # Pre-compute module-style names for each query path.
+    # e.g. "src/codegiraffe/scanner.py" -> "codegiraffe.scanner"
+    path_to_module: dict[str, str] = {}
+    for fp in file_paths:
+        # Strip leading directories like "src/" and the extension
+        base = fp
+        # Remove common prefixes
+        for prefix in ("src/", "lib/", "pkg/"):
+            if base.startswith(prefix):
+                base = base[len(prefix):]
+                break
+        # Strip extension
+        if "." in os.path.basename(base):
+            base = base.rsplit(".", 1)[0]
+        # Convert path separators to dots
+        module_name = base.replace("/", ".").replace("\\", ".")
+        path_to_module[fp] = module_name
+
+    for nid, attrs in graph.graph.nodes(data=True):
+        node: Node | None = attrs.get("node")
+        if node is None:
+            continue
+
+        for fp in file_paths:
+            matched = False
+            # Strategy 1: exact match on file_path
+            if node.file_path and node.file_path == fp:
+                matched = True
+            # Strategy 2: suffix match
+            elif node.file_path and (
+                node.file_path.endswith("/" + fp)
+                or fp.endswith("/" + node.file_path)
+            ):
+                matched = True
+            # Strategy 3: module ID match
+            elif nid.startswith("mod:") and path_to_module.get(fp):
+                mod_name = path_to_module[fp]
+                node_mod = nid[4:]  # strip "mod:" prefix
+                if node_mod == mod_name or node_mod.endswith("." + mod_name.split(".")[-1]):
+                    # More precise: check if the module name matches
+                    if mod_name == node_mod or mod_name.endswith(node_mod) or node_mod.endswith(mod_name):
+                        matched = True
+
+            if matched and nid not in result[fp]:
+                result[fp].append(nid)
+
+    return result
+
+
+def validate_changes(
+    graph: ArchGraph, diff_files: list[DiffFile]
+) -> ChangeReport:
+    """Validate whether a set of file changes adequately covers the blast radius.
+
+    Identifies graph nodes affected by the change, computes the combined
+    blast radius of all changed nodes, and partitions impacted nodes into
+    *covered* (also changed) and *uncovered* (potentially missing changes).
+    Contract violations are flagged when a contract producer is changed but
+    its consumers are not.
+
+    Parameters
+    ----------
+    graph:
+        The architecture graph to analyze.
+    diff_files:
+        Parsed diff files representing the change set.
+
+    Returns
+    -------
+    ChangeReport
+        Aggregate report with changed/covered/uncovered nodes,
+        contract violations, and recommendations.
+    """
+    if not diff_files:
+        return ChangeReport()
+
+    # Extract file paths from diff
+    file_paths = [df.path for df in diff_files]
+
+    # Map files to graph nodes
+    file_node_map = map_files_to_nodes(graph, file_paths)
+
+    # Collect all changed node IDs
+    changed_node_ids: set[str] = set()
+    for fp, node_ids in file_node_map.items():
+        changed_node_ids.update(node_ids)
+
+    if not changed_node_ids:
+        return ChangeReport(
+            changed_files=diff_files,
+            changed_nodes=[],
+            covered_nodes=[],
+            uncovered_nodes=[],
+        )
+
+    # Compute combined blast radius for all changed nodes
+    all_impacted: dict[str, dict[str, Any]] = {}
+    for node_id in changed_node_ids:
+        if node_id not in graph.graph:
+            continue
+        try:
+            blast = compute_blast_radius(graph, node_id)
+        except ValueError:
+            continue
+        for item in blast.get("downstream", []):
+            imp_id = item["node_id"]
+            if imp_id not in all_impacted:
+                all_impacted[imp_id] = item
+        for item in blast.get("contract_impact", []):
+            imp_id = item["node_id"]
+            if imp_id not in all_impacted:
+                all_impacted[imp_id] = item
+
+    # Partition into covered / uncovered
+    covered: list[str] = []
+    uncovered: list[str] = []
+    for imp_id in sorted(all_impacted.keys()):
+        if imp_id in changed_node_ids:
+            covered.append(imp_id)
+        else:
+            uncovered.append(imp_id)
+
+    # Check contract violations: changed producer but unchanged consumers
+    contract_violations: list[str] = []
+    for nid in graph.graph.nodes:
+        node_data = graph.graph.nodes[nid].get("node")
+        if node_data is None or node_data.type != "contract":
+            continue
+        producer = node_data.metadata.get("producer", "")
+        consumers = node_data.metadata.get("consumers", [])
+        if producer in changed_node_ids:
+            for consumer_id in consumers:
+                if consumer_id not in changed_node_ids:
+                    contract_violations.append(
+                        f"Contract '{node_data.label}': producer '{producer}' "
+                        f"changed but consumer '{consumer_id}' not updated"
+                    )
+
+    # Generate recommendations for uncovered nodes
+    recommendations: list[str] = []
+    for imp_id in uncovered:
+        item = all_impacted[imp_id]
+        severity = item.get("severity", "unknown")
+        label = item.get("label", imp_id)
+        node_type = item.get("type", "unknown")
+        # Find the edge type from a changed node to this impacted node
+        edge_info = ""
+        for changed_id in changed_node_ids:
+            edge_data = graph.graph.edges.get((changed_id, imp_id), {})
+            edge_obj = edge_data.get("edge")
+            if edge_obj:
+                edge_info = f" (via {edge_obj.type} edge)"
+                break
+        if severity == "critical":
+            recommendations.append(
+                f"CRITICAL: '{label}' ({node_type}) is a contract consumer "
+                f"that may need updating{edge_info}"
+            )
+        else:
+            recommendations.append(
+                f"Consider updating '{label}' ({node_type}), "
+                f"severity: {severity}{edge_info}"
+            )
+
+    return ChangeReport(
+        changed_files=diff_files,
+        changed_nodes=sorted(changed_node_ids),
+        covered_nodes=covered,
+        uncovered_nodes=uncovered,
+        contract_violations=contract_violations,
+        recommendations=recommendations,
+        total_blast_radius=len(all_impacted),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test suggestion
+# ---------------------------------------------------------------------------
+
+_TEST_PATTERNS: dict[str, list[str]] = {
+    ".py": ["test_{name}.py", "tests/test_{name}.py", "{name}_test.py"],
+    ".go": ["{name}_test.go"],
+    ".ts": ["{name}.test.ts", "{name}.spec.ts", "__tests__/{name}.test.ts"],
+    ".tsx": ["{name}.test.tsx", "{name}.spec.tsx"],
+    ".js": ["{name}.test.js", "{name}.spec.js", "__tests__/{name}.test.js"],
+    ".jsx": ["{name}.test.jsx", "{name}.spec.jsx"],
+    ".rs": ["tests/{name}.rs", "{name}_test.rs"],
+    ".java": ["{name}Test.java", "test/{name}Test.java"],
+    ".cs": ["{name}Tests.cs", "{name}Test.cs"],
+    ".php": ["{name}Test.php", "tests/{name}Test.php"],
+    ".rb": ["{name}_spec.rb", "spec/{name}_spec.rb", "test_{name}.rb"],
+}
+
+
+def suggest_tests(
+    graph: ArchGraph,
+    diff_files: list[DiffFile],
+    max_suggestions: int = 20,
+) -> list[TestSuggestion]:
+    """Suggest test files that should be run to validate a change.
+
+    Uses three complementary strategies:
+
+    1. **Graph-based** (score 0.9): Test nodes that have import edges
+       to/from any changed node.
+    2. **Naming convention** (score 0.6): Test files whose names match
+       common naming patterns for the changed source files.
+    3. **Blast radius** (score 0.3): Test nodes that appear in the
+       transitive dependency set of changed nodes.
+
+    Results are deduplicated (keeping the highest score), sorted by score
+    descending, and truncated to *max_suggestions*.
+
+    Parameters
+    ----------
+    graph:
+        The architecture graph.
+    diff_files:
+        Parsed diff files representing the change set.
+    max_suggestions:
+        Maximum number of suggestions to return.
+
+    Returns
+    -------
+    list[TestSuggestion]
+        Suggested test files, scored and ordered by relevance.
+    """
+    if not diff_files:
+        return []
+
+    file_paths = [df.path for df in diff_files]
+    file_node_map = map_files_to_nodes(graph, file_paths)
+
+    changed_node_ids: set[str] = set()
+    for fp, node_ids in file_node_map.items():
+        changed_node_ids.update(node_ids)
+
+    # Collect all test nodes (nodes with source: test metadata)
+    test_nodes: dict[str, Node] = {}
+    for nid, attrs in graph.graph.nodes(data=True):
+        node: Node | None = attrs.get("node")
+        if node is None:
+            continue
+        if node.metadata.get("source") == "test":
+            test_nodes[nid] = node
+
+    # Also collect all node IDs mapped by their file_path for naming strategy
+    file_path_to_node_ids: dict[str, list[str]] = {}
+    for nid, attrs in graph.graph.nodes(data=True):
+        node = attrs.get("node")
+        if node is None or not node.file_path:
+            continue
+        fp = node.file_path
+        if fp not in file_path_to_node_ids:
+            file_path_to_node_ids[fp] = []
+        file_path_to_node_ids[fp].append(nid)
+
+    suggestions: dict[str, TestSuggestion] = {}  # keyed by file_path or node_id
+
+    # --- Strategy 1: Graph-based (score 0.9) ---
+    for changed_id in changed_node_ids:
+        if changed_id not in graph.graph:
+            continue
+        # Check all neighbors (both directions)
+        neighbors = set(graph.graph.successors(changed_id)) | set(
+            graph.graph.predecessors(changed_id)
+        )
+        for neighbor_id in neighbors:
+            if neighbor_id in test_nodes:
+                test_node = test_nodes[neighbor_id]
+                key = test_node.file_path or neighbor_id
+                if key not in suggestions or suggestions[key].score < 0.9:
+                    suggestions[key] = TestSuggestion(
+                        file_path=test_node.file_path or neighbor_id,
+                        score=0.9,
+                        reason=f"Test imports/is imported by changed node '{changed_id}'",
+                        strategy="graph",
+                    )
+
+    # --- Strategy 2: Naming convention (score 0.6) ---
+    for fp in file_paths:
+        basename = os.path.basename(fp)
+        # Find the extension
+        ext = ""
+        for e in _TEST_PATTERNS:
+            if basename.endswith(e):
+                ext = e
+                break
+        if not ext:
+            continue
+        # Extract name without extension
+        name = basename[: -len(ext)]
+        patterns = _TEST_PATTERNS[ext]
+
+        for pattern in patterns:
+            test_filename = pattern.format(name=name)
+            # Check if any node in the graph has a matching file_path
+            for node_fp, node_ids in file_path_to_node_ids.items():
+                if node_fp.endswith(test_filename) or os.path.basename(node_fp) == test_filename:
+                    key = node_fp
+                    if key not in suggestions or suggestions[key].score < 0.6:
+                        suggestions[key] = TestSuggestion(
+                            file_path=node_fp,
+                            score=0.6,
+                            reason=f"Naming convention: '{test_filename}' matches changed '{basename}'",
+                            strategy="naming",
+                        )
+
+    # --- Strategy 3: Blast radius (score 0.3) ---
+    for changed_id in changed_node_ids:
+        if changed_id not in graph.graph:
+            continue
+        try:
+            blast = compute_blast_radius(graph, changed_id)
+        except ValueError:
+            continue
+        for item in blast.get("downstream", []):
+            imp_id = item["node_id"]
+            if imp_id in test_nodes:
+                test_node = test_nodes[imp_id]
+                key = test_node.file_path or imp_id
+                if key not in suggestions or suggestions[key].score < 0.3:
+                    suggestions[key] = TestSuggestion(
+                        file_path=test_node.file_path or imp_id,
+                        score=0.3,
+                        reason=f"In blast radius of changed node '{changed_id}'",
+                        strategy="blast_radius",
+                    )
+
+    # Sort by score descending, truncate
+    sorted_suggestions = sorted(
+        suggestions.values(), key=lambda s: (-s.score, s.file_path)
+    )
+    return sorted_suggestions[:max_suggestions]
+
+
+# ---------------------------------------------------------------------------
+# File coupling analysis
+# ---------------------------------------------------------------------------
+
+
+def file_coupling(
+    graph: ArchGraph,
+    project_path: str,
+    file_path: str | None = None,
+    depth: int = 100,
+    min_commits: int = 3,
+    min_coupling: float = 0.1,
+) -> list[CouplingPair]:
+    """Analyze file coupling from git co-change history.
+
+    Mines the recent commit history to find files that frequently change
+    together, then cross-references with the architecture graph to check
+    whether an explicit edge exists between the co-changing files.
+
+    Parameters
+    ----------
+    graph:
+        The architecture graph (used for cross-referencing).
+    project_path:
+        Filesystem path to the git repository.
+    file_path:
+        If provided, only return pairs involving this file.
+    depth:
+        Number of recent commits to analyze.
+    min_commits:
+        Minimum co-change count for a pair to be included.
+    min_coupling:
+        Minimum coupling ratio (0.0 to 1.0) for inclusion.
+
+    Returns
+    -------
+    list[CouplingPair]
+        Co-changing file pairs sorted by coupling descending, limited to
+        the top 20.  Returns an empty list for non-git directories.
+    """
+    if not is_git_repo(project_path):
+        return []
+
+    history = get_commit_file_history(project_path, depth)
+    if not history:
+        return []
+
+    # Count individual file changes
+    file_change_count: dict[str, int] = {}
+    # Count co-changes for each pair
+    co_change_count: dict[tuple[str, str], int] = {}
+
+    for commit_files in history:
+        unique_files = sorted(set(commit_files))
+        for f in unique_files:
+            file_change_count[f] = file_change_count.get(f, 0) + 1
+        # Generate all pairs in this commit
+        for i in range(len(unique_files)):
+            for j in range(i + 1, len(unique_files)):
+                pair = (unique_files[i], unique_files[j])
+                co_change_count[pair] = co_change_count.get(pair, 0) + 1
+
+    # Compute coupling and filter
+    pairs: list[CouplingPair] = []
+    for (fa, fb), co_count in co_change_count.items():
+        if co_count < min_commits:
+            continue
+        count_a = file_change_count.get(fa, 0)
+        count_b = file_change_count.get(fb, 0)
+        coupling = co_count / max(count_a, count_b) if max(count_a, count_b) > 0 else 0.0
+        if coupling < min_coupling:
+            continue
+
+        # Filter by file_path if specified
+        if file_path is not None and fa != file_path and fb != file_path:
+            continue
+
+        # Cross-reference with graph
+        file_node_map = map_files_to_nodes(graph, [fa, fb])
+        nodes_a = file_node_map.get(fa, [])
+        nodes_b = file_node_map.get(fb, [])
+
+        in_graph = False
+        edge_type = ""
+        for na in nodes_a:
+            for nb in nodes_b:
+                edge_data = graph.graph.edges.get((na, nb), {})
+                edge_obj = edge_data.get("edge")
+                if edge_obj:
+                    in_graph = True
+                    edge_type = edge_obj.type
+                    break
+                # Check reverse direction too
+                edge_data = graph.graph.edges.get((nb, na), {})
+                edge_obj = edge_data.get("edge")
+                if edge_obj:
+                    in_graph = True
+                    edge_type = edge_obj.type
+                    break
+            if in_graph:
+                break
+
+        pairs.append(
+            CouplingPair(
+                file_a=fa,
+                file_b=fb,
+                co_change_count=co_count,
+                change_count_a=count_a,
+                change_count_b=count_b,
+                coupling=round(coupling, 4),
+                in_graph=in_graph,
+                edge_type=edge_type,
+            )
+        )
+
+    # Sort by coupling descending, limit to top 20
+    pairs.sort(key=lambda p: (-p.coupling, p.file_a, p.file_b))
+    return pairs[:20]

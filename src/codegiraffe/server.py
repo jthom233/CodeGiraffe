@@ -20,11 +20,22 @@ from codegiraffe.query import (
     compute_blast_radius,
     context_for_task,
     detect_drift,
+    file_coupling,
     generate_impact_summary,
     get_contracts,
+    map_files_to_nodes,
     query_by_node,
     query_by_type,
+    suggest_tests,
+    validate_changes,
     validate_contracts,
+)
+from codegiraffe.diff_parser import parse_diff
+from codegiraffe.git_utils import (
+    get_changed_files,
+    get_uncommitted_diff,
+    is_git_repo,
+    NotAGitRepoError,
 )
 from codegiraffe.scanner import scan_project
 from codegiraffe.storage import JSONStorage, StorageBackend
@@ -269,6 +280,7 @@ def codegiraffe_context_for(
     max_nodes: int = 20,
     use_embeddings: bool = True,
     include_impact: bool = False,
+    include_changes: bool = False,
 ) -> str:
     """Get the most relevant subgraph for a natural-language task description.
 
@@ -279,6 +291,10 @@ def codegiraffe_context_for(
 
     When *include_impact* is True, each node in the result is augmented with
     ``_blast_radius_count`` and ``_risk_score`` metadata fields.
+
+    When *include_changes* is True, nodes affected by uncommitted git changes
+    receive a score boost and ``_recently_changed`` / ``_in_change_blast_radius``
+    metadata annotations.
 
     Useful for scoping what parts of the architecture are relevant before
     making changes.
@@ -300,6 +316,42 @@ def codegiraffe_context_for(
                 )
                 node.metadata["_blast_radius_count"] = desc_count
                 node.metadata["_risk_score"] = round(risk, 4)
+
+        if include_changes:
+            try:
+                changed_files = get_changed_files(project_path)
+                if changed_files:
+                    file_node_map = map_files_to_nodes(graph, changed_files)
+                    changed_node_ids: set[str] = set()
+                    for node_ids in file_node_map.values():
+                        changed_node_ids.update(node_ids)
+
+                    # Compute blast radius for changed nodes
+                    blast_node_ids: set[str] = set()
+                    for nid in changed_node_ids:
+                        if nid in graph.graph:
+                            descendants = graph.get_all_descendants(nid)
+                            blast_node_ids.update(descendants)
+                    # Remove the changed nodes themselves from blast set
+                    blast_node_ids -= changed_node_ids
+
+                    # Apply score boosts and metadata annotations
+                    for nid, node in subgraph.nodes.items():
+                        if nid in changed_node_ids:
+                            current_score = node.metadata.get("_relevance_score", 0.0)
+                            node.metadata["_relevance_score"] = round(
+                                current_score + 0.3, 4
+                            )
+                            node.metadata["_recently_changed"] = True
+                        elif nid in blast_node_ids:
+                            current_score = node.metadata.get("_relevance_score", 0.0)
+                            node.metadata["_relevance_score"] = round(
+                                current_score + 0.15, 4
+                            )
+                            node.metadata["_in_change_blast_radius"] = True
+            except Exception:
+                # Silent fallback — don't break existing behavior
+                pass
 
         return subgraph.model_dump_json(indent=2)
     except Exception as exc:
@@ -777,6 +829,263 @@ def codegiraffe_add_contract(
         return "\n".join(result_lines)
     except Exception as exc:
         return f"Error adding contract: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Change impact validation tools (v0.10.0)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_validate_changes(
+    project_path: str,
+    diff: str | None = None,
+    auto: bool = True,
+) -> str:
+    """Analyze uncommitted (or arbitrary) changes against the architecture graph to detect incomplete modifications.
+
+    Parses a diff, maps changed files to graph nodes, computes blast radius,
+    and reports potentially missing changes and contract violations.
+
+    When auto=True and diff is not provided, reads uncommitted changes from git.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    # Obtain the diff text
+    raw_diff: str | None = diff
+    if raw_diff is None:
+        if not auto:
+            return "Error: no diff provided and auto=False. Pass a diff string or set auto=True."
+        try:
+            raw_diff = get_uncommitted_diff(project_path)
+        except NotAGitRepoError:
+            return f"Error: '{project_path}' is not a git repository."
+
+    if not raw_diff or not raw_diff.strip():
+        return "No uncommitted changes found."
+
+    diff_files = parse_diff(raw_diff)
+    if not diff_files:
+        return "No uncommitted changes found."
+
+    report = validate_changes(graph, diff_files)
+    return _format_validation_report(report)
+
+
+@mcp.tool()
+def codegiraffe_suggest_tests(
+    project_path: str,
+    diff: str | None = None,
+    auto: bool = True,
+    max_suggestions: int = 20,
+) -> str:
+    """Suggest test files to run based on uncommitted (or arbitrary) changes.
+
+    Uses graph relationships, naming conventions, and blast radius analysis
+    to identify the most relevant tests for a given change set.
+
+    When auto=True and diff is not provided, reads uncommitted changes from git.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    # Obtain the diff text
+    raw_diff: str | None = diff
+    if raw_diff is None:
+        if not auto:
+            return "Error: no diff provided and auto=False. Pass a diff string or set auto=True."
+        try:
+            raw_diff = get_uncommitted_diff(project_path)
+        except NotAGitRepoError:
+            return f"Error: '{project_path}' is not a git repository."
+
+    if not raw_diff or not raw_diff.strip():
+        return "No uncommitted changes found."
+
+    diff_files = parse_diff(raw_diff)
+    if not diff_files:
+        return "No uncommitted changes found."
+
+    suggestions = suggest_tests(graph, diff_files, max_suggestions=max_suggestions)
+    return _format_test_suggestions(suggestions)
+
+
+@mcp.tool()
+def codegiraffe_file_coupling(
+    project_path: str,
+    file_path: str | None = None,
+    depth: int = 100,
+    min_commits: int = 3,
+    min_coupling: float = 0.1,
+) -> str:
+    """Analyze file coupling from git co-change history.
+
+    Mines recent commit history to find files that frequently change
+    together, then cross-references with the architecture graph to detect
+    implicit coupling not yet captured in the graph.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    if not is_git_repo(project_path):
+        return f"Error: '{project_path}' is not a git repository."
+
+    pairs = file_coupling(
+        graph,
+        project_path,
+        file_path=file_path,
+        depth=depth,
+        min_commits=min_commits,
+        min_coupling=min_coupling,
+    )
+    return _format_coupling_report(pairs, file_path)
+
+
+# ---------------------------------------------------------------------------
+# Change impact report helpers (private, not MCP tools)
+# ---------------------------------------------------------------------------
+
+
+def _format_validation_report(report) -> str:
+    """Format a ChangeReport as a markdown report."""
+    lines = ["## Change Impact Validation", ""]
+
+    # Changes Detected
+    lines.append("### Changes Detected")
+    if report.changed_files:
+        for df in report.changed_files:
+            lines.append(f"- `{df.path}` ({df.status})")
+    else:
+        lines.append("- No files changed")
+    lines.append("")
+
+    # Impact Analysis
+    lines.append("### Impact Analysis")
+    lines.append(f"- **Total blast radius:** {report.total_blast_radius} node(s)")
+    lines.append("")
+
+    # Covered Impact
+    if report.covered_nodes:
+        lines.append(f"### Covered Impact ({len(report.covered_nodes)})")
+        for nid in report.covered_nodes:
+            lines.append(f"- `{nid}` (covered in diff)")
+        lines.append("")
+
+    # Potentially Missing Changes
+    if report.uncovered_nodes:
+        lines.append(f"### Potentially Missing Changes ({len(report.uncovered_nodes)})")
+        for nid in report.uncovered_nodes:
+            lines.append(f"- `{nid}`")
+        lines.append("")
+
+    # Contract Violations
+    if report.contract_violations:
+        lines.append(f"### Contract Violations ({len(report.contract_violations)})")
+        for violation in report.contract_violations:
+            lines.append(f"- {violation}")
+        lines.append("")
+
+    # Recommendations
+    if report.recommendations:
+        lines.append(f"### Recommendations ({len(report.recommendations)})")
+        for rec in report.recommendations:
+            lines.append(f"- {rec}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _format_test_suggestions(suggestions) -> str:
+    """Format a list of TestSuggestion as a markdown report."""
+    if not suggestions:
+        return "## Test Suggestions\n\nNo test suggestions found for the given changes."
+
+    lines = ["## Test Suggestions", ""]
+    lines.append(f"**{len(suggestions)} test(s) suggested**")
+    lines.append("")
+
+    # Group by score range
+    high = [s for s in suggestions if s.score >= 0.7]
+    medium = [s for s in suggestions if 0.3 <= s.score < 0.7]
+    low = [s for s in suggestions if s.score < 0.3]
+
+    if high:
+        lines.append("### High Relevance")
+        for s in high:
+            lines.append(
+                f"- **{s.file_path}** (score: {s.score:.1f}) — {s.reason} [{s.strategy}]"
+            )
+        lines.append("")
+
+    if medium:
+        lines.append("### Medium Relevance")
+        for s in medium:
+            lines.append(
+                f"- **{s.file_path}** (score: {s.score:.1f}) — {s.reason} [{s.strategy}]"
+            )
+        lines.append("")
+
+    if low:
+        lines.append("### Low Relevance")
+        for s in low:
+            lines.append(
+                f"- **{s.file_path}** (score: {s.score:.1f}) — {s.reason} [{s.strategy}]"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _format_coupling_report(pairs, file_path: str | None = None) -> str:
+    """Format a list of CouplingPair as a markdown report."""
+    lines = ["## File Coupling Analysis", ""]
+
+    if file_path:
+        lines.append(f"**Focus file:** `{file_path}`")
+        lines.append("")
+
+    if not pairs:
+        lines.append("No file coupling pairs found above the threshold.")
+        return "\n".join(lines)
+
+    lines.append(f"**{len(pairs)} coupled pair(s) found**")
+    lines.append("")
+
+    # Markdown table
+    lines.append("| Coupled File | Co-Changes | Coupling | In Graph? |")
+    lines.append("|---|---|---|---|")
+    for p in pairs:
+        # Show the "other" file when a focus file is given
+        if file_path:
+            other = p.file_b if p.file_a == file_path else p.file_a
+        else:
+            other = f"{p.file_a} <-> {p.file_b}"
+        in_graph = "Yes" if p.in_graph else "No"
+        lines.append(
+            f"| `{other}` | {p.co_change_count} | {p.coupling:.2f} | {in_graph} |"
+        )
+    lines.append("")
+
+    # Implicit coupling section
+    implicit = [p for p in pairs if not p.in_graph and p.coupling >= 0.5]
+    if implicit:
+        lines.append(f"### Implicit Coupling ({len(implicit)} pair(s) not in graph)")
+        lines.append("")
+        for p in implicit:
+            lines.append(
+                f"- `{p.file_a}` <-> `{p.file_b}` (coupling: {p.coupling:.2f}, "
+                f"co-changes: {p.co_change_count}) — consider adding a graph edge"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
