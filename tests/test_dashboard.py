@@ -101,8 +101,8 @@ class TestDashboardHTML:
     def test_contains_cytoscape_cdn(self):
         assert "cytoscape/3.30.4/cytoscape.min.js" in DASHBOARD_HTML
 
-    def test_contains_cose_bilkent_cdn(self):
-        assert "cytoscape-cose-bilkent/4.1.0/cytoscape-cose-bilkent.min.js" in DASHBOARD_HTML
+    def test_uses_cose_layout(self):
+        assert "'cose'" in DASHBOARD_HTML or '"cose"' in DASHBOARD_HTML
 
     def test_contains_sidebar(self):
         assert 'id="sidebar"' in DASHBOARD_HTML

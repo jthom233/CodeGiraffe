@@ -247,15 +247,9 @@ body {
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.4/cytoscape.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape-cose-bilkent/4.1.0/cytoscape-cose-bilkent.min.js"></script>
 <script>
 (function() {
   "use strict";
-
-  // Register cose-bilkent layout extension
-  if (typeof cytoscapeCoseBilkent !== 'undefined') {
-    cytoscape.use(cytoscapeCoseBilkent);
-  }
 
   // ---- Color / shape palettes ----
   const TYPE_COLORS = {
@@ -273,7 +267,7 @@ body {
 
   // ---- State ----
   let cy = null;
-  let currentLayout = 'cose-bilkent';
+  let currentLayout = 'cose';
   let allElements = [];
   let activeTypes = new Set();
 
@@ -383,7 +377,7 @@ body {
           }
         }
       ],
-      layout: { name: 'cose-bilkent', animate: false, nodeDimensionsIncludeLabels: true }
+      layout: { name: 'cose', animate: false, nodeDimensionsIncludeLabels: true }
     });
 
     cy.on('tap', 'node', function(evt) { showNodeDetail(evt.target.data()); });
@@ -397,8 +391,8 @@ body {
 
   function runLayout(name) {
     if (!cy) return;
-    const opts = name === 'cose-bilkent'
-      ? { name: 'cose-bilkent', animate: true, animationDuration: 500, nodeDimensionsIncludeLabels: true }
+    const opts = name === 'cose'
+      ? { name: 'cose', animate: true, animationDuration: 500, nodeDimensionsIncludeLabels: true }
       : { name: 'circle', animate: true, animationDuration: 500 };
     cy.layout(opts).run();
   }
@@ -567,8 +561,8 @@ body {
   });
 
   document.getElementById('btn-layout').addEventListener('click', function() {
-    currentLayout = currentLayout === 'cose-bilkent' ? 'circle' : 'cose-bilkent';
-    this.textContent = currentLayout === 'cose-bilkent' ? 'Layout' : 'Circle';
+    currentLayout = currentLayout === 'cose' ? 'circle' : 'cose';
+    this.textContent = currentLayout === 'cose' ? 'Layout' : 'Circle';
     runLayout(currentLayout);
   });
 

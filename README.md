@@ -814,7 +814,7 @@ Then open `http://localhost:8000/dashboard` in your browser.
 - **Search** — Filter nodes by label or ID in real-time
 - **Node detail panel** — Click any node to see its properties, metadata, and connected edges
 - **Subgraph focus** — Double-click a node to zoom into its neighborhood
-- **Layout switching** — Toggle between force-directed (cose-bilkent) and circular layouts
+- **Layout switching** — Toggle between force-directed and circular layouts
 - **PNG export** — Download the current view as an image
 - **Dark theme** — Developer-friendly dark interface
 
