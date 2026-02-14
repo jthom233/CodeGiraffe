@@ -468,6 +468,15 @@ body {
             'line-color': '#E74C3C',
             'target-arrow-color': '#E74C3C'
           }
+        },
+        {
+          selector: 'edge[type="calls"]',
+          style: {
+            'line-color': '#3498DB',
+            'target-arrow-color': '#3498DB',
+            'line-style': 'solid',
+            'width': 2
+          }
         }
       ],
       layout: { name: 'cose', animate: false, nodeDimensionsIncludeLabels: true }
@@ -480,6 +489,7 @@ body {
     });
 
     const EDGE_LABELS = {
+        calls: 'Calls',
         produces: 'Produces',
         consumes_contract: 'Consumes Contract',
         validates: 'Validates',
@@ -686,6 +696,7 @@ body {
     const edgeStyles = {
         imports: { color: '#E67E22', style: 'dashed' },
         implements: { color: '#9B59B6', style: '' },
+        calls: { color: '#3498DB', style: '' },
         contains: { color: '#2ECC71', style: 'dotted' },
         produces: { color: '#8E44AD', style: '' },
         consumes_contract: { color: '#9B59B6', style: 'dashed' },
