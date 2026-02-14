@@ -406,3 +406,107 @@ class TestContractAwareBlastRadius:
         blast = compute_blast_radius(linear_chain_graph, "mod:A")
         summary = generate_impact_summary(blast, linear_chain_graph)
         assert "### Contract Impact" not in summary
+
+
+# ---------------------------------------------------------------------------
+# Bug regression: blast radius on a contract node itself
+# ---------------------------------------------------------------------------
+
+
+def test_blast_radius_on_contract_node_includes_consumers():
+    """Blast radius of a contract node should surface its consumers.
+
+    Bug: calling compute_blast_radius() on a contract node returns
+    total_impact_count == 0 because _compute_contract_impact only checks
+    nodes whose metadata["producer"] matches node_id (the contract itself is
+    never its own producer), and the BFS finds no outgoing edges since
+    produces / consumes_contract edges point *to* the contract.
+    """
+    g = ArchGraph()
+
+    # Producer node
+    g.add_node(
+        Node(
+            id="mod:auth.config",
+            type=NodeType.MODULE,
+            label="config",
+            file_path="auth/config.py",
+        )
+    )
+    # Consumer nodes
+    g.add_node(
+        Node(
+            id="service:UserService",
+            type=NodeType.SERVICE,
+            label="UserService",
+            file_path="services/user.py",
+        )
+    )
+    g.add_node(
+        Node(
+            id="service:PaymentService",
+            type=NodeType.SERVICE,
+            label="PaymentService",
+            file_path="services/payment.py",
+        )
+    )
+    # Contract node
+    g.add_node(
+        Node(
+            id="contract:config:API_KEY",
+            type=NodeType.CONTRACT,
+            label="Config: API_KEY",
+            metadata={
+                "contract_type": "config",
+                "producer": "mod:auth.config",
+                "consumers": ["service:UserService", "service:PaymentService"],
+                "status": "active",
+                "inferred": True,
+            },
+        )
+    )
+
+    # Edges: producer -> contract, consumers -> contract
+    g.add_edge(
+        Edge(
+            source="mod:auth.config",
+            target="contract:config:API_KEY",
+            type=EdgeType.PRODUCES,
+            metadata={"inferred": True},
+        )
+    )
+    g.add_edge(
+        Edge(
+            source="service:UserService",
+            target="contract:config:API_KEY",
+            type=EdgeType.CONSUMES_CONTRACT,
+            metadata={"inferred": True},
+        )
+    )
+    g.add_edge(
+        Edge(
+            source="service:PaymentService",
+            target="contract:config:API_KEY",
+            type=EdgeType.CONSUMES_CONTRACT,
+            metadata={"inferred": True},
+        )
+    )
+
+    result = compute_blast_radius(g, "contract:config:API_KEY")
+
+    # The contract's consumers should appear somewhere in the impact
+    all_impact_ids = set()
+    for item in result.get("downstream", []):
+        all_impact_ids.add(item["node_id"])
+    for item in result.get("contract_impact", []):
+        all_impact_ids.add(item["node_id"])
+
+    assert "service:UserService" in all_impact_ids, (
+        "UserService should appear in the blast radius of its contract"
+    )
+    assert "service:PaymentService" in all_impact_ids, (
+        "PaymentService should appear in the blast radius of its contract"
+    )
+    assert result["total_impact_count"] > 0, (
+        "Contract node blast radius must not be zero when consumers exist"
+    )

@@ -489,6 +489,29 @@ def _compute_contract_impact(graph: ArchGraph, node_id: str) -> list[dict[str, A
     ``distance="contract"``.
     """
     impact: list[dict[str, Any]] = []
+
+    # If the target node IS a contract, report its consumers directly
+    target_data = graph.graph.nodes.get(node_id, {}).get("node")
+    if target_data is not None and target_data.type == "contract":
+        consumers = target_data.metadata.get("consumers", [])
+        for consumer_id in consumers:
+            if consumer_id not in graph.graph:
+                continue
+            consumer_data = graph.graph.nodes[consumer_id].get("node")
+            if consumer_data is None:
+                continue
+            impact.append({
+                "node_id": consumer_id,
+                "label": consumer_data.label,
+                "type": consumer_data.type,
+                "distance": "contract",
+                "severity": "critical",
+                "path": [node_id, consumer_id],
+                "contract_name": target_data.label,
+                "contract_type": target_data.metadata.get("contract_type", "unknown"),
+            })
+        return impact
+
     for nid, data in graph.graph.nodes(data=True):
         node_obj = data.get("node")
         if node_obj is None:

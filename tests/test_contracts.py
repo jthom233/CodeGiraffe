@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult, _infer_contract_edges
+from codegiraffe.scanner import ScanResult, _infer_contract_edges, scan_project
 from codegiraffe.schema import EdgeType, NodeType
 
 
@@ -497,3 +497,89 @@ class TestContractInferenceOrchestrator:
         assert "consumers" in meta
         assert "status" in meta
         assert meta["status"] == "active"
+
+
+# ===========================================================================
+# Deterministic scan regression
+# ===========================================================================
+
+
+def test_scan_project_produces_deterministic_contracts(tmp_path):
+    """Scanning the same directory twice must produce identical contract graphs.
+
+    This verifies that init and sync (which both call scan_project) produce
+    equivalent results, specifically for inferred contracts.
+    """
+    from codegiraffe.recognizers.go import GoRecognizer
+    from codegiraffe.registry import RecognizerRegistry
+
+    # Create Go files that trigger a config contract (shared XDG_CONFIG_HOME)
+    config_dir = tmp_path / "internal" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.go").write_text(
+        'package config\n'
+        '\n'
+        'import "os"\n'
+        '\n'
+        'type Config struct {\n'
+        '    Home string\n'
+        '}\n'
+        '\n'
+        'func NewConfig() *Config {\n'
+        '    return &Config{\n'
+        '        Home: os.Getenv("XDG_CONFIG_HOME"),\n'
+        '    }\n'
+        '}\n'
+    )
+
+    vault_dir = tmp_path / "internal" / "vault"
+    vault_dir.mkdir(parents=True)
+    (vault_dir / "vault.go").write_text(
+        'package vault\n'
+        '\n'
+        'import "os"\n'
+        '\n'
+        'type Vault struct {\n'
+        '    Path string\n'
+        '}\n'
+        '\n'
+        'func NewVault() *Vault {\n'
+        '    return &Vault{\n'
+        '        Path: os.Getenv("XDG_CONFIG_HOME"),\n'
+        '    }\n'
+        '}\n'
+    )
+
+    registry = RecognizerRegistry()
+    registry.register(GoRecognizer(), extensions=[".go"])
+
+    # Scan twice — simulating init then sync
+    result1 = scan_project(str(tmp_path), registry=registry)
+    result2 = scan_project(str(tmp_path), registry=registry)
+
+    # Same node counts
+    assert len(result1.nodes) == len(result2.nodes), (
+        f"Node count mismatch: {len(result1.nodes)} vs {len(result2.nodes)}"
+    )
+    # Same edge counts
+    assert len(result1.edges) == len(result2.edges), (
+        f"Edge count mismatch: {len(result1.edges)} vs {len(result2.edges)}"
+    )
+
+    # Same contract nodes
+    contracts1 = sorted(
+        [n for n in result1.nodes if n.type == NodeType.CONTRACT.value],
+        key=lambda n: n.id,
+    )
+    contracts2 = sorted(
+        [n for n in result2.nodes if n.type == NodeType.CONTRACT.value],
+        key=lambda n: n.id,
+    )
+    assert len(contracts1) == len(contracts2), (
+        f"Contract count mismatch: {len(contracts1)} vs {len(contracts2)}"
+    )
+    for c1, c2 in zip(contracts1, contracts2):
+        assert c1.id == c2.id
+        assert c1.metadata["contract_type"] == c2.metadata["contract_type"]
+        assert c1.metadata["producer"] == c2.metadata["producer"]
+        assert sorted(c1.metadata["consumers"]) == sorted(c2.metadata["consumers"])
