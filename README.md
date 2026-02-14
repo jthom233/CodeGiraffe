@@ -52,10 +52,12 @@ For AST-aware scanning (optional):
 uv pip install -e ".[ast]"
 ```
 
-Or with pip:
+Or install optional features with pip:
 
 ```bash
-pip install -e ".[embeddings]"
+pip install -e ".[embeddings]"   # Embedding-based scoring
+pip install -e ".[neo4j]"        # Neo4j storage backend
+pip install -e ".[ast]"          # AST-aware scanning
 ```
 
 ### Add to Claude Code
@@ -202,7 +204,7 @@ Check if the graph still matches the actual codebase. Re-scans the project and c
 |---|---|---|---|
 | `project_path` | `str` | required | Root directory of the project |
 
-Reports three kinds of drift:
+Reports four kinds of drift:
 
 - **missing_in_code** -- Nodes in the graph that no longer exist in the codebase
 - **missing_in_graph** -- Patterns found in code that are not in the graph
@@ -240,7 +242,7 @@ codegiraffe_hotspots(project_path="/home/user/my-project", top_n=5)
 
 ### `codegiraffe_sync`
 
-Incrementally update the graph after code changes. Re-scans only what changed while preserving manual annotations.
+Re-scan the project and synchronize the architecture graph, preserving manual annotations.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -550,7 +552,7 @@ src/codegiraffe/
 
 **Node types:** `service`, `endpoint`, `database_table`, `queue`, `env_var`, `config`, `worker`, `frontend_component`, `event`, `external_api`
 
-**Edge types:** `calls`, `reads`, `writes`, `publishes`, `consumes`, `depends_on`, `configures`, `owns`, `triggers`
+**Edge types:** `calls`, `reads`, `writes`, `publishes`, `consumes`, `depends_on`, `configures`, `owns`, `triggers`, `cross_repo_calls`, `cross_repo_depends_on`, `cross_repo_publishes`, `cross_repo_consumes`
 
 Custom types are fully supported -- any string works as a node or edge type.
 
@@ -583,8 +585,9 @@ uv pip install -e ".[neo4j]"
 ```
 
 Configure via environment variables:
-- `NEO4J_URI` -- Connection URI (default: `bolt://localhost:7687`)
-- `NEO4J_AUTH` -- Colon-separated user:password (default: `neo4j:password`)
+- `NEO4J_URI` -- Connection URI (default: `neo4j://localhost:7687`)
+- `NEO4J_USER` -- Database user (default: `neo4j`)
+- `NEO4J_PASSWORD` -- Database password (required for authenticated access)
 
 ```
 codegiraffe_init(project_path="/home/user/enterprise-project", backend="neo4j")
@@ -737,7 +740,7 @@ codegiraffe_claim(project_path="...", agent_id="agent-2",
 
 ## Schema Evolution & Versioning
 
-Code Giraffe tracks how your architecture graph changes over time. Every `codegiraffe_sync` and `codegiraffe_init --rescan` automatically creates a version.
+Code Giraffe tracks how your architecture graph changes over time. Every `codegiraffe_sync` and `codegiraffe_init(rescan=True)` automatically creates a version.
 
 ### Automatic Versioning
 
@@ -824,9 +827,10 @@ The dashboard also exposes JSON API endpoints for programmatic access:
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/graph/{project_path}` | Full graph as D3.js-compatible JSON |
-| `GET /api/node/{project_path}/{node_id}` | Node detail with connected edges |
-| `GET /api/subgraph/{project_path}/{node_id}?depth=2` | Subgraph centered on a node |
+| `POST /api/init` | Initialize/scan a project (body: `{"project_path": "..."}`) |
+| `GET /api/graph?project_path=...` | Full graph as D3.js-compatible JSON |
+| `GET /api/node?project_path=...&node_id=...` | Node detail with connected edges |
+| `GET /api/subgraph?project_path=...&node_id=...&depth=2` | Subgraph centered on a node |
 
 ## Usage Patterns
 

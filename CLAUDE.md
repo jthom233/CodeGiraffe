@@ -4,16 +4,16 @@
 
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
-- **Storage**: JSON files + SQLite
+- **Storage**: JSON files + SQLite + Neo4j (optional)
 - **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23
 - **Package Management**: uv
-- **Optional**: sentence-transformers >= 2.0 (for embedding-based scoring)
+- **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
 
 ## Project Structure
 
 ```text
 src/codegiraffe/          # Main package
-├── server.py             # FastMCP server + 11 MCP tool definitions
+├── server.py             # FastMCP server + 19 MCP tool definitions
 ├── graph.py              # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph
 ├── storage.py            # StorageBackend protocol + JSONStorage
 ├── sqlite_storage.py     # SQLiteStorage implementation
@@ -24,13 +24,18 @@ src/codegiraffe/          # Main package
 ├── export.py             # Mermaid + D3.js graph export
 ├── embeddings.py         # Embedding-based scoring + cache
 ├── coordination.py       # Multi-agent coordination store
+├── versioning.py         # Schema evolution and version history
+├── federation.py         # Cross-repo graph federation
+├── neo4j_storage.py      # Neo4j storage backend (optional)
+├── ast_scanner.py        # tree-sitter AST scanning (optional)
+├── dashboard.py          # Web dashboard (Cytoscape.js)
 └── recognizers/          # Language-specific pattern recognizers
     ├── typescript.py
     ├── go.py
     ├── rust.py
     └── java.py
 
-tests/                    # 231 tests
+tests/                    # 426 tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 
@@ -61,7 +66,7 @@ python src/codegiraffe/server.py
 
 ## Key Patterns
 
-- Scanner uses regex, NOT AST parsing
+- Scanner uses regex by default; AST scanning via tree-sitter available with `scanner_mode="ast"`
 - RecognizerRegistry maps file extensions to recognizer instances
 - Embedding scoring is optional with graceful fallback to keywords
 - Coordination uses file-based JSON store with TTL expiration
