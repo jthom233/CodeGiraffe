@@ -1174,6 +1174,22 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Dashboard contract styling: hexagonal purple nodes for contract visualization
 - [x] 791+ tests
 
+### v0.9.0 (planned — Scanner Depth)
+
+- [ ] Call-graph edges: detect function/method calls across Go, Python, TypeScript (minimum)
+- [ ] Enhanced Go interface/implementation tracking (duck-type satisfaction detection)
+- [ ] Demand-driven method-level nodes for call-graph participants
+- [ ] Tree-sitter AST call detection support
+- [ ] 860+ tests
+
+### v0.10.0 (planned — Change Impact Validation)
+
+- [ ] `codegiraffe_validate_changes`: detect missing changes from a git diff
+- [ ] `codegiraffe_suggest_tests`: recommend test files to run for a given change
+- [ ] `codegiraffe_file_coupling`: mine git history for co-changed file pairs
+- [ ] Enhanced `codegiraffe_context_for` with change-aware scoring
+- [ ] 890+ tests
+
 ### Future
 
 - [ ] Publish to PyPI
