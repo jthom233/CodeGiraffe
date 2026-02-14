@@ -432,3 +432,225 @@ class TestToDataRoundtrip:
 
         assert restored_data.nodes["service:X"].metadata == {"version": "2.0", "team": "platform"}
         assert restored_data.nodes["service:X"].file_path == "services/x.py"
+
+
+class TestGetAllDescendants:
+    """Tests for ArchGraph.get_all_descendants()."""
+
+    def test_happy_path(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_node(Node(id="D", type=NodeType.SERVICE, label="D"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="C", target="D", type=EdgeType.CALLS))
+        assert g.get_all_descendants("A") == {"B", "C", "D"}
+
+    def test_missing_node(self):
+        g = ArchGraph()
+        assert g.get_all_descendants("nonexistent") == set()
+
+    def test_no_descendants(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        assert g.get_all_descendants("B") == set()
+
+    def test_cyclic_graph(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="C", target="A", type=EdgeType.CALLS))
+        assert g.get_all_descendants("A") == {"B", "C"}
+
+
+class TestGetAllAncestors:
+    """Tests for ArchGraph.get_all_ancestors()."""
+
+    def test_happy_path(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_node(Node(id="D", type=NodeType.SERVICE, label="D"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="C", target="D", type=EdgeType.CALLS))
+        assert g.get_all_ancestors("D") == {"A", "B", "C"}
+
+    def test_missing_node(self):
+        g = ArchGraph()
+        assert g.get_all_ancestors("nonexistent") == set()
+
+    def test_no_ancestors(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        assert g.get_all_ancestors("A") == set()
+
+    def test_cyclic_graph(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="C", target="A", type=EdgeType.CALLS))
+        assert g.get_all_ancestors("A") == {"B", "C"}
+
+
+class TestFindPaths:
+    """Tests for ArchGraph.find_paths()."""
+
+    def test_single_path(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        paths = g.find_paths("A", "C")
+        assert paths == [["A", "B", "C"]]
+
+    def test_multiple_paths(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_node(Node(id="D", type=NodeType.SERVICE, label="D"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="A", target="C", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="D", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="C", target="D", type=EdgeType.CALLS))
+        paths = g.find_paths("A", "D")
+        assert len(paths) == 2
+        assert ["A", "B", "D"] in paths
+        assert ["A", "C", "D"] in paths
+
+    def test_no_path(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        # No edges -- disconnected
+        assert g.find_paths("A", "B") == []
+
+    def test_missing_node(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        assert g.find_paths("A", "nonexistent") == []
+
+    def test_max_depth(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        # Path A->B->C is 2 hops; max_depth=1 should miss it
+        assert g.find_paths("A", "C", max_depth=1) == []
+
+
+class TestDetectCycles:
+    """Tests for ArchGraph.detect_cycles()."""
+
+    def test_no_cycles(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        assert g.detect_cycles() == []
+
+    def test_simple_cycle(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="C", target="A", type=EdgeType.CALLS))
+        cycles = g.detect_cycles()
+        assert len(cycles) == 1
+        # The cycle contains exactly {A, B, C} regardless of rotation
+        assert set(cycles[0]) == {"A", "B", "C"}
+
+    def test_multiple_cycles(self):
+        g = ArchGraph()
+        # Cycle 1: A -> B -> A
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="A", type=EdgeType.CALLS))
+        # Cycle 2: C -> D -> E -> C
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_node(Node(id="D", type=NodeType.SERVICE, label="D"))
+        g.add_node(Node(id="E", type=NodeType.SERVICE, label="E"))
+        g.add_edge(Edge(source="C", target="D", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="D", target="E", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="E", target="C", type=EdgeType.CALLS))
+        cycles = g.detect_cycles()
+        assert len(cycles) == 2
+        # Sorted by length: 2-node cycle first, 3-node cycle second
+        assert len(cycles[0]) == 2
+        assert len(cycles[1]) == 3
+
+    def test_max_cycles_cap(self):
+        g = ArchGraph()
+        # Build a complete graph on 5 nodes -- many cycles
+        ids = ["N0", "N1", "N2", "N3", "N4"]
+        for nid in ids:
+            g.add_node(Node(id=nid, type=NodeType.SERVICE, label=nid))
+        for i, src in enumerate(ids):
+            for j, tgt in enumerate(ids):
+                if i != j:
+                    g.add_edge(Edge(source=src, target=tgt, type=EdgeType.CALLS))
+        cycles = g.detect_cycles(max_cycles=3)
+        assert len(cycles) == 3
+
+
+class TestGetBetweennessCentrality:
+    """Tests for ArchGraph.get_betweenness_centrality()."""
+
+    def test_happy_path(self):
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        result = g.get_betweenness_centrality()
+        assert isinstance(result, dict)
+        assert set(result.keys()) == {"A", "B", "C"}
+        for v in result.values():
+            assert isinstance(v, float)
+
+    def test_empty_graph(self):
+        g = ArchGraph()
+        assert g.get_betweenness_centrality() == {}
+
+    def test_bottleneck(self):
+        # Diamond: A -> B -> D, A -> C -> D
+        # B and C sit on shortest paths, should have higher centrality than A or D
+        g = ArchGraph()
+        g.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        g.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        g.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+        g.add_node(Node(id="D", type=NodeType.SERVICE, label="D"))
+        g.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="A", target="C", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="B", target="D", type=EdgeType.CALLS))
+        g.add_edge(Edge(source="C", target="D", type=EdgeType.CALLS))
+        result = g.get_betweenness_centrality()
+        # In a diamond, the middle nodes (B, C) should have centrality >= edge nodes (A, D)
+        assert result["B"] >= result["A"]
+        assert result["C"] >= result["A"]
+        assert result["B"] >= result["D"]
+        assert result["C"] >= result["D"]

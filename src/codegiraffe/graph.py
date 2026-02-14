@@ -175,6 +175,48 @@ class ArchGraph:
                 result.append((node_data, score))
         return result
 
+    def get_all_descendants(self, node_id: str) -> set[str]:
+        """Return all nodes transitively reachable from *node_id* via outgoing edges."""
+        if node_id not in self._graph:
+            return set()
+        return nx.descendants(self._graph, node_id)
+
+    def get_all_ancestors(self, node_id: str) -> set[str]:
+        """Return all nodes that can transitively reach *node_id* via outgoing edges."""
+        if node_id not in self._graph:
+            return set()
+        return nx.ancestors(self._graph, node_id)
+
+    def find_paths(self, source: str, target: str, max_depth: int = 10) -> list[list[str]]:
+        """Return all simple paths from *source* to *target* up to *max_depth* hops."""
+        if source not in self._graph or target not in self._graph:
+            return []
+        return list(nx.all_simple_paths(self._graph, source, target, cutoff=max_depth))
+
+    def detect_cycles(self, max_cycles: int = 100) -> list[list[str]]:
+        """Return up to *max_cycles* simple cycles (circular dependencies).
+
+        Cycles are sorted by length (shortest first) since shorter cycles
+        are typically more severe architectural issues.
+        """
+        cycles: list[list[str]] = []
+        for cycle in nx.simple_cycles(self._graph):
+            cycles.append(cycle)
+            if len(cycles) >= max_cycles:
+                break
+        cycles.sort(key=len)
+        return cycles
+
+    def get_betweenness_centrality(self) -> dict[str, float]:
+        """Return betweenness centrality for all nodes.
+
+        Betweenness centrality measures how often a node appears on shortest
+        paths between other nodes -- high values indicate architectural bottlenecks.
+        """
+        if len(self._graph) == 0:
+            return {}
+        return nx.betweenness_centrality(self._graph)
+
     def to_data(self) -> GraphData:
         """Serialize the current graph state back to a GraphData model."""
         nodes: dict[str, Node] = {}

@@ -10,12 +10,20 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import networkx as nx
 from mcp.server.fastmcp import FastMCP
 
 from codegiraffe.coordination import CoordinationStore
 from codegiraffe.federation import GraphFederation
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
-from codegiraffe.query import context_for_task, detect_drift, query_by_node, query_by_type
+from codegiraffe.query import (
+    compute_blast_radius,
+    context_for_task,
+    detect_drift,
+    generate_impact_summary,
+    query_by_node,
+    query_by_type,
+)
 from codegiraffe.scanner import scan_project
 from codegiraffe.storage import JSONStorage, StorageBackend
 from codegiraffe.versioning import VersionStore
@@ -258,6 +266,7 @@ def codegiraffe_context_for(
     task: str,
     max_nodes: int = 20,
     use_embeddings: bool = True,
+    include_impact: bool = False,
 ) -> str:
     """Get the most relevant subgraph for a natural-language task description.
 
@@ -266,12 +275,30 @@ def codegiraffe_context_for(
     keyword overlap scoring.  Returns the top-matching nodes with their
     immediate neighbors, capped at *max_nodes*.
 
+    When *include_impact* is True, each node in the result is augmented with
+    ``_blast_radius_count`` and ``_risk_score`` metadata fields.
+
     Useful for scoping what parts of the architecture are relevant before
     making changes.
     """
     try:
         graph = _ensure_graph(project_path)
         subgraph = context_for_task(graph, task, max_nodes, use_embeddings=use_embeddings)
+
+        if include_impact:
+            total_nodes = len(graph.graph)
+            degree = nx.degree_centrality(graph.graph) if total_nodes > 0 else {}
+            betweenness = graph.get_betweenness_centrality() if total_nodes > 0 else {}
+            for nid, node in subgraph.nodes.items():
+                desc_count = len(graph.get_all_descendants(nid))
+                risk = (
+                    degree.get(nid, 0.0) * 0.4
+                    + betweenness.get(nid, 0.0) * 0.4
+                    + (desc_count / total_nodes * 0.2 if total_nodes > 0 else 0.0)
+                )
+                node.metadata["_blast_radius_count"] = desc_count
+                node.metadata["_risk_score"] = round(risk, 4)
+
         return subgraph.model_dump_json(indent=2)
     except Exception as exc:
         return f"Error computing context: {exc}"
@@ -296,29 +323,267 @@ def codegiraffe_detect_drift(project_path: str) -> str:
 
 
 @mcp.tool()
-def codegiraffe_hotspots(project_path: str, top_n: int = 10) -> str:
+def codegiraffe_hotspots(
+    project_path: str, top_n: int = 10, metrics: str = "degree"
+) -> str:
     """Find the most connected nodes (architectural hotspots) in the graph.
 
     Ranks nodes by degree centrality -- highly connected nodes are likely
     architectural hotspots that deserve extra attention during changes.
 
+    Use *metrics* to select the ranking strategy:
+    - ``"degree"`` (default): rank by degree centrality
+    - ``"betweenness"``: rank by betweenness centrality (bottleneck nodes)
+    - ``"combined"``: rank by 0.5*degree + 0.5*betweenness
+
     Returns a JSON array of {node_id, label, type, score} objects.
     """
     try:
         graph = _ensure_graph(project_path)
-        hotspots = graph.get_hotspots(top_n)
-        result = [
-            {
-                "node_id": node.id,
-                "label": node.label,
-                "type": node.type,
-                "score": round(score, 4),
+
+        if metrics == "betweenness":
+            betweenness = graph.get_betweenness_centrality()
+            scored_pairs = sorted(
+                betweenness.items(), key=lambda x: x[1], reverse=True
+            )[:top_n]
+            result = []
+            for nid, score in scored_pairs:
+                node_data = graph.graph.nodes[nid].get("node")
+                if node_data is None:
+                    continue
+                result.append({
+                    "node_id": nid,
+                    "label": node_data.label,
+                    "type": node_data.type,
+                    "score": round(score, 4),
+                })
+            return json.dumps(result, indent=2)
+
+        elif metrics == "combined":
+            degree = nx.degree_centrality(graph.graph)
+            betweenness = graph.get_betweenness_centrality()
+            combined = {
+                nid: degree.get(nid, 0.0) * 0.5 + betweenness.get(nid, 0.0) * 0.5
+                for nid in graph.graph.nodes
             }
-            for node, score in hotspots
-        ]
-        return json.dumps(result, indent=2)
+            scored_pairs = sorted(
+                combined.items(), key=lambda x: x[1], reverse=True
+            )[:top_n]
+            result = []
+            for nid, score in scored_pairs:
+                node_data = graph.graph.nodes[nid].get("node")
+                if node_data is None:
+                    continue
+                result.append({
+                    "node_id": nid,
+                    "label": node_data.label,
+                    "type": node_data.type,
+                    "score": round(score, 4),
+                })
+            return json.dumps(result, indent=2)
+
+        else:
+            # Default: degree centrality (original behavior)
+            hotspots = graph.get_hotspots(top_n)
+            result = [
+                {
+                    "node_id": node.id,
+                    "label": node.label,
+                    "type": node.type,
+                    "score": round(score, 4),
+                }
+                for node, score in hotspots
+            ]
+            return json.dumps(result, indent=2)
     except Exception as exc:
         return f"Error computing hotspots: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Actionable intelligence tools (v0.7.0)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_blast_radius(
+    project_path: str,
+    node_id: str,
+    include_upstream: bool = False,
+    max_depth: int | None = None,
+) -> str:
+    """Analyze the blast radius of changing a specific node.
+
+    Shows what breaks if you change this node -- downstream dependencies
+    ranked by severity (direct, transitive, indirect), plus any circular
+    dependencies and hotspots in the impact zone.
+
+    Returns a human-readable markdown impact report.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+        blast = compute_blast_radius(
+            graph, node_id, include_upstream=include_upstream, max_depth=max_depth
+        )
+        return generate_impact_summary(blast, graph)
+    except ValueError as exc:
+        return str(exc)
+    except Exception as exc:
+        return f"Error computing blast radius: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_risk_assessment(
+    project_path: str,
+    node_ids: list[str] | None = None,
+) -> str:
+    """Assess architectural risk for specific nodes or the entire graph.
+
+    Risk score = (degree_centrality * 0.4) + (betweenness_centrality * 0.4)
+                 + (descendant_count / total_nodes * 0.2)
+
+    If node_ids provided: assess those nodes. If None: top-10 riskiest nodes.
+    Returns markdown report ranked by risk score.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+        total_nodes = len(graph.graph)
+        if total_nodes == 0:
+            return "Graph is empty -- no nodes to assess."
+
+        degree = nx.degree_centrality(graph.graph)
+        betweenness = graph.get_betweenness_centrality()
+
+        target_ids = node_ids if node_ids is not None else list(graph.graph.nodes)
+
+        scored: list[dict] = []
+        for nid in target_ids:
+            if nid not in graph.graph:
+                continue
+            node_data = graph.graph.nodes[nid].get("node")
+            if node_data is None:
+                continue
+            desc_count = len(graph.get_all_descendants(nid))
+            risk = (
+                degree.get(nid, 0.0) * 0.4
+                + betweenness.get(nid, 0.0) * 0.4
+                + (desc_count / total_nodes) * 0.2
+            )
+            scored.append({
+                "node_id": nid,
+                "label": node_data.label,
+                "type": node_data.type,
+                "risk_score": round(risk, 4),
+                "degree_centrality": round(degree.get(nid, 0.0), 4),
+                "betweenness_centrality": round(betweenness.get(nid, 0.0), 4),
+                "blast_radius_count": desc_count,
+                "file_path": node_data.file_path,
+            })
+
+        scored.sort(key=lambda x: x["risk_score"], reverse=True)
+        if node_ids is None:
+            scored = scored[:10]
+
+        return _format_risk_report(scored, total_nodes)
+    except Exception as exc:
+        return f"Error computing risk assessment: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_cycles(project_path: str, max_cycles: int = 20) -> str:
+    """Detect circular dependencies in the architecture graph.
+
+    Returns markdown-formatted list of cycles with path, edge types,
+    severity (shorter cycles are more severe), and files involved.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+        cycles = graph.detect_cycles(max_cycles=max_cycles)
+        if not cycles:
+            return "No circular dependencies detected."
+        lines = ["## Circular Dependencies", ""]
+        lines.append(f"**{len(cycles)} cycle(s) detected**")
+        lines.append("")
+        for i, cycle in enumerate(cycles, 1):
+            display_path = cycle + [cycle[0]]
+            path_str = " -> ".join(display_path)
+            severity = (
+                "high" if len(cycle) <= 2
+                else "medium" if len(cycle) <= 4
+                else "low"
+            )
+            lines.append(
+                f"### Cycle {i} (length {len(cycle)}, severity: {severity})"
+            )
+            lines.append("```")
+            lines.append(path_str)
+            lines.append("```")
+            edge_types: list[str] = []
+            for j in range(len(cycle)):
+                src = cycle[j]
+                tgt = cycle[(j + 1) % len(cycle)]
+                edge_data = graph.graph.edges.get((src, tgt), {})
+                edge_obj = edge_data.get("edge")
+                if edge_obj:
+                    edge_types.append(f"{src} --[{edge_obj.type}]--> {tgt}")
+            if edge_types:
+                lines.append("**Edges:**")
+                for et in edge_types:
+                    lines.append(f"- {et}")
+            files: list[str] = []
+            for nid in cycle:
+                node_data = graph.graph.nodes[nid].get("node")
+                if node_data and node_data.file_path:
+                    files.append(f"{nid}: {node_data.file_path}")
+            if files:
+                lines.append("**Files:**")
+                for f in files:
+                    lines.append(f"- {f}")
+            lines.append("")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error detecting cycles: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Risk report helpers (private, not MCP tools)
+# ---------------------------------------------------------------------------
+
+
+def _format_risk_report(scored: list[dict], total_nodes: int) -> str:
+    """Format a list of risk-scored nodes as a markdown report."""
+    lines = ["## Risk Assessment Report", ""]
+    lines.append(f"**Graph size:** {total_nodes} nodes")
+    lines.append(f"**Nodes assessed:** {len(scored)}")
+    lines.append("")
+    for i, item in enumerate(scored, 1):
+        lines.append(f"### {i}. {item['label']} (`{item['node_id']}`)")
+        lines.append(f"- **Risk score:** {item['risk_score']}")
+        lines.append(f"- **Type:** {item['type']}")
+        lines.append(f"- **Degree centrality:** {item['degree_centrality']}")
+        lines.append(f"- **Betweenness centrality:** {item['betweenness_centrality']}")
+        lines.append(f"- **Blast radius:** {item['blast_radius_count']} downstream nodes")
+        if item.get("file_path"):
+            lines.append(f"- **File:** {item['file_path']}")
+        why = _risk_explanation(item)
+        lines.append(f"- **Why this matters:** {why}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _risk_explanation(item: dict) -> str:
+    """Produce a brief human-readable explanation of a node's risk score."""
+    reasons: list[str] = []
+    if item["degree_centrality"] > 0.3:
+        reasons.append("highly connected hub")
+    if item["betweenness_centrality"] > 0.2:
+        reasons.append("critical bottleneck on many paths")
+    if item["blast_radius_count"] > 5:
+        reasons.append(
+            f"changes propagate to {item['blast_radius_count']} downstream nodes"
+        )
+    if not reasons:
+        reasons.append("moderate connectivity")
+    return "; ".join(reasons)
 
 
 @mcp.tool()
