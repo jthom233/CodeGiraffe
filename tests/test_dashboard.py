@@ -135,6 +135,71 @@ class TestDashboardHTML:
         assert '<link rel="stylesheet"' not in DASHBOARD_HTML
         assert "<link rel='stylesheet'" not in DASHBOARD_HTML
 
+    # --- New layout tests ---
+    def test_contains_five_layouts(self):
+        """Dashboard should support 5 layout names."""
+        for layout in ['cose', 'circle', 'grid', 'concentric', 'breadthfirst']:
+            assert f"'{layout}'" in DASHBOARD_HTML or f'"{layout}"' in DASHBOARD_HTML, f"Missing layout: {layout}"
+
+    def test_contains_layouts_array(self):
+        """LAYOUTS array should be defined."""
+        assert "LAYOUTS" in DASHBOARD_HTML
+
+    def test_layout_cycle_handler(self):
+        """Layout button should cycle through layouts, not just toggle."""
+        assert "LAYOUTS.indexOf" in DASHBOARD_HTML
+        assert "LAYOUTS.length" in DASHBOARD_HTML
+
+    # --- Edge tooltip tests ---
+    def test_contains_edge_tooltip(self):
+        """Edge tooltip div should exist."""
+        assert 'id="edge-tooltip"' in DASHBOARD_HTML
+
+    def test_edge_tooltip_mouseover(self):
+        """Edge mouseover handler should be defined."""
+        assert "mouseover" in DASHBOARD_HTML
+        assert "edge-tooltip" in DASHBOARD_HTML
+
+    def test_edge_highlighted_style(self):
+        """Highlighted edge style should be defined."""
+        assert "highlighted" in DASHBOARD_HTML
+
+    # --- Legend tests ---
+    def test_contains_legend_section(self):
+        """Legend section should exist in sidebar."""
+        assert 'id="legend"' in DASHBOARD_HTML
+
+    def test_contains_build_legend(self):
+        """buildLegend function should be defined."""
+        assert "buildLegend" in DASHBOARD_HTML
+
+    def test_legend_has_swatch_styles(self):
+        """Legend CSS classes should be defined."""
+        assert "legend-swatch" in DASHBOARD_HTML
+        assert "legend-line" in DASHBOARD_HTML
+
+    # --- Enhanced stats tests ---
+    def test_contains_avg_degree_stat(self):
+        """Average degree stat should exist."""
+        assert 'id="stat-avg-degree"' in DASHBOARD_HTML
+
+    def test_contains_components_stat(self):
+        """Connected components stat should exist."""
+        assert 'id="stat-components"' in DASHBOARD_HTML
+
+    def test_contains_type_distribution(self):
+        """Type distribution chart container should exist."""
+        assert 'id="type-distribution"' in DASHBOARD_HTML
+
+    # --- Color palette tests ---
+    def test_module_color_differentiated(self):
+        """Module color should be #D35400 (differentiated from queue)."""
+        assert "#D35400" in DASHBOARD_HTML
+
+    def test_config_color_differentiated(self):
+        """Config color should be #D4AC0D (differentiated from env_var)."""
+        assert "#D4AC0D" in DASHBOARD_HTML
+
 
 # ---------------------------------------------------------------------------
 # get_graph_json tests

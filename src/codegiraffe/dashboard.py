@@ -200,6 +200,21 @@ body {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   color: #7f8c9b; font-size: 14px; display: none;
 }
+
+/* ---- Legend ---- */
+#legend .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 0; }
+#legend .legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+#legend .legend-line { width: 20px; height: 0; border-top: 2px solid; flex-shrink: 0; }
+#legend .legend-line.dashed { border-top-style: dashed; }
+#legend .legend-line.dotted { border-top-style: dotted; }
+#legend .legend-divider { border-top: 1px solid #0f3460; margin: 6px 0; }
+
+/* ---- Type distribution ---- */
+#type-distribution { margin-top: 8px; }
+.dist-row { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 2px 0; }
+.dist-bar { height: 8px; border-radius: 2px; min-width: 2px; }
+.dist-label { width: 90px; text-align: right; color: #7f8c9b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dist-count { color: #7f8c9b; min-width: 20px; }
 </style>
 </head>
 <body>
@@ -225,10 +240,18 @@ body {
       <div class="stat-row"><span>Nodes</span><span class="stat-val" id="stat-nodes">0</span></div>
       <div class="stat-row"><span>Edges</span><span class="stat-val" id="stat-edges">0</span></div>
       <div class="stat-row"><span>Visible</span><span class="stat-val" id="stat-visible">0</span></div>
+      <div class="stat-row"><span>Avg Degree</span><span class="stat-val" id="stat-avg-degree">0</span></div>
+      <div class="stat-row"><span>Components</span><span class="stat-val" id="stat-components">0</span></div>
+      <div id="type-distribution"></div>
+    </div>
+    <div class="sidebar-section" id="legend-section">
+      <h3>Legend</h3>
+      <div id="legend"></div>
     </div>
   </div>
   <div id="cy-container">
     <div id="cy"></div>
+    <div id="edge-tooltip" style="display:none;position:absolute;z-index:10;background:#16213e;border:1px solid #0f3460;border-radius:4px;padding:6px 10px;font-size:12px;color:#e0e0e0;pointer-events:none;white-space:nowrap;"></div>
     <div id="loading">Loading graph...</div>
     <div id="toolbar">
       <button id="btn-fit" title="Fit all nodes">Fit</button>
@@ -254,9 +277,9 @@ body {
   // ---- Color / shape palettes ----
   const TYPE_COLORS = {
     service: '#4A90D9', endpoint: '#7B68EE', database_table: '#2ECC71',
-    queue: '#E67E22', env_var: '#F39C12', config: '#F39C12',
+    queue: '#E67E22', env_var: '#F39C12', config: '#D4AC0D',
     worker: '#E74C3C', frontend_component: '#9B59B6', event: '#1ABC9C',
-    external_api: '#95A5A6', module: '#E67E22'
+    external_api: '#95A5A6', module: '#D35400'
   };
   const TYPE_SHAPES = {
     endpoint: 'diamond', database_table: 'barrel', worker: 'hexagon',
@@ -377,6 +400,15 @@ body {
           }
         },
         {
+          selector: 'edge.highlighted',
+          style: {
+            'line-color': '#F1C40F',
+            'target-arrow-color': '#F1C40F',
+            'width': 2.5,
+            'z-index': 10
+          }
+        },
+        {
           selector: 'edge[type="imports"]',
           style: {
             'line-color': '#E67E22',
@@ -410,15 +442,45 @@ body {
       if (evt.target === cy) closeDetail();
     });
 
+    cy.on('mouseover', 'edge', function(evt) {
+        const edge = evt.target;
+        const tip = document.getElementById('edge-tooltip');
+        tip.textContent = edge.data('type') + ': ' + edge.data('source') + ' → ' + edge.data('target');
+        tip.style.display = 'block';
+        const pos = evt.renderedPosition || evt.position;
+        const container = document.getElementById('cy-container');
+        const rect = container.getBoundingClientRect();
+        tip.style.left = (pos.x + 10) + 'px';
+        tip.style.top = (pos.y - 20) + 'px';
+    });
+
+    cy.on('mouseout', 'edge', function() {
+        document.getElementById('edge-tooltip').style.display = 'none';
+    });
+
+    cy.on('tap', 'node', function(evt) {
+        cy.edges().removeClass('highlighted');
+        evt.target.connectedEdges().addClass('highlighted');
+    });
+
     updateStats();
   }
 
+  const LAYOUTS = ['cose', 'circle', 'grid', 'concentric', 'breadthfirst'];
+
   function runLayout(name) {
     if (!cy) return;
-    const opts = name === 'cose'
-      ? { name: 'cose', animate: true, animationDuration: 500, nodeDimensionsIncludeLabels: true }
-      : { name: 'circle', animate: true, animationDuration: 500 };
-    cy.layout(opts).run();
+    const layoutConfigs = {
+        cose: { name: 'cose', animate: true, animationDuration: 500, nodeDimensionsIncludeLabels: true },
+        circle: { name: 'circle', animate: true, animationDuration: 500 },
+        grid: { name: 'grid', animate: true, animationDuration: 500 },
+        concentric: { name: 'concentric', animate: true, animationDuration: 500,
+            concentric: function(node) { return node.degree(); },
+            levelWidth: function() { return 2; }
+        },
+        breadthfirst: { name: 'breadthfirst', animate: true, animationDuration: 500, directed: true }
+    };
+    cy.layout(layoutConfigs[name] || layoutConfigs.cose).run();
   }
 
   // ---- Load graph ----
@@ -456,6 +518,7 @@ body {
       $search.disabled = false;
       $search.value = '';
       initCy(allElements);
+      buildLegend();
     } catch (e) {
       showError(e.message);
     } finally {
@@ -515,9 +578,76 @@ body {
   function updateStats() {
     if (!cy) return;
     const visNodes = cy.nodes().filter(n => n.style('display') !== 'none');
-    $statNodes.textContent = cy.nodes().length;
-    $statEdges.textContent = cy.edges().length;
-    $statVisible.textContent = visNodes.length;
+    const totalNodes = cy.nodes().length;
+    const totalEdges = cy.edges().length;
+    document.getElementById('stat-nodes').textContent = totalNodes;
+    document.getElementById('stat-edges').textContent = totalEdges;
+    document.getElementById('stat-visible').textContent = visNodes.length;
+
+    // Avg degree
+    const avgDeg = totalNodes > 0 ? (2 * totalEdges / totalNodes).toFixed(1) : '0';
+    document.getElementById('stat-avg-degree').textContent = avgDeg;
+
+    // Connected components (simple BFS)
+    const visited = new Set();
+    let components = 0;
+    cy.nodes().forEach(n => {
+        if (!visited.has(n.id())) {
+            components++;
+            const queue = [n];
+            while (queue.length > 0) {
+                const cur = queue.shift();
+                if (visited.has(cur.id())) continue;
+                visited.add(cur.id());
+                cur.neighborhood('node').forEach(nb => {
+                    if (!visited.has(nb.id())) queue.push(nb);
+                });
+            }
+        }
+    });
+    document.getElementById('stat-components').textContent = components;
+
+    // Type distribution bar chart
+    const typeCounts = {};
+    cy.nodes().forEach(n => {
+        const t = n.data('type') || 'unknown';
+        typeCounts[t] = (typeCounts[t] || 0) + 1;
+    });
+    const maxCount = Math.max(...Object.values(typeCounts), 1);
+    const $dist = document.getElementById('type-distribution');
+    if ($dist) {
+        let html = '';
+        Object.keys(typeCounts).sort().forEach(t => {
+            const pct = (typeCounts[t] / maxCount) * 100;
+            const color = TYPE_COLORS[t] || DEFAULT_COLOR;
+            html += '<div class="dist-row"><span class="dist-label">' + t + '</span><span class="dist-bar" style="width:' + pct + '%;background:' + color + '"></span><span class="dist-count">' + typeCounts[t] + '</span></div>';
+        });
+        $dist.innerHTML = html;
+    }
+  }
+
+  // ---- Legend ----
+  function buildLegend() {
+    const $legend = document.getElementById('legend');
+    if (!$legend) return;
+    let html = '';
+    // Node types
+    Object.keys(TYPE_COLORS).sort().forEach(t => {
+        html += '<div class="legend-item"><span class="legend-swatch" style="background:' + TYPE_COLORS[t] + '"></span>' + t + '</div>';
+    });
+    html += '<div class="legend-divider"></div>';
+    // Edge types
+    const edgeStyles = {
+        imports: { color: '#E67E22', style: 'dashed' },
+        implements: { color: '#9B59B6', style: '' },
+        contains: { color: '#2ECC71', style: 'dotted' },
+        default: { color: '#2a3a5e', style: '' }
+    };
+    Object.keys(edgeStyles).forEach(t => {
+        const s = edgeStyles[t];
+        html += '<div class="legend-item"><span class="legend-line ' + s.style + '" style="border-color:' + s.color + '"></span>' + t + '</div>';
+    });
+    $legend.innerHTML = html;
   }
 
   // ---- Detail panel ----
@@ -585,8 +715,9 @@ body {
   });
 
   document.getElementById('btn-layout').addEventListener('click', function() {
-    currentLayout = currentLayout === 'cose' ? 'circle' : 'cose';
-    this.textContent = currentLayout === 'cose' ? 'Layout' : 'Circle';
+    const idx = LAYOUTS.indexOf(currentLayout);
+    currentLayout = LAYOUTS[(idx + 1) % LAYOUTS.length];
+    this.textContent = currentLayout.charAt(0).toUpperCase() + currentLayout.slice(1);
     runLayout(currentLayout);
   });
 

@@ -121,7 +121,7 @@ codegiraffe_init(project_path="/home/user/large-project", backend="sqlite")
 --> "Initialized graph with 312 nodes and 487 edges"
 ```
 
-The scanner automatically detects architectural patterns across 5 languages. See the [Multi-Language Scanner](#multi-language-scanner) section for details on what each language recognizer detects.
+The scanner automatically detects architectural patterns across 9 languages. See the [Multi-Language Scanner](#multi-language-scanner) section for details on what each language recognizer detects.
 
 ---
 
@@ -521,7 +521,11 @@ src/codegiraffe/
     ├── typescript.py    # TypeScript/TSX recognizer
     ├── go.py            # Go recognizer
     ├── rust.py          # Rust recognizer
-    └── java.py          # Java recognizer
+    ├── java.py          # Java recognizer
+    ├── cpp.py           # C/C++ recognizer
+    ├── csharp.py        # C# recognizer
+    ├── php.py           # PHP recognizer
+    └── ruby.py          # Ruby recognizer
 ```
 
 ### Data Model
@@ -658,6 +662,37 @@ The scanner includes several intelligence features that produce a richer, more a
 - **Environment**: `System.getenv()`, `@Value("${...}")` --> `env_var` nodes
 - **HTTP clients**: `RestTemplate`, `WebClient` --> `external_api` nodes
 - **Messaging**: `@RabbitListener`, `@KafkaListener` --> `worker` nodes
+
+### C/C++ (.c, .cpp, .h, .hpp)
+
+- **Endpoints**: HTTP server handler patterns --> `endpoint` nodes
+- **Database**: SQL query patterns, database connection strings --> `database_table` nodes
+- **Environment**: `getenv()`, `std::getenv()` --> `env_var` nodes
+- **HTTP clients**: `curl_easy_*`, `httplib::Client` --> `external_api` nodes
+
+### C# (.cs)
+
+- **ASP.NET**: `[HttpGet]`, `[HttpPost]`, `[Route]` attributes --> `endpoint` nodes
+- **Entity Framework**: `DbSet<>`, `[Table]` attributes --> `database_table` nodes
+- **Environment**: `Environment.GetEnvironmentVariable()`, `IConfiguration` --> `env_var` nodes
+- **HTTP clients**: `HttpClient`, `RestClient` --> `external_api` nodes
+- **Messaging**: `[ServiceBusListener]`, RabbitMQ patterns --> `worker` nodes
+
+### PHP (.php)
+
+- **Laravel / Symfony**: Route definitions, controller annotations --> `endpoint` nodes
+- **Eloquent / Doctrine**: Model and entity patterns --> `database_table` nodes
+- **Environment**: `getenv()`, `$_ENV`, `env()` --> `env_var` nodes
+- **HTTP clients**: `Guzzle`, `curl_*`, `file_get_contents` --> `external_api` nodes
+- **Queues**: Laravel queue worker patterns --> `worker` nodes
+
+### Ruby (.rb)
+
+- **Rails**: Route definitions, controller actions --> `endpoint` nodes
+- **ActiveRecord**: Model class patterns, `create_table` migrations --> `database_table` nodes
+- **Environment**: `ENV["KEY"]`, `ENV.fetch` --> `env_var` nodes
+- **HTTP clients**: `Net::HTTP`, `Faraday`, `HTTParty` --> `external_api` nodes
+- **Sidekiq / ActiveJob**: Worker and job class patterns --> `worker` nodes
 
 ### Plugin System
 
@@ -829,9 +864,11 @@ Then open `http://localhost:8000/dashboard` in your browser.
 - **Search** — Filter nodes by label or ID in real-time
 - **Node detail panel** — Click any node to see its properties, metadata, and connected edges
 - **Subgraph focus** — Double-click a node to zoom into its neighborhood
-- **Layout switching** — Toggle between force-directed and circular layouts
+- **5 layout algorithms** — Force-directed (cose), circular, grid, concentric, and breadthfirst layouts
+- **Legend & stats** — Visual legend of node types and real-time graph statistics
+- **Edge tooltips** — Hover edges to see relationship type and metadata
 - **PNG export** — Download the current view as an image
-- **Dark theme** — Developer-friendly dark interface
+- **Dark theme** — Developer-friendly dark interface with refined color palette
 
 ### API Endpoints
 
@@ -898,7 +935,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-505+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers, query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, and web dashboard.
+566+ tests covering graph operations, storage backends (JSON, SQLite, Neo4j), scanner (regex, AST, and intelligence features), recognizers, query engine, schema types, export, embeddings, coordination, drift detection, versioning, federation, and web dashboard.
 
 ### Project Constitution
 
@@ -948,6 +985,13 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] New edge types: `imports` (inter-module), `implements` (inheritance), `contains` (module-to-entity)
 - [x] `include_tests` parameter for `codegiraffe_init` and `codegiraffe_sync`
 - [x] 505+ tests
+
+### v0.5.0 (completed)
+
+- [x] 4 new language recognizers: C#, C/C++, PHP, Ruby (now 9 languages)
+- [x] 3 new dashboard layouts: grid, concentric, breadthfirst (now 5 total)
+- [x] Dashboard improvements: legend, stats panel, edge tooltips, refined color palette
+- [x] 566+ tests
 
 ### Future
 

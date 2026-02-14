@@ -59,14 +59,18 @@ def get_default_registry() -> RecognizerRegistry:
     """Return the default recognizer registry with built-in recognizers.
 
     Lazily creates and populates the registry on first call. Registers
-    recognizers for Python, TypeScript, Go, Rust, and Java files.
+    recognizers for Python, TypeScript, Go, Rust, Java, C#, C/C++, PHP, and Ruby files.
     """
     global _default_registry
     if _default_registry is None:
         _default_registry = RecognizerRegistry()
         from codegiraffe.recognizers import (
+            CppRecognizer,
+            CSharpRecognizer,
             GoRecognizer,
             JavaRecognizer,
+            PhpRecognizer,
+            RubyRecognizer,
             RustRecognizer,
             TypeScriptRecognizer,
         )
@@ -79,6 +83,12 @@ def get_default_registry() -> RecognizerRegistry:
         _default_registry.register(GoRecognizer(), extensions=[".go"])
         _default_registry.register(RustRecognizer(), extensions=[".rs"])
         _default_registry.register(JavaRecognizer(), extensions=[".java"])
+        _default_registry.register(CSharpRecognizer(), extensions=[".cs"])
+        _default_registry.register(
+            CppRecognizer(), extensions=[".c", ".cpp", ".h", ".hpp", ".cc", ".cxx"]
+        )
+        _default_registry.register(PhpRecognizer(), extensions=[".php"])
+        _default_registry.register(RubyRecognizer(), extensions=[".rb"])
     return _default_registry
 
 
