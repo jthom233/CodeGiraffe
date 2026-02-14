@@ -256,11 +256,11 @@ body {
     service: '#4A90D9', endpoint: '#7B68EE', database_table: '#2ECC71',
     queue: '#E67E22', env_var: '#F39C12', config: '#F39C12',
     worker: '#E74C3C', frontend_component: '#9B59B6', event: '#1ABC9C',
-    external_api: '#95A5A6'
+    external_api: '#95A5A6', module: '#E67E22'
   };
   const TYPE_SHAPES = {
     endpoint: 'diamond', database_table: 'barrel', worker: 'hexagon',
-    queue: 'rectangle', event: 'ellipse'
+    queue: 'rectangle', event: 'ellipse', module: 'round-rectangle'
   };
   const DEFAULT_COLOR = '#4A90D9';
   const DEFAULT_SHAPE = 'round-rectangle';
@@ -374,6 +374,30 @@ body {
           style: {
             'line-color': '#4A90D9',
             'width': 2.5
+          }
+        },
+        {
+          selector: 'edge[type="imports"]',
+          style: {
+            'line-color': '#E67E22',
+            'target-arrow-color': '#E67E22',
+            'line-style': 'dashed'
+          }
+        },
+        {
+          selector: 'edge[type="implements"]',
+          style: {
+            'line-color': '#9B59B6',
+            'target-arrow-color': '#9B59B6',
+            'line-style': 'solid'
+          }
+        },
+        {
+          selector: 'edge[type="contains"]',
+          style: {
+            'line-color': '#2ECC71',
+            'target-arrow-color': '#2ECC71',
+            'line-style': 'dotted'
           }
         }
       ],
