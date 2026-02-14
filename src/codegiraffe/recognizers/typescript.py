@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -74,6 +74,25 @@ _TS_CLASS_RE = re.compile(
 _TS_QUEUE_RE = re.compile(
     r"""new\s+(?:Queue|Worker)\s*\(\s*['"]([\w-]+?)['"]""",
 )
+
+
+# ES6 import patterns (v0.6.0)
+_TS_NAMED_IMPORT_RE = re.compile(r"""import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]""")
+_TS_DEFAULT_IMPORT_RE = re.compile(r"""import\s+(\w+)\s+from\s+['"]([^'"]+)['"]""")
+_TS_NAMESPACE_IMPORT_RE = re.compile(r"""import\s+\*\s+as\s+\w+\s+from\s+['"]([^'"]+)['"]""")
+_TS_CLASS_EXTENDS_RE = re.compile(r'class\s+(\w+)\s+extends\s+(\w+)')
+_TS_CLASS_IMPLEMENTS_RE = re.compile(r'class\s+(\w+)\s+implements\s+([\w,\s]+?)(?:\s*\{|\s*extends)')
+
+
+def _is_internal_ts_import(import_path: str) -> bool:
+    return import_path.startswith(("./", "../", "@/", "~/"))
+
+def _ts_import_to_module_path(import_path: str) -> str:
+    cleaned = import_path.lstrip("./")
+    for ext in (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", "/index"):
+        if cleaned.endswith(ext):
+            cleaned = cleaned[:-len(ext)]
+    return cleaned.replace("/", ".")
 
 
 # ---------------------------------------------------------------------------
@@ -286,4 +305,37 @@ class TypeScriptRecognizer:
                         )
                     )
 
-        return ScanResult(nodes=nodes, edges=edges)
+        # Import parsing (v0.6.0)
+        imports: list[ImportInfo] = []
+        for match in _TS_NAMED_IMPORT_RE.finditer(content):
+            symbols_str, import_path = match.group(1), match.group(2)
+            if _is_internal_ts_import(import_path):
+                symbols = [s.strip().split(" as ")[0].strip() for s in symbols_str.split(",") if s.strip()]
+                imports.append(ImportInfo(
+                    module_path=_ts_import_to_module_path(import_path),
+                    symbols=symbols,
+                    style="relative" if import_path.startswith(("./", "../")) else "absolute",
+                ))
+        for match in _TS_DEFAULT_IMPORT_RE.finditer(content):
+            default_name, import_path = match.group(1), match.group(2)
+            if _is_internal_ts_import(import_path):
+                imports.append(ImportInfo(
+                    module_path=_ts_import_to_module_path(import_path),
+                    symbols=[default_name],
+                    style="relative" if import_path.startswith(("./", "../")) else "absolute",
+                ))
+        for match in _TS_NAMESPACE_IMPORT_RE.finditer(content):
+            import_path = match.group(1)
+            if _is_internal_ts_import(import_path):
+                imports.append(ImportInfo(module_path=_ts_import_to_module_path(import_path), symbols=[], style="wildcard"))
+
+        # Inheritance detection (v0.6.0)
+        implementations: list[ImplementationInfo] = []
+        for match in _TS_CLASS_EXTENDS_RE.finditer(content):
+            implementations.append(ImplementationInfo(child_class=match.group(1), parent_class=match.group(2), file_path=str(file_path)))
+        for match in _TS_CLASS_IMPLEMENTS_RE.finditer(content):
+            child = match.group(1)
+            for parent in [p.strip() for p in match.group(2).split(",") if p.strip()]:
+                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -52,6 +52,14 @@ _RB_ENV_RE = re.compile(
 _RB_HTTP_RE = re.compile(
     r"""(?:Net::HTTP|Faraday|HTTParty|RestClient)\s*\.(?:get|post|put|delete|patch|new)\s*\(\s*(?:URI\s*\(\s*)?['"]?(https?://[^'")\s]+)""",
 )
+
+_RB_REQUIRE_RELATIVE_RE = re.compile(r"require_relative\s+['\"]([^'\"]+)['\"]")
+_RB_CLASS_INHERIT_RE = re.compile(r'class\s+(\w+)\s*<\s*(\w+(?:::\w+)*)')
+_RB_EXTERNAL_BASES = frozenset({
+    "ApplicationRecord", "ActiveRecord::Base", "ApplicationController",
+    "ActionController::Base", "ApplicationMailer", "ActionMailer::Base",
+    "ApplicationJob", "ActiveJob::Base", "Struct", "BasicObject", "Object",
+})
 
 # Class definitions (fallback) — anchored to line start to avoid matching in comments
 _RB_CLASS_RE = re.compile(
@@ -249,4 +257,14 @@ class RubyRecognizer:
                         )
                     )
 
-        return ScanResult(nodes=nodes, edges=edges)
+        imports: list[ImportInfo] = []
+        for match in _RB_REQUIRE_RELATIVE_RE.finditer(content):
+            imports.append(ImportInfo(module_path=match.group(1).replace("/", "."), style="relative"))
+
+        implementations: list[ImplementationInfo] = []
+        for match in _RB_CLASS_INHERIT_RE.finditer(content):
+            child, parent = match.group(1), match.group(2)
+            if parent not in _RB_EXTERNAL_BASES:
+                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

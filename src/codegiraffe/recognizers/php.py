@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import ScanResult, ImportInfo, ImplementationInfo
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -64,6 +64,11 @@ _PHP_HTTP_RE = re.compile(
     r"""(?:Http\s*::\s*(?:get|post|put|delete|patch)|(?:\$client|\$guzzle)\s*->\s*(?:get|post|put|delete|patch|request))\s*\(\s*['"]?(https?://[^'")\s]+)""",
 )
 
+_PHP_USE_STMT_RE = re.compile(r'use\s+([\w\\]+)\s*;', re.MULTILINE)
+_PHP_NS_DECL_RE = re.compile(r'namespace\s+([\w\\]+)\s*;', re.MULTILINE)
+_PHP_CLASS_EXTENDS_RE = re.compile(r'class\s+(\w+)\s+extends\s+(\w+)')
+_PHP_CLASS_IMPL_RE = re.compile(r'class\s+(\w+)\s+(?:extends\s+\w+\s+)?implements\s+([\w,\s\\]+?)(?:\s*\{)')
+
 # Class definitions (fallback)
 _PHP_CLASS_RE = re.compile(
     r"""(?:abstract\s+|final\s+)?class\s+(\w+)""",
@@ -87,6 +92,21 @@ class PhpRecognizer:
         - Http facade / Guzzle calls               -> ``external_api`` nodes
         - Class definitions (fallback)             -> ``service`` nodes
     """
+
+    def __init__(self) -> None:
+        self._project_namespaces: set[str] = set()
+
+    def set_project_root(self, project_root: str) -> None:
+        self._project_namespaces = set()
+        root = Path(project_root)
+        for php_file in root.rglob("*.php"):
+            try:
+                text = php_file.read_text(encoding="utf-8", errors="replace")[:500]
+                match = _PHP_NS_DECL_RE.search(text)
+                if match:
+                    self._project_namespaces.add(match.group(1).split("\\")[0])
+            except OSError:
+                continue
 
     def recognize(self, file_path: Path, content: str) -> ScanResult:
         """Scan *content* of a PHP file and return discovered nodes/edges."""
@@ -266,4 +286,19 @@ class PhpRecognizer:
                         )
                     )
 
-        return ScanResult(nodes=nodes, edges=edges)
+        imports: list[ImportInfo] = []
+        for match in _PHP_USE_STMT_RE.finditer(content):
+            use_path = match.group(1)
+            root_ns = use_path.split("\\")[0]
+            if root_ns in self._project_namespaces:
+                imports.append(ImportInfo(module_path=use_path.replace("\\", "."), symbols=[use_path.split("\\")[-1]], style="absolute"))
+
+        implementations: list[ImplementationInfo] = []
+        for match in _PHP_CLASS_EXTENDS_RE.finditer(content):
+            implementations.append(ImplementationInfo(child_class=match.group(1), parent_class=match.group(2), file_path=str(file_path)))
+        for match in _PHP_CLASS_IMPL_RE.finditer(content):
+            child = match.group(1)
+            for parent in [p.strip().split("\\")[-1] for p in match.group(2).split(",") if p.strip()]:
+                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

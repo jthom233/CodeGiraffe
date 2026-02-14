@@ -23,7 +23,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from codegiraffe.graph import Edge, Node
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import ImplementationInfo, ImportInfo, ScanResult
 from codegiraffe.schema import EdgeType, NodeType
 
 # ---------------------------------------------------------------------------
@@ -95,6 +95,25 @@ _GO_IPC_DIAL_RE = re.compile(r'net\.Dial\(\s*"unix"')
 # Method receivers: func (s *Store) Method(
 _GO_METHOD_RECEIVER_RE = re.compile(r'func\s+\(\w+\s+\*?(\w+)\)\s+(\w+)\s*\(')
 
+# Full import parsing (v0.6.0)
+# Single import: import "path/to/package"
+_GO_SINGLE_IMPORT_RE = re.compile(r'import\s+"([^"]+)"')
+
+# Grouped import block: import ( "path1" \n "path2" )
+_GO_GROUPED_IMPORT_RE = re.compile(r'import\s*\(([\s\S]*?)\)', re.MULTILINE)
+
+# Individual import line within a group (handles aliases)
+_GO_IMPORT_LINE_RE = re.compile(r'(?:\w+\s+)?"([^"]+)"')
+
+# Interface body extraction
+_GO_INTERFACE_BODY_RE = re.compile(
+    r'type\s+(\w+)\s+interface\s*\{([^}]*)\}',
+    re.DOTALL,
+)
+
+# Method signature inside interface body
+_GO_INTERFACE_METHOD_RE = re.compile(r'(\w+)\s*\(')
+
 
 # ---------------------------------------------------------------------------
 # Recognizer
@@ -119,6 +138,57 @@ class GoRecognizer:
         - Method receivers                        -> ``implements`` edge inference
         - Service-to-env_var configures edges
     """
+
+    def __init__(self) -> None:
+        self._go_module_path: str | None = None
+        self._project_root: str | None = None
+
+    def set_project_root(self, project_root: str) -> None:
+        """Set project root for internal import classification via go.mod."""
+        self._project_root = project_root
+        go_mod = Path(project_root) / "go.mod"
+        if go_mod.exists():
+            try:
+                for line in go_mod.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("module "):
+                        self._go_module_path = line.split(None, 1)[1].strip()
+                        break
+            except OSError:
+                pass
+
+    def _is_internal_import(self, import_path: str) -> bool:
+        """Return True if import_path is project-internal."""
+        if not self._go_module_path:
+            return False
+        return import_path.startswith(self._go_module_path + "/")
+
+    def _import_to_module_path(self, import_path: str) -> str:
+        """Convert a Go import path to a dotted module path relative to project."""
+        if self._go_module_path:
+            relative = import_path.removeprefix(self._go_module_path + "/")
+        else:
+            relative = import_path
+        return relative.replace("/", ".")
+
+    def _parse_imports(self, content: str) -> list[str]:
+        """Parse all import paths from Go source content."""
+        import_paths: list[str] = []
+
+        # Grouped imports: import ( "path1" \n "path2" )
+        for block_match in _GO_GROUPED_IMPORT_RE.finditer(content):
+            block = block_match.group(1)
+            for line_match in _GO_IMPORT_LINE_RE.finditer(block):
+                import_paths.append(line_match.group(1))
+
+        # Single imports: import "path" (not inside a group)
+        # Need to avoid matching imports already captured in grouped blocks
+        grouped_ranges = [(m.start(), m.end()) for m in _GO_GROUPED_IMPORT_RE.finditer(content)]
+        for match in _GO_SINGLE_IMPORT_RE.finditer(content):
+            in_group = any(start <= match.start() <= end for start, end in grouped_ranges)
+            if not in_group:
+                import_paths.append(match.group(1))
+
+        return import_paths
 
     def recognize(self, file_path: Path, content: str) -> ScanResult:
         """Scan *content* of a Go file and return discovered nodes/edges."""
@@ -429,4 +499,35 @@ class GoRecognizer:
                         )
                     )
 
-        return ScanResult(nodes=nodes, edges=edges)
+        # --- Full import parsing for universal pipeline (v0.6.0) ---
+        imports: list[ImportInfo] = []
+        all_import_paths = self._parse_imports(content)
+        for import_path in all_import_paths:
+            if self._is_internal_import(import_path):
+                module_path = self._import_to_module_path(import_path)
+                imports.append(ImportInfo(
+                    module_path=module_path,
+                    symbols=[],  # Go imports entire packages
+                    style="absolute",
+                ))
+
+        # --- Interface implementation detection (v0.6.0) ---
+        implementations: list[ImplementationInfo] = []
+        interface_methods: dict[str, set[str]] = {}
+        for match in _GO_INTERFACE_BODY_RE.finditer(content):
+            iface_name = match.group(1)
+            body = match.group(2)
+            methods = set(_GO_INTERFACE_METHOD_RE.findall(body))
+            if methods:
+                interface_methods[iface_name] = methods
+
+        for struct_name, methods in struct_methods.items():
+            for iface_name, iface_meths in interface_methods.items():
+                if iface_meths and iface_meths.issubset(methods):
+                    implementations.append(ImplementationInfo(
+                        child_class=struct_name,
+                        parent_class=iface_name,
+                        file_path=rel_path,
+                    ))
+
+        return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)
