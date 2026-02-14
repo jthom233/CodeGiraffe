@@ -1397,3 +1397,205 @@ end
         ids = {n.id for n in result.nodes}
         assert "worker:ReportWorker" in ids
         assert "service:ReportWorker" not in ids
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 (v0.9.0): Implements-detection edge-case tests
+# ---------------------------------------------------------------------------
+
+
+class TestTypeScriptImplementsEdgeCases:
+    """T099-T101: Verify TypeScript implements detection edge cases."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return TypeScriptRecognizer()
+
+    def test_multi_interface_implements(self, recognizer):
+        """T099: class Foo implements Bar, Baz produces 2 ImplementationInfo records."""
+        content = '''
+class Foo implements Bar, Baz {
+    doSomething() {}
+}
+'''
+        result = recognizer.recognize(Path("foo.ts"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        assert ("Foo", "Bar") in impl_map
+        assert ("Foo", "Baz") in impl_map
+        impl_for_foo = [i for i in result.implementations if i.child_class == "Foo"]
+        assert len(impl_for_foo) >= 2
+
+    def test_generic_interface_stripped(self, recognizer):
+        """T100: class Foo implements Bar<string> produces ImplementationInfo(parent_class="Bar")."""
+        content = '''
+class Foo implements Bar<string> {
+    doSomething() {}
+}
+'''
+        result = recognizer.recognize(Path("foo.ts"), content)
+        impl_parents = [i.parent_class for i in result.implementations if i.child_class == "Foo"]
+        assert "Bar" in impl_parents
+
+    def test_extends_and_implements(self, recognizer):
+        """T101: class Foo extends Base implements Bar produces both extends and implements."""
+        content = '''
+class Foo extends Base implements Bar {
+    doSomething() {}
+}
+'''
+        result = recognizer.recognize(Path("foo.ts"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        # extends Base
+        assert ("Foo", "Base") in impl_map
+        # implements Bar
+        assert ("Foo", "Bar") in impl_map
+
+
+class TestJavaImplementsEdgeCases:
+    """T102: Verify Java multi-interface implements detection."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return JavaRecognizer()
+
+    def test_multi_interface_implements(self, recognizer):
+        """T102: class Foo implements Bar, Baz produces 2 ImplementationInfo records."""
+        content = '''
+public class Foo implements Bar, Baz {
+    public void doSomething() {}
+}
+'''
+        result = recognizer.recognize(Path("Foo.java"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        assert ("Foo", "Bar") in impl_map
+        assert ("Foo", "Baz") in impl_map
+        impl_for_foo = [i for i in result.implementations if i.child_class == "Foo"]
+        assert len(impl_for_foo) >= 2
+
+
+class TestCSharpImplementsEdgeCases:
+    """T103: Verify C# base class vs interface disambiguation."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return CSharpRecognizer()
+
+    def test_base_class_and_interface_distinction(self, recognizer):
+        """T103: class Foo : BaseClass, IInterface distinguishes base class from interface."""
+        content = '''
+public class Foo : BaseClass, IInterface {
+    public void DoSomething() {}
+}
+'''
+        result = recognizer.recognize(Path("Foo.cs"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        # Both should appear as ImplementationInfo entries
+        assert ("Foo", "BaseClass") in impl_map
+        assert ("Foo", "IInterface") in impl_map
+
+
+class TestRustImplTraitEdgeCases:
+    """T106: Verify Rust impl Trait for Struct basic case."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return RustRecognizer()
+
+    def test_impl_trait_for_struct(self, recognizer):
+        """T106: impl Display for MyStruct produces correct ImplementationInfo."""
+        content = '''
+pub struct MyStruct {
+    pub name: String,
+}
+
+impl Display for MyStruct {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+'''
+        result = recognizer.recognize(Path("my_struct.rs"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        assert ("MyStruct", "Display") in impl_map
+
+
+class TestPhpImplementsEdgeCases:
+    """T108: Verify PHP multi-interface implements."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return PhpRecognizer()
+
+    def test_multi_interface_implements(self, recognizer):
+        """T108: class Foo implements Bar, Baz produces 2 ImplementationInfo records."""
+        content = """
+class Foo implements Bar, Baz {
+    public function doSomething() {}
+}
+"""
+        result = recognizer.recognize(Path("Foo.php"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        assert ("Foo", "Bar") in impl_map
+        assert ("Foo", "Baz") in impl_map
+
+
+class TestRubyImplementsEdgeCases:
+    """T108: Verify Ruby include Module detection."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return RubyRecognizer()
+
+    def test_class_inheritance(self, recognizer):
+        """T108: class Foo < Bar produces ImplementationInfo."""
+        content = """
+class Foo < CustomBase
+  def do_something
+  end
+end
+"""
+        result = recognizer.recognize(Path("foo.rb"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        assert ("Foo", "CustomBase") in impl_map
+
+    def test_external_base_excluded(self, recognizer):
+        """External bases like ApplicationRecord should be excluded."""
+        content = """
+class User < ApplicationRecord
+  has_many :orders
+end
+"""
+        result = recognizer.recognize(Path("user.rb"), content)
+        impl_for_user = [i for i in result.implementations if i.child_class == "User"]
+        assert len(impl_for_user) == 0
+
+
+class TestCppInheritanceEdgeCases:
+    """T109: Verify C++ class Foo : public IBar."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return CppRecognizer()
+
+    def test_public_inheritance(self, recognizer):
+        """T109: class Foo : public IBar produces ImplementationInfo."""
+        content = '''
+class Foo : public IBar {
+    void handle() override;
+};
+'''
+        result = recognizer.recognize(Path("foo.h"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        assert ("Foo", "IBar") in impl_map
+
+    def test_multiple_inheritance(self, recognizer):
+        """T109: class Foo : public IBar, public IBaz produces 2 ImplementationInfo records."""
+        content = '''
+class Foo : public IBar, public IBaz {
+    void handle() override;
+};
+'''
+        result = recognizer.recognize(Path("foo.h"), content)
+        impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
+        assert ("Foo", "IBar") in impl_map
+        assert ("Foo", "IBaz") in impl_map

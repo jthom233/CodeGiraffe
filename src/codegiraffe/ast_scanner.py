@@ -16,8 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from codegiraffe.graph import Node, Edge
-from codegiraffe.scanner import ScanResult
+from codegiraffe.scanner import CallInfo, ScanResult
 from codegiraffe.schema import EdgeType, NodeType
+
+# Import Go stdlib package set for filtering (shared with regex recognizer)
+from codegiraffe.recognizers.go import _GO_STDLIB_PACKAGES
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,30 @@ _PY_SUBSCRIPT_QUERY = """
   subscript: (string) @key)
 """
 
+# T096: Python call expression queries for AST-based call detection
+_PY_SIMPLE_CALL_QUERY = """
+(call
+  function: (identifier) @func_name
+  arguments: (argument_list) @args)
+"""
+
+# Python builtins to filter from call detection (mirrors scanner.py _PYTHON_BUILTINS)
+_PY_AST_BUILTINS = frozenset({
+    "print", "len", "range", "str", "int", "float", "bool", "list", "dict",
+    "set", "tuple", "type", "isinstance", "issubclass", "hasattr", "getattr",
+    "setattr", "delattr", "super", "property", "staticmethod", "classmethod",
+    "open", "input", "enumerate", "zip", "map", "filter", "sorted", "reversed",
+    "min", "max", "sum", "abs", "round", "any", "all", "next", "iter",
+    "repr", "hash", "id", "dir", "vars", "globals", "locals", "exec", "eval",
+    "compile", "breakpoint", "exit", "quit",
+})
+
+# Go builtins to filter from call detection
+_GO_AST_BUILTINS = frozenset({
+    "make", "append", "len", "cap", "copy", "delete",
+    "close", "panic", "recover", "new", "print", "println",
+})
+
 # Regex helpers for extracting values from decorator/call text
 _ROUTE_ARG_RE = re.compile(
     r"""(?:route|get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']""",
@@ -190,7 +217,10 @@ class PythonASTRecognizer:
                         metadata={"inferred": True},
                     ))
 
-        return ScanResult(nodes=nodes, edges=edges)
+        # T097: Call detection via AST
+        calls = self._find_calls(tree, rel)
+
+        return ScanResult(nodes=nodes, edges=edges, calls=calls)
 
     # -- decorators (routes / celery) ----------------------------------------
 
@@ -369,6 +399,110 @@ class PythonASTRecognizer:
                             metadata={"url": url},
                         ))
 
+    # -- call detection (v0.9.0 Phase 4) ------------------------------------
+
+    @staticmethod
+    def _find_enclosing_func_ast(node: Any) -> tuple[str, str]:
+        """Walk tree-sitter parents to find enclosing class and function.
+
+        Returns ``(class_name, func_name)`` where either may be empty.
+        """
+        func_name = ""
+        class_name = ""
+        current = node.parent
+        while current is not None:
+            if current.type == "function_definition":
+                for child in current.children:
+                    if child.type == "identifier":
+                        func_name = _text(child)
+                        break
+            elif current.type == "class_definition":
+                for child in current.children:
+                    if child.type == "identifier":
+                        class_name = _text(child)
+                        break
+            current = current.parent
+        return class_name, func_name
+
+    def _find_calls(self, tree: Any, rel: str) -> list[CallInfo]:
+        """T097: Extract call expressions from Python AST and produce CallInfo records."""
+        calls: list[CallInfo] = []
+
+        # Attribute calls: obj.method(args)
+        for _pat, caps in _query_matches(self._language, _PY_ATTR_CALL_QUERY, tree.root_node):
+            obj_nodes = caps.get("obj", [])
+            method_nodes = caps.get("method", [])
+            if not obj_nodes or not method_nodes:
+                continue
+            receiver = _text(obj_nodes[0])
+            callee = _text(method_nodes[0])
+
+            # Skip builtins as receiver or callee
+            if receiver in _PY_AST_BUILTINS or callee in _PY_AST_BUILTINS:
+                continue
+            # Skip known library calls (requests, os, etc.)
+            if receiver in ("requests", "os", "sys", "re", "json", "logging"):
+                continue
+
+            call_node = obj_nodes[0]
+            # Walk up to find the call_expression node
+            while call_node is not None and call_node.type != "call":
+                call_node = call_node.parent
+
+            enc_class, enc_func = self._find_enclosing_func_ast(
+                call_node if call_node else obj_nodes[0],
+            )
+
+            if receiver == "self":
+                style = "method"
+                receiver = enc_class
+            else:
+                style = "method"
+
+            caller = f"{enc_class}.{enc_func}" if enc_class and enc_func else enc_func
+
+            calls.append(CallInfo(
+                caller=caller,
+                callee=callee,
+                receiver=receiver,
+                file_path=rel,
+                style=style,
+            ))
+
+        # Simple calls: FunctionName(args) -- constructors or plain functions
+        for _pat, caps in _query_matches(self._language, _PY_SIMPLE_CALL_QUERY, tree.root_node):
+            func_nodes = caps.get("func_name", [])
+            if not func_nodes:
+                continue
+            callee = _text(func_nodes[0])
+
+            # Skip builtins
+            if callee in _PY_AST_BUILTINS:
+                continue
+
+            call_node = func_nodes[0]
+            while call_node is not None and call_node.type != "call":
+                call_node = call_node.parent
+
+            enc_class, enc_func = self._find_enclosing_func_ast(
+                call_node if call_node else func_nodes[0],
+            )
+
+            caller = f"{enc_class}.{enc_func}" if enc_class and enc_func else enc_func
+
+            # Uppercase first letter -> constructor style
+            style = "constructor" if callee[0:1].isupper() else "direct"
+
+            calls.append(CallInfo(
+                caller=caller,
+                callee=callee,
+                receiver="",
+                file_path=rel,
+                style=style,
+            ))
+
+        return calls
+
 
 # ---------------------------------------------------------------------------
 # Go AST Recognizer
@@ -385,6 +519,14 @@ _GO_CALL_QUERY = """
 (call_expression
   function: (selector_expression
     operand: (identifier) @obj
+    field: (field_identifier) @method)
+  arguments: (argument_list) @args)
+"""
+
+# Broader call query that matches chained selectors (e.g. a.store.Save())
+_GO_BROAD_CALL_QUERY = """
+(call_expression
+  function: (selector_expression
     field: (field_identifier) @method)
   arguments: (argument_list) @args)
 """
@@ -414,7 +556,10 @@ class GoASTRecognizer:
         self._find_structs(tree, rel, nodes)
         self._find_env_vars(tree, rel, nodes)
 
-        return ScanResult(nodes=nodes, edges=[])
+        # T095: Call detection via AST
+        calls = self._find_calls(tree, rel)
+
+        return ScanResult(nodes=nodes, edges=[], calls=calls)
 
     def _find_structs(self, tree: Any, rel: str, nodes: list[Node]) -> None:
         for _pat, caps in _query_matches(self._language, _GO_STRUCT_QUERY, tree.root_node):
@@ -448,6 +593,119 @@ class GoASTRecognizer:
                             id=f"env:{var}", type=NodeType.ENV_VAR, label=var,
                             file_path=rel, metadata={"variable": var},
                         ))
+
+    # -- call detection (v0.9.0 Phase 4) ------------------------------------
+
+    @staticmethod
+    def _find_enclosing_func_ast(node: Any) -> str:
+        """T094: Walk tree-sitter parents to find enclosing function/method.
+
+        For method declarations like ``func (a *App) Update()``, returns "App.Update".
+        For plain functions like ``func main()``, returns "main".
+        Returns empty string if no enclosing function is found.
+        """
+        current = node.parent
+        while current is not None:
+            if current.type == "function_declaration":
+                # Plain function: func FuncName(
+                for child in current.children:
+                    if child.type == "identifier":
+                        return _text(child)
+            elif current.type == "method_declaration":
+                # Method with receiver: func (r *Type) MethodName(
+                receiver_type = ""
+                method_name = ""
+                for child in current.children:
+                    if child.type == "parameter_list":
+                        # This is the receiver parameter list
+                        for param_child in child.children:
+                            if param_child.type == "parameter_declaration":
+                                for pc in param_child.children:
+                                    if pc.type == "pointer_type":
+                                        for pt in pc.children:
+                                            if pt.type == "type_identifier":
+                                                receiver_type = _text(pt)
+                                    elif pc.type == "type_identifier":
+                                        receiver_type = _text(pc)
+                    elif child.type == "field_identifier":
+                        method_name = _text(child)
+                if receiver_type and method_name:
+                    return f"{receiver_type}.{method_name}"
+                elif method_name:
+                    return method_name
+            current = current.parent
+        return ""
+
+    @staticmethod
+    def _extract_receiver(method_node: Any) -> str:
+        """Extract receiver name from a selector_expression's operand.
+
+        For ``a.store.Save``, the method_node is ``Save`` and the receiver
+        is derived from the operand. For chained selectors like ``a.store``,
+        the last ``field_identifier`` (``store``) is returned as the receiver.
+        For simple selectors like ``db.Query``, the ``identifier`` (``db``)
+        is returned.
+        """
+        sel_expr = method_node.parent  # selector_expression
+        if sel_expr is None:
+            return ""
+        operand = sel_expr.children[0] if sel_expr.children else None
+        if operand is None:
+            return ""
+        if operand.type == "identifier":
+            return _text(operand)
+        elif operand.type == "selector_expression":
+            # Chained: get the last field_identifier (e.g. "store" from "a.store")
+            for child in reversed(operand.children):
+                if child.type == "field_identifier":
+                    return _text(child)
+            # Fallback: get identifier at the start of the chain
+            for child in operand.children:
+                if child.type == "identifier":
+                    return _text(child)
+        return _text(operand)
+
+    def _find_calls(self, tree: Any, rel: str) -> list[CallInfo]:
+        """T093: Extract call expressions from Go AST and produce CallInfo records.
+
+        Uses ``_GO_BROAD_CALL_QUERY`` to find ``receiver.Method(args)`` patterns
+        including chained selectors (e.g. ``a.store.Save()``). Filters stdlib
+        packages and Go builtins.
+        """
+        calls: list[CallInfo] = []
+
+        for _pat, caps in _query_matches(self._language, _GO_BROAD_CALL_QUERY, tree.root_node):
+            method_nodes = caps.get("method", [])
+            if not method_nodes:
+                continue
+            callee = _text(method_nodes[0])
+            receiver = self._extract_receiver(method_nodes[0])
+
+            # T092: Filter stdlib packages
+            if receiver.lower() in _GO_STDLIB_PACKAGES or receiver in _GO_STDLIB_PACKAGES:
+                continue
+            # Filter Go builtins
+            if callee in _GO_AST_BUILTINS:
+                continue
+
+            # Find enclosing function context
+            call_node = method_nodes[0]
+            while call_node is not None and call_node.type != "call_expression":
+                call_node = call_node.parent
+
+            caller = self._find_enclosing_func_ast(
+                call_node if call_node else method_nodes[0],
+            )
+
+            calls.append(CallInfo(
+                caller=caller,
+                callee=callee,
+                receiver=receiver,
+                file_path=rel,
+                style="method",
+            ))
+
+        return calls
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +756,10 @@ class TypeScriptASTRecognizer:
         self._find_routes(tree, rel, nodes)
         self._find_env_vars(tree, rel, content, nodes)
 
-        return ScanResult(nodes=nodes, edges=[])
+        # T098: Call detection via AST
+        calls = self._find_calls(tree, rel)
+
+        return ScanResult(nodes=nodes, edges=[], calls=calls)
 
     def _find_routes(self, tree: Any, rel: str, nodes: list[Node]) -> None:
         seen: set[str] = set()
@@ -553,6 +814,87 @@ class TypeScriptASTRecognizer:
                     id=f"env:{var}", type=NodeType.ENV_VAR, label=var,
                     file_path=rel, metadata={"variable": var},
                 ))
+
+    # -- call detection (v0.9.0 Phase 4) ------------------------------------
+
+    # TypeScript builtins to skip in call detection
+    _TS_AST_BUILTINS = frozenset({
+        "console", "Math", "JSON", "Object", "Array", "String", "Number",
+        "Boolean", "Date", "RegExp", "Error", "Promise", "Map", "Set",
+        "parseInt", "parseFloat", "setTimeout", "setInterval",
+        "clearTimeout", "clearInterval", "require", "process",
+    })
+
+    @staticmethod
+    def _find_enclosing_func_ast(node: Any) -> tuple[str, str]:
+        """Walk tree-sitter parents to find enclosing class and function.
+
+        Returns ``(class_name, func_name)``.
+        """
+        func_name = ""
+        class_name = ""
+        current = node.parent
+        while current is not None:
+            if current.type in ("function_declaration", "method_definition",
+                                "arrow_function"):
+                for child in current.children:
+                    if child.type in ("identifier", "property_identifier"):
+                        func_name = _text(child)
+                        break
+            elif current.type == "class_declaration":
+                for child in current.children:
+                    if child.type == "type_identifier":
+                        class_name = _text(child)
+                        break
+            current = current.parent
+        return class_name, func_name
+
+    def _find_calls(self, tree: Any, rel: str) -> list[CallInfo]:
+        """T098: Extract call expressions from TypeScript AST and produce CallInfo records."""
+        calls: list[CallInfo] = []
+
+        for _pat, caps in _query_matches(self._language, _TS_CALL_QUERY, tree.root_node):
+            obj_nodes = caps.get("obj", [])
+            method_nodes = caps.get("method", [])
+            if not obj_nodes or not method_nodes:
+                continue
+            receiver = _text(obj_nodes[0])
+            callee = _text(method_nodes[0])
+
+            # Skip TS builtins
+            if receiver in self._TS_AST_BUILTINS or callee in self._TS_AST_BUILTINS:
+                continue
+
+            # Skip HTTP route methods (already handled by _find_routes)
+            http_methods = {"get", "post", "put", "delete", "patch", "head", "options"}
+            if callee.lower() in http_methods:
+                continue
+
+            call_node = obj_nodes[0]
+            while call_node is not None and call_node.type != "call_expression":
+                call_node = call_node.parent
+
+            enc_class, enc_func = self._find_enclosing_func_ast(
+                call_node if call_node else obj_nodes[0],
+            )
+
+            if receiver == "this":
+                style = "method"
+                receiver = enc_class
+            else:
+                style = "method"
+
+            caller = f"{enc_class}.{enc_func}" if enc_class and enc_func else enc_func
+
+            calls.append(CallInfo(
+                caller=caller,
+                callee=callee,
+                receiver=receiver,
+                file_path=rel,
+                style=style,
+            ))
+
+        return calls
 
 
 # ---------------------------------------------------------------------------

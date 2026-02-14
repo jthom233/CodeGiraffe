@@ -21,7 +21,7 @@ try:
 except ImportError:
     HAS_TREE_SITTER = False
 
-from codegiraffe.scanner import ScanResult, PatternRecognizer
+from codegiraffe.scanner import ScanResult, PatternRecognizer, CallInfo
 from codegiraffe.schema import NodeType, EdgeType
 
 
@@ -464,3 +464,166 @@ class TestGetASTRegistry:
         registry = get_ast_registry()
         recognizers = registry.get_recognizers(Path("app.py"))
         assert any(isinstance(r, PythonASTRecognizer) for r in recognizers)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: AST call detection tests (v0.9.0)
+# ---------------------------------------------------------------------------
+
+
+@requires_tree_sitter
+class TestGoASTCallDetection:
+    """T087-T088: Go AST call detection produces CallInfo records."""
+
+    @pytest.fixture
+    def recognizer(self):
+        from codegiraffe.ast_scanner import GoASTRecognizer
+        return GoASTRecognizer()
+
+    def test_go_ast_call_detection_produces_call_info(self, recognizer):
+        """T087: Go AST call detection produces CallInfo records in ScanResult."""
+        content = '''
+package main
+
+type App struct {
+    store Store
+}
+
+func (a *App) Update() {
+    a.store.Save()
+    result := a.store.Load()
+    _ = result
+}
+'''
+        result = recognizer.recognize(Path("app.go"), content)
+        assert len(result.calls) > 0, "Expected CallInfo records from Go AST"
+        callees = {c.callee for c in result.calls}
+        assert "Save" in callees, "Expected Save call to be detected"
+        assert "Load" in callees, "Expected Load call to be detected"
+        # Verify CallInfo fields are populated
+        for call in result.calls:
+            assert isinstance(call, CallInfo)
+            assert call.file_path == "app.go"
+            assert call.callee
+
+    def test_go_ast_filters_stdlib_calls(self, recognizer):
+        """T088: Go AST filters stdlib calls (fmt.Println not in calls)."""
+        content = '''
+package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("hello")
+    fmt.Printf("world %s", "!")
+    os.Getenv("HOME")
+}
+'''
+        result = recognizer.recognize(Path("main.go"), content)
+        callees = {c.callee for c in result.calls}
+        receivers = {c.receiver for c in result.calls}
+        # stdlib calls should be filtered out
+        assert "Println" not in callees, "fmt.Println should be filtered as stdlib"
+        assert "Printf" not in callees, "fmt.Printf should be filtered as stdlib"
+        assert "Getenv" not in callees, "os.Getenv should be filtered as stdlib"
+        assert "fmt" not in receivers, "fmt receiver should not appear in calls"
+
+
+@requires_tree_sitter
+class TestTypeScriptASTCallDetection:
+    """T089: TypeScript AST call detection produces CallInfo records."""
+
+    @pytest.fixture
+    def recognizer(self):
+        from codegiraffe.ast_scanner import TypeScriptASTRecognizer
+        return TypeScriptASTRecognizer()
+
+    def test_ts_ast_call_detection_produces_call_info(self, recognizer):
+        """T089: TypeScript AST call detection produces CallInfo records."""
+        content = '''
+const userService = new UserService();
+const result = userService.getUser(123);
+userService.deleteUser(456);
+'''
+        result = recognizer.recognize(Path("app.ts"), content)
+        assert len(result.calls) > 0, "Expected CallInfo records from TS AST"
+        callees = {c.callee for c in result.calls}
+        # Should detect method calls
+        assert "getUser" in callees or "deleteUser" in callees, \
+            f"Expected method calls, got callees: {callees}"
+        for call in result.calls:
+            assert isinstance(call, CallInfo)
+            assert call.file_path == "app.ts"
+
+
+@requires_tree_sitter
+class TestPythonASTCallDetection:
+    """T090: Python AST call detection produces CallInfo records."""
+
+    @pytest.fixture
+    def recognizer(self):
+        from codegiraffe.ast_scanner import PythonASTRecognizer
+        return PythonASTRecognizer()
+
+    def test_python_ast_call_detection_produces_call_info(self, recognizer):
+        """T090: Python AST call detection produces CallInfo records."""
+        content = '''
+class UserService:
+    def get_user(self, user_id):
+        result = self.db.query(user_id)
+        return result
+
+    def save_user(self, user):
+        validator = Validator()
+        validator.validate(user)
+        self.db.save(user)
+'''
+        result = recognizer.recognize(Path("service.py"), content)
+        assert len(result.calls) > 0, "Expected CallInfo records from Python AST"
+        callees = {c.callee for c in result.calls}
+        # Should detect at least some of: query, Validator, validate, save
+        assert len(callees) > 0, f"Expected call targets, got: {callees}"
+        for call in result.calls:
+            assert isinstance(call, CallInfo)
+            assert call.file_path == "service.py"
+
+
+@requires_tree_sitter
+class TestASTRegexCompatibility:
+    """T091: AST and regex modes produce compatible CallInfo results."""
+
+    def test_ast_regex_compatible_go_calls(self):
+        """T091: AST and regex modes produce compatible CallInfo for same Go file."""
+        from codegiraffe.ast_scanner import GoASTRecognizer
+        from codegiraffe.recognizers.go import GoRecognizer
+
+        content = '''
+package main
+
+type App struct {
+    store Store
+}
+
+func (a *App) Run() {
+    a.store.Save()
+    a.store.Load()
+}
+'''
+        ast_rec = GoASTRecognizer()
+        regex_rec = GoRecognizer()
+
+        ast_result = ast_rec.recognize(Path("app.go"), content)
+        regex_result = regex_rec.recognize(Path("app.go"), content)
+
+        ast_callees = {c.callee for c in ast_result.calls}
+        regex_callees = {c.callee for c in regex_result.calls}
+
+        # Both should detect the same non-stdlib calls
+        # The intersection should be non-empty -- both detect at least
+        # some of the same calls
+        assert ast_callees, "AST should detect calls"
+        assert regex_callees, "Regex should detect calls"
+        # Both should detect the key calls (Save, Load)
+        common = ast_callees & regex_callees
+        assert len(common) > 0, \
+            f"AST and regex should share some callees. AST: {ast_callees}, Regex: {regex_callees}"

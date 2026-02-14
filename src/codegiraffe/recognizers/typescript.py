@@ -81,7 +81,7 @@ _TS_NAMED_IMPORT_RE = re.compile(r"""import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)[
 _TS_DEFAULT_IMPORT_RE = re.compile(r"""import\s+(\w+)\s+from\s+['"]([^'"]+)['"]""")
 _TS_NAMESPACE_IMPORT_RE = re.compile(r"""import\s+\*\s+as\s+\w+\s+from\s+['"]([^'"]+)['"]""")
 _TS_CLASS_EXTENDS_RE = re.compile(r'class\s+(\w+)\s+extends\s+(\w+)')
-_TS_CLASS_IMPLEMENTS_RE = re.compile(r'class\s+(\w+)\s+implements\s+([\w,\s]+?)(?:\s*\{|\s*extends)')
+_TS_CLASS_IMPLEMENTS_RE = re.compile(r'class\s+(\w+)\s+(?:extends\s+\w+\s+)?implements\s+([\w,\s<>]+?)(?:\s*\{)')
 
 # ---------------------------------------------------------------------------
 # TypeScript call detection (v0.9.0)
@@ -398,8 +398,9 @@ class TypeScriptRecognizer:
             implementations.append(ImplementationInfo(child_class=match.group(1), parent_class=match.group(2), file_path=str(file_path)))
         for match in _TS_CLASS_IMPLEMENTS_RE.finditer(content):
             child = match.group(1)
-            for parent in [p.strip() for p in match.group(2).split(",") if p.strip()]:
-                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
+            for parent in [p.strip().split("<")[0].strip() for p in match.group(2).split(",") if p.strip()]:
+                if parent:
+                    implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
 
         # --- Call detection (v0.9.0) ---
         calls: list[CallInfo] = []
