@@ -119,6 +119,18 @@ class CppRecognizer:
                 )
                 captured_names.add(include_stem)
 
+        if seen_includes and filename_stem not in captured_names:
+            captured_names.add(filename_stem)
+            nodes.append(
+                Node(
+                    id=file_service_id,
+                    type=NodeType.SERVICE,
+                    label=filename_stem,
+                    file_path=rel_path,
+                    metadata={"kind": "compilation_unit"},
+                )
+            )
+
         # --- Struct/class definitions -> SERVICE ---
         for match in _CPP_STRUCT_CLASS_RE.finditer(content):
             name = match.group(1)
