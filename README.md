@@ -34,7 +34,7 @@ claude mcp add codegiraffe -- /path/to/CodeGiraffe/.venv/bin/python /path/to/Cod
 
 See [Getting Started](docs/getting-started.md) for Claude Desktop setup, optional dependencies (embeddings, Neo4j, AST scanning), and a first-scan walkthrough.
 
-## MCP Tools (36)
+## MCP Tools (37)
 
 | Category | Tools | Description |
 |---|---|---|

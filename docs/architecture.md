@@ -10,7 +10,7 @@ This page covers the internal module layout of Code Giraffe, the graph data mode
 
 ```
 src/codegiraffe/
-├── server.py            # FastMCP server + 36 MCP tool definitions
+├── server.py            # FastMCP server + 37 MCP tool definitions
 ├── graph.py             # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph engine
 ├── storage.py           # StorageBackend protocol + JSON file implementation
 ├── sqlite_storage.py    # SQLite storage backend for larger graphs
@@ -19,6 +19,12 @@ src/codegiraffe/
 ├── query.py             # Subgraph extraction, scoring, drift, blast radius, risk, cycles, change validation
 ├── diff_parser.py       # Unified diff parsing + data models for change impact analysis
 ├── git_utils.py         # Git CLI subprocess wrappers for change detection
+├── patterns.py          # Convention mining and anti-pattern detection
+├── ownership.py         # Node annotation layer (owner, stability, notes)
+├── coverage_mapper.py   # Test coverage mapping (coverage.py, Istanbul, LCOV)
+├── graph_diff.py        # PR-level architecture diffing between git refs
+├── domains.py           # Domain inference and management
+├── migration.py         # Migration plan generation for large refactors
 ├── embeddings.py        # Optional embedding-based semantic scoring (sentence-transformers)
 ├── export.py            # Graph visualization export (Mermaid + D3.js JSON)
 ├── coordination.py      # Multi-agent claim/status coordination with TTL

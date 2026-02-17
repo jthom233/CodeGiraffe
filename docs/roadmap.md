@@ -117,7 +117,8 @@ Complete version history and future plans for Code Giraffe.
 
 ## v0.13.0 — Advanced Analysis (completed)
 
-- [x] 5 new MCP tools: `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan` (36 tools total)
+- [x] 6 new MCP tools: `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan`, `codegiraffe_dashboard` (37 tools total)
+- [x] One-click web dashboard launch via `codegiraffe_dashboard` tool (spawns HTTP server, opens browser)
 - [x] Test coverage mapping: map coverage.py/Istanbul/LCOV data to graph nodes for risk assessment
 - [x] Enhanced `codegiraffe_risk_assessment` with coverage data: uncovered nodes receive 1.5x risk multiplier
 - [x] Enhanced `codegiraffe_suggest_tests` with `coverage_status` field (covered/uncovered/unknown)
@@ -125,7 +126,7 @@ Complete version history and future plans for Code Giraffe.
 - [x] Dependency-aware task ordering: topological sort with parallel groups and conflict zone detection
 - [x] Domain model abstraction: infer or manage logical domain groupings from directory structure
 - [x] CI/CD integration workflow: migration planning for large refactors with phased rollout
-- [x] 1318+ tests
+- [x] 1339+ tests
 
 ---
 

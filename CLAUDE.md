@@ -1,21 +1,19 @@
 # Code Giraffe Development Guidelines
 
 ## Active Technologies
-- **Version**: 0.10.0
+- **Version**: 0.13.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
-- **Storage**: JSON files + SQLite + Neo4j (optional)
-- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (979+ tests)
+- **Storage**: JSON files + SQLite + Neo4j (optional, all via StorageBackend protocol)
+- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (1339+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
-- Python 3.11+ + FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2 (011-graph-intelligence)
-- JSON + SQLite + Neo4j (all via StorageBackend protocol) (011-graph-intelligence)
 
 ## Project Structure
 
 ```text
 src/codegiraffe/          # Main package
-├── server.py             # FastMCP server + 28 MCP tool definitions
+├── server.py             # FastMCP server + 37 MCP tool definitions
 ├── graph.py              # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph
 ├── storage.py            # StorageBackend protocol + JSONStorage
 ├── sqlite_storage.py     # SQLiteStorage implementation
@@ -24,6 +22,12 @@ src/codegiraffe/          # Main package
 ├── query.py              # Subgraph extraction, scoring, drift detection, blast radius, risk, cycles, change validation
 ├── diff_parser.py        # Unified diff parsing + data models for change impact
 ├── git_utils.py          # Git CLI subprocess wrappers for change detection
+├── patterns.py           # Convention mining and anti-pattern detection
+├── ownership.py          # Node annotation layer (owner, stability, notes)
+├── coverage_mapper.py    # Test coverage mapping (coverage.py, Istanbul, LCOV)
+├── graph_diff.py         # PR-level architecture diffing between git refs
+├── domains.py            # Domain inference and management
+├── migration.py          # Migration plan generation for large refactors
 ├── schema.py             # Node/edge type enums
 ├── export.py             # Mermaid + D3.js graph export
 ├── embeddings.py         # Embedding-based scoring + cache
@@ -43,7 +47,7 @@ src/codegiraffe/          # Main package
     ├── php.py
     └── ruby.py
 
-tests/                    # 979+ tests
+tests/                    # 1339+ tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 
@@ -102,6 +106,6 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
-- 011-graph-intelligence: Added Python 3.11+ + FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
-- v0.10.0: Change impact validation -- `codegiraffe_validate_changes` (detect incomplete modifications from git diff), `codegiraffe_suggest_tests` (recommend test files for changes), `codegiraffe_file_coupling` (mine git co-change history); enhanced `codegiraffe_context_for` with `include_changes` parameter for change-aware scoring; new modules `diff_parser.py` and `git_utils.py`; 28 MCP tools total; 979+ tests
-- v0.9.0: Scanner depth -- call-graph edges (`calls`) for Go/Python/TypeScript via regex and tree-sitter AST; cross-file Go interface satisfaction (duck-type method set matching); demand-driven method nodes (`service:{Parent}.{Method}`); `CallInfo`/`InterfaceInfo`/`MethodSetEntry` data classes; `_infer_call_edges()` and `_infer_interface_satisfaction()` pipeline steps; improved TypeScript `implements` multi-interface and generic handling; 874+ tests
+- v0.13.0: Advanced Analysis -- `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan`; `codegiraffe_dashboard` tool for one-click web dashboard launch; 37 MCP tools total; 1339+ tests
+- v0.12.0: Graph Enrichment -- `codegiraffe_annotate`, `codegiraffe_sync_files`; edge confidence scoring (0.0-1.0); `min_confidence` parameter on `context_for`; ownership annotations
+- v0.11.0: Intelligent Context -- `codegiraffe_patterns`; token budgets; intent-aware navigation; retrieval strategy metadata
