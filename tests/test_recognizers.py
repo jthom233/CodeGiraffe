@@ -1158,6 +1158,32 @@ void main() {
         ids = {n.id for n in result.nodes}
         assert "config:MY_HEADER_H_" not in ids
 
+    def test_include_creates_source_node(self, recognizer):
+        """A file with only #include directives should create a node for the file itself."""
+        content = '''
+#include "networking.h"
+#include "utils/logging.h"
+'''
+        result = recognizer.recognize(Path("src/client.cpp"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:client" in ids
+        source_node = next(n for n in result.nodes if n.id == "service:client")
+        assert source_node.type == NodeType.SERVICE
+        assert source_node.metadata.get("kind") == "compilation_unit"
+
+    def test_include_source_node_not_duplicated_when_class_exists(self, recognizer):
+        """A file whose stem matches a class name should not produce duplicate nodes."""
+        content = '''
+#include "foo.h"
+class TestCom {
+    void doWork();
+};
+'''
+        result = recognizer.recognize(Path("TestCom.cpp"), content)
+        ids = [n.id for n in result.nodes]
+        testcom_nodes = [nid for nid in ids if nid == "service:TestCom"]
+        assert len(testcom_nodes) == 1
+
 
 class TestPhpRecognizer:
     @pytest.fixture
