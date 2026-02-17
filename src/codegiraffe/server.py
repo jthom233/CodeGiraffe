@@ -37,6 +37,7 @@ from codegiraffe.git_utils import (
     is_git_repo,
     NotAGitRepoError,
 )
+from codegiraffe.patterns import extract_patterns as _extract_patterns
 from codegiraffe.scanner import scan_project
 from codegiraffe.storage import JSONStorage, StorageBackend
 from codegiraffe.versioning import VersionStore
@@ -281,6 +282,8 @@ def codegiraffe_context_for(
     use_embeddings: bool = True,
     include_impact: bool = False,
     include_changes: bool = False,
+    token_budget: int = 0,
+    detail_level: str = "standard",
 ) -> str:
     """Get the most relevant subgraph for a natural-language task description.
 
@@ -296,12 +299,34 @@ def codegiraffe_context_for(
     receive a score boost and ``_recently_changed`` / ``_in_change_blast_radius``
     metadata annotations.
 
+    When *token_budget* > 0, the result is trimmed so that the total estimated
+    token cost stays within the budget (highest-relevance nodes kept first).
+    When both *token_budget* and *max_nodes* are set, the more restrictive
+    constraint wins.
+
+    *detail_level* controls how much metadata each node carries:
+    - ``"summary"``  — id, type, label only (smallest token footprint)
+    - ``"standard"`` — id, type, label + metadata (default)
+    - ``"detailed"`` — full node data including file_path
+
+    The response includes ``_token_estimate`` showing total estimated tokens
+    and ``_retrieval_strategy`` showing the classified task intent used to
+    steer retrieval (one of: ``create``, ``debug``, ``refactor``, ``delete``,
+    ``test``, ``modify``).
+
     Useful for scoping what parts of the architecture are relevant before
     making changes.
     """
     try:
         graph = _ensure_graph(project_path)
-        subgraph = context_for_task(graph, task, max_nodes, use_embeddings=use_embeddings)
+        subgraph = context_for_task(
+            graph,
+            task,
+            max_nodes,
+            use_embeddings=use_embeddings,
+            token_budget=token_budget,
+            detail_level=detail_level,
+        )
 
         if include_impact:
             total_nodes = len(graph.graph)
@@ -1506,6 +1531,91 @@ def codegiraffe_cypher(project_path: str, query: str) -> str:
         return "Error: Neo4j driver not installed. Install with: pip install codegiraffe[neo4j]"
     except Exception as exc:
         return f"Error running Cypher query: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Convention Mining
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_patterns(
+    project_path: str,
+    node_type: str,
+    min_cluster: int = 3,
+) -> str:
+    """Mine naming conventions and detect anti-patterns from a cluster of same-type nodes.
+
+    Analyzes all nodes of the given *node_type* in the graph to surface:
+    - **Naming pattern**: common prefix/suffix in node IDs (e.g. ``service:*Service``)
+    - **Common attributes**: metadata keys present in >66% of nodes
+    - **Outliers**: node IDs that deviate from the majority convention
+    - **Exemplar**: the node most representative of the cluster
+
+    Requires at least *min_cluster* nodes of the given type (default 3).
+
+    Examples::
+
+        codegiraffe_patterns(project_path=".", node_type="service")
+        codegiraffe_patterns(project_path=".", node_type="endpoint", min_cluster=5)
+    """
+    try:
+        graph = _ensure_graph(project_path)
+        result = _extract_patterns(graph, node_type, min_cluster=min_cluster)
+    except Exception as exc:
+        return f"Error extracting patterns: {exc}"
+
+    return _format_pattern_report(result)
+
+
+def _format_pattern_report(result: dict) -> str:
+    """Format an extract_patterns result dict as a markdown report."""
+    node_type = result.get("node_type", "unknown")
+    sample_size = result.get("sample_size", 0)
+
+    lines = [f"## Convention Mining: `{node_type}`", ""]
+    lines.append(f"**Nodes analysed:** {sample_size}")
+    lines.append("")
+
+    if "message" in result:
+        lines.append(f"_{result['message']}_")
+        return "\n".join(lines)
+
+    naming_pattern = result.get("naming_pattern", "")
+    common_attributes = result.get("common_attributes", {})
+    outliers = result.get("outliers", [])
+    exemplar = result.get("exemplar", "")
+
+    # Naming pattern
+    lines.append(f"**Naming pattern:** `{naming_pattern}`")
+    lines.append("")
+
+    # Exemplar
+    if exemplar:
+        lines.append(f"**Exemplar node:** `{exemplar}`")
+        lines.append("")
+
+    # Common attributes
+    if common_attributes:
+        lines.append("**Common attributes** (present in >66% of nodes):")
+        for key, value in sorted(common_attributes.items()):
+            lines.append(f"- `{key}`: `{value}`")
+        lines.append("")
+    else:
+        lines.append("**Common attributes:** none detected")
+        lines.append("")
+
+    # Outliers
+    if outliers:
+        lines.append(f"**Outliers** ({len(outliers)} node(s) deviating from the pattern):")
+        for nid in outliers:
+            lines.append(f"- `{nid}`")
+        lines.append("")
+    else:
+        lines.append("**Outliers:** none — all nodes conform to the pattern")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ from collections import deque
 from typing import Any
 
 import networkx as nx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Node(BaseModel):
@@ -37,11 +37,15 @@ class Edge(BaseModel):
 class GraphData(BaseModel):
     """Serializable representation of the full architecture graph."""
 
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
     nodes: dict[str, Node] = Field(default_factory=dict)
     edges: list[Edge] = Field(default_factory=list)
     project_path: str = ""
     last_scan: str | None = None
     schema_version: str = "1.0"
+    token_estimate: int = Field(default=0, alias="_token_estimate")
+    retrieval_strategy: str = Field(default="", alias="_retrieval_strategy")
 
 
 class ArchGraph:

@@ -1632,6 +1632,218 @@ def _infer_contract_edges(result: ScanResult) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Architectural Decision Record (ADR) detection
+# ---------------------------------------------------------------------------
+
+_DECISION_HASH_RE = re.compile(r"#\s+DECISION:\s*(.+)")
+_DECISION_LINE_COMMENT_RE = re.compile(r"//\s+ADR-(\d+):\s*(.+)")
+_DECISION_BLOCK_COMMENT_RE = re.compile(r"/\*\s*ADR-(\d+):\s*(.+?)(?=\s*\*/|$)", re.DOTALL | re.MULTILINE)
+
+
+def _detect_decision_markers(file_path: str, content: str) -> list[dict]:
+    """Detect DECISION: and ADR-NNN: markers in code comments.
+
+    Scans *content* for architectural decision markers in three styles:
+
+    - ``# DECISION: <text>`` — Python/Ruby/Bash hash comments
+    - ``// ADR-NNN: <text>`` — C/Go/Java/TypeScript line comments
+    - ``/* ADR-NNN: <text> */`` — block comments
+
+    Returns a list of dicts with keys:
+        text (str), adr_id (str | None), file_path (str),
+        line_number (int, 1-indexed), mined_from (str)
+    """
+    if not content:
+        return []
+
+    results: list[dict] = []
+    lines = content.splitlines()
+
+    for lineno, line in enumerate(lines, start=1):
+        # --- Hash-style: # DECISION: <text> ---
+        m = _DECISION_HASH_RE.search(line)
+        if m:
+            results.append(
+                {
+                    "text": m.group(1).strip(),
+                    "adr_id": None,
+                    "file_path": file_path,
+                    "line_number": lineno,
+                    "mined_from": "comment",
+                }
+            )
+            continue
+
+        # --- Line comment style: // ADR-NNN: <text> ---
+        m = _DECISION_LINE_COMMENT_RE.search(line)
+        if m:
+            results.append(
+                {
+                    "text": m.group(2).strip(),
+                    "adr_id": m.group(1),
+                    "file_path": file_path,
+                    "line_number": lineno,
+                    "mined_from": "comment",
+                }
+            )
+            continue
+
+    # --- Block comment style: /* ADR-NNN: <text> */ ---
+    # Process the entire content for block comments
+    for m in _DECISION_BLOCK_COMMENT_RE.finditer(content):
+        match_start = m.start()
+        lineno = content[:match_start].count("\n") + 1
+        text = m.group(2).strip().rstrip("*/").strip()
+        results.append(
+            {
+                "text": text,
+                "adr_id": m.group(1),
+                "file_path": file_path,
+                "line_number": lineno,
+                "mined_from": "comment",
+            }
+        )
+
+    # Deduplicate: block comment scan may re-find line comment matches in content.
+    # Keep only unique (file_path, line_number) entries, preserving first occurrence.
+    seen: set[tuple[str, int]] = set()
+    unique: list[dict] = []
+    for r in results:
+        key = (r["file_path"], r["line_number"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    return unique
+
+
+def _infer_decision_edges(result: ScanResult, markers: list[dict]) -> None:
+    """Create decision nodes and constrains/supersedes edges from detected markers.
+
+    For each marker:
+
+    1. Creates a ``decision:{file_path}:{line_number}`` node.
+    2. Creates ``constrains`` edges:
+       - If the decision text contains an existing node ID, target that node.
+       - Otherwise target the module node for the same file (fallback).
+       - If no module node exists, no constrains edge is created.
+    3. Creates ``supersedes`` edges between decisions sharing the same ADR ID
+       (newer line number supersedes older).
+    """
+    if not markers:
+        return
+
+    existing_node_ids = {n.id for n in result.nodes}
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    # Build per-file module lookup: file_path -> module node_id
+    file_to_module: dict[str, str] = {}
+    for node in result.nodes:
+        if node.type == NodeType.MODULE.value and node.file_path:
+            file_to_module[node.file_path] = node.id
+
+    # Track created decision nodes by ADR ID for supersedes inference
+    adr_id_to_decisions: dict[str, list[tuple[int, str]]] = {}
+
+    for marker in markers:
+        file_path = marker["file_path"]
+        line_number = marker["line_number"]
+        text = marker["text"]
+        adr_id = marker.get("adr_id")
+
+        node_id = f"decision:{file_path}:{line_number}"
+
+        # Create the decision node
+        if node_id not in existing_node_ids:
+            decision_node = Node(
+                id=node_id,
+                type=NodeType.DECISION.value,
+                label=text,
+                file_path=file_path,
+                metadata={
+                    "text": text,
+                    "adr_id": adr_id,
+                    "file_path": file_path,
+                    "line_number": line_number,
+                    "mined_from": marker.get("mined_from", "comment"),
+                },
+            )
+            result.nodes.append(decision_node)
+            existing_node_ids.add(node_id)
+
+        # Track for supersedes inference
+        if adr_id is not None:
+            adr_id_to_decisions.setdefault(adr_id, []).append((line_number, node_id))
+
+        # --- constrains edge targeting ---
+        # 1. Scan decision text for references to existing node IDs
+        target_node_id: str | None = None
+        for candidate_id in existing_node_ids:
+            if candidate_id == node_id:
+                continue
+            if candidate_id in text:
+                target_node_id = candidate_id
+                break
+
+        # 2. Fallback: use the module node for this file
+        if target_node_id is None:
+            target_node_id = file_to_module.get(file_path)
+
+        # 3. Create constrains edge if a target was found
+        if target_node_id is not None:
+            edge_key = (node_id, target_node_id, EdgeType.CONSTRAINS.value)
+            if edge_key not in existing_edges:
+                result.edges.append(
+                    Edge(
+                        source=node_id,
+                        target=target_node_id,
+                        type=EdgeType.CONSTRAINS.value,
+                        metadata={"inferred": True},
+                    )
+                )
+                existing_edges.add(edge_key)
+
+    # --- supersedes edges: newer line supersedes older for same ADR ID ---
+    for adr_id, entries in adr_id_to_decisions.items():
+        if len(entries) < 2:
+            continue
+        entries_sorted = sorted(entries, key=lambda t: t[0])
+        for i in range(1, len(entries_sorted)):
+            newer_node_id = entries_sorted[i][1]
+            older_node_id = entries_sorted[i - 1][1]
+            edge_key = (newer_node_id, older_node_id, EdgeType.SUPERSEDES.value)
+            if edge_key not in existing_edges:
+                result.edges.append(
+                    Edge(
+                        source=newer_node_id,
+                        target=older_node_id,
+                        type=EdgeType.SUPERSEDES.value,
+                        metadata={"inferred": True, "adr_id": adr_id},
+                    )
+                )
+                existing_edges.add(edge_key)
+
+
+def _infer_decision_marker_edges(
+    result: ScanResult, per_file_contents: dict
+) -> None:
+    """Orchestrate decision marker detection across all scanned files.
+
+    Iterates over *per_file_contents* (mapping of relative_path -> content),
+    detects ADR markers in each file, and calls ``_infer_decision_edges`` to
+    materialise decision nodes and their associated edges.
+    """
+    all_markers: list[dict] = []
+    for rel_path, content in per_file_contents.items():
+        file_path_str = str(rel_path)
+        markers = _detect_decision_markers(file_path_str, content)
+        all_markers.extend(markers)
+
+    if all_markers:
+        _infer_decision_edges(result, all_markers)
+
+
+# ---------------------------------------------------------------------------
 # Project scanner
 # ---------------------------------------------------------------------------
 
@@ -1821,5 +2033,8 @@ def scan_project(
 
     # Contract inference (detects cross-component agreements)
     _infer_contract_edges(merged)
+
+    # Decision marker inference (detects ADR comments in source files)
+    _infer_decision_marker_edges(merged, file_contents)
 
     return merged

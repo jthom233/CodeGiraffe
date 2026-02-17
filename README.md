@@ -98,7 +98,7 @@ Add to your `claude_desktop_config.json`:
 
 ## MCP Tools
 
-Code Giraffe exposes **28 tools** that any MCP client can call:
+Code Giraffe exposes **29 tools** that any MCP client can call:
 
 ### `codegiraffe_init`
 
@@ -175,7 +175,7 @@ codegiraffe_add_relation(
 
 ### `codegiraffe_context_for`
 
-The killer tool. Given a natural-language task description, returns the minimal relevant subgraph ranked by impact -- so agents get exactly the context they need without wasting tokens on irrelevant code.
+The killer tool. Given a natural-language task description, returns the minimal relevant subgraph ranked by impact -- so agents get exactly the context they need without wasting tokens on irrelevant code. Automatically classifies task intent and adjusts retrieval strategy accordingly.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -185,18 +185,76 @@ The killer tool. Given a natural-language task description, returns the minimal 
 | `use_embeddings` | `bool` | `true` | Use embedding-based semantic scoring when available |
 | `include_impact` | `bool` | `false` | Augment nodes with `_blast_radius_count` and `_risk_score` metadata |
 | `include_changes` | `bool` | `false` | Boost nodes affected by uncommitted git changes (adds `_recently_changed` and `_in_change_blast_radius` metadata) |
+| `token_budget` | `int` | `0` | Maximum estimated tokens for response (0 = unlimited) |
+| `detail_level` | `str` | `"standard"` | Response detail level: `"summary"` (minimal tokens), `"standard"` (balanced), `"detailed"` (full context) |
+
+**Response enhancements (v0.11.0):**
+- `_token_estimate` -- Estimated token count for the response
+- `_retrieval_strategy` -- Strategy used: `keyword`, `embedding`, `impact`, `change_aware`, or `combined`
 
 When `sentence-transformers` is installed and `use_embeddings` is `true`, scoring uses embedding-based semantic similarity for significantly better relevance ranking. Otherwise, it falls back to keyword overlap scoring. See the [Embedding-Based Scoring](#embedding-based-scoring) section for details.
 
 When `include_changes` is `true`, nodes affected by uncommitted git changes receive a +0.3 score boost (directly changed) or +0.15 boost (in blast radius of changes), ensuring change-relevant context surfaces first.
 
+Intent-aware navigation automatically classifies the task:
+- **Feature addition** -- Prioritizes endpoints and services that define the new capability
+- **Bug fix** -- Prioritizes nodes in the blast radius of error traces or affected modules
+- **Performance** -- Prioritizes hotspots (high centrality) and tight couplings
+- **Refactoring** -- Prioritizes cohesive clusters and related modules
+- **Documentation** -- Prioritizes public interfaces and entry points
+
 **Example:**
 ```
 codegiraffe_context_for(
   project_path="/home/user/my-project",
-  task="add rate limiting to the payments endpoint"
+  task="add rate limiting to the payments endpoint",
+  token_budget=2000,
+  detail_level="detailed"
 )
 --> JSON subgraph with payments endpoint, its middleware, DB tables, env vars, ranked by relevance
+    _token_estimate: 1856
+    _retrieval_strategy: "combined" (embedding + impact)
+```
+
+---
+
+### `codegiraffe_patterns`
+
+Analyze clusters of same-type nodes to extract naming conventions, structural patterns, and detect anti-patterns. Useful for understanding architectural styles and identifying inconsistencies.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `node_type` | `str` | required | Node type to analyze (e.g., `"endpoint"`, `"service"`, `"database_table"`) |
+| `min_cluster` | `int` | `3` | Minimum cluster size to report |
+
+**Analysis includes:**
+- **Naming patterns** -- Extracts common prefixes, suffixes, and delimiters (e.g., `GET /api/*`, `POST /admin/*`)
+- **Structural patterns** -- Identifies common edge types, counts, and dependency depths
+- **Anti-patterns** -- Detects inconsistencies like orphaned nodes, naming violations, or unusually high/low coupling
+- **Cluster analysis** -- Groups similar nodes and reports their characteristics
+
+**Example:**
+```
+codegiraffe_patterns(project_path="/home/user/my-project", node_type="endpoint", min_cluster=3)
+--> ## Endpoint Patterns
+    **2 cluster(s) found**
+
+    ### API Cluster (8 endpoints)
+    - **Naming:** GET /api/*, POST /api/*, PUT /api/*
+    - **Common prefix:** /api/
+    - **Avg edges per node:** 2.1
+    - **Avg depth:** 1.7
+
+    ### Admin Cluster (3 endpoints)
+    - **Naming:** GET /admin/*, POST /admin/*, DELETE /admin/*
+    - **Common prefix:** /admin/
+    - **Avg edges per node:** 1.0
+    - **Avg depth:** 2.2
+
+    ### Anti-patterns detected
+    - 1 orphaned endpoint: /health (0 edges)
+    - 1 naming violation: get_user (uses snake_case, inconsistent with /api pattern)
 ```
 
 ---
@@ -1326,6 +1384,16 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Enhanced `codegiraffe_context_for` with `include_changes` parameter
 - [x] New modules: `diff_parser.py`, `git_utils.py`
 - [x] 979+ tests
+
+### v0.11.0 — Intelligent Context
+
+- [x] 1 new MCP tool: `codegiraffe_patterns` (29 tools total)
+- [x] Token-aware context budgets: `token_budget` and `detail_level` parameters on `codegiraffe_context_for`
+- [x] Intent-aware navigation: automatically classifies task intent (feature, bug fix, performance, refactoring, documentation)
+- [x] Enhanced `codegiraffe_context_for` response fields: `_token_estimate`, `_retrieval_strategy`
+- [x] Architectural decision record (ADR) detection: identifies and surfaces architectural decisions from patterns
+- [x] Convention mining: `codegiraffe_patterns` analyzes naming conventions, structural patterns, and detects anti-patterns
+- [x] 1087+ tests
 
 ### Future
 

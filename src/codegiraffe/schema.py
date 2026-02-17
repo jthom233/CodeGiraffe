@@ -22,6 +22,8 @@ class NodeType(StrEnum):
     EXTERNAL_API = "external_api"
     MODULE = "module"
     CONTRACT = "contract"
+    DECISION = "decision"
+    DOMAIN = "domain"
 
 
 class EdgeType(StrEnum):
@@ -47,3 +49,8 @@ class EdgeType(StrEnum):
     CONSUMES_CONTRACT = "consumes_contract"
     VALIDATES = "validates"
     VIOLATES = "violates"
+    CONSTRAINS = "constrains"
+    MOTIVATED_BY = "motivated_by"
+    SUPERSEDES = "supersedes"
+    BELONGS_TO = "belongs_to"
+    TESTED_BY = "tested_by"

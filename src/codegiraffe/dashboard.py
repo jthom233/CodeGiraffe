@@ -279,12 +279,13 @@ body {
     service: '#4A90D9', endpoint: '#7B68EE', database_table: '#2ECC71',
     queue: '#E67E22', env_var: '#F39C12', config: '#D4AC0D',
     worker: '#E74C3C', frontend_component: '#9B59B6', event: '#1ABC9C',
-    external_api: '#95A5A6', module: '#D35400', contract: '#8E44AD'
+    external_api: '#95A5A6', module: '#D35400', contract: '#8E44AD',
+    decision: '#2196F3'
   };
   const TYPE_SHAPES = {
     endpoint: 'diamond', database_table: 'barrel', worker: 'hexagon',
     queue: 'rectangle', event: 'ellipse', module: 'round-rectangle',
-    contract: 'hexagon'
+    contract: 'hexagon', decision: 'tag'
   };
   const DEFAULT_COLOR = '#4A90D9';
   const DEFAULT_SHAPE = 'round-rectangle';
@@ -477,6 +478,24 @@ body {
             'line-style': 'solid',
             'width': 2
           }
+        },
+        {
+          selector: 'edge[type="constrains"]',
+          style: {
+            'line-color': '#2196F3',
+            'target-arrow-color': '#2196F3',
+            'line-style': 'dotted',
+            'width': 1.5
+          }
+        },
+        {
+          selector: 'edge[type="supersedes"]',
+          style: {
+            'line-color': '#9E9E9E',
+            'target-arrow-color': '#9E9E9E',
+            'line-style': 'dashed',
+            'width': 1
+          }
         }
       ],
       layout: { name: 'cose', animate: false, nodeDimensionsIncludeLabels: true }
@@ -493,7 +512,9 @@ body {
         produces: 'Produces',
         consumes_contract: 'Consumes Contract',
         validates: 'Validates',
-        violates: 'Violates'
+        violates: 'Violates',
+        constrains: 'Constrains',
+        supersedes: 'Supersedes'
     };
 
     cy.on('mouseover', 'edge', function(evt) {
@@ -702,6 +723,8 @@ body {
         consumes_contract: { color: '#9B59B6', style: 'dashed' },
         validates: { color: '#27AE60', style: 'dotted' },
         violates: { color: '#E74C3C', style: '' },
+        constrains: { color: '#2196F3', style: 'dotted' },
+        supersedes: { color: '#9E9E9E', style: 'dashed' },
         default: { color: '#2a3a5e', style: '' }
     };
     Object.keys(edgeStyles).forEach(t => {

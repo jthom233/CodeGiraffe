@@ -7,6 +7,7 @@ and the actual codebase.
 
 from __future__ import annotations
 
+import json as _json
 import os
 import re
 import string
@@ -258,6 +259,46 @@ def _merge_graph_data(parts: list[GraphData], base_data: GraphData) -> GraphData
     )
 
 
+def _include_constraining_decisions(subgraph_nodes: set, graph: ArchGraph) -> set:
+    """Given nodes in a subgraph, find all decision nodes connected via
+    ``constrains`` edges and add them to the returned node-ID set.
+
+    Parameters
+    ----------
+    subgraph_nodes:
+        Set of node IDs already selected for the subgraph.
+    graph:
+        The full :class:`ArchGraph` to search.
+
+    Returns
+    -------
+    set
+        An extended set of node IDs that includes the original nodes plus any
+        decision nodes that govern them.
+    """
+    from codegiraffe.schema import EdgeType, NodeType
+
+    result = set(subgraph_nodes)
+
+    # Iterate over all edges in the graph looking for constrains edges whose
+    # target is already in the subgraph
+    for src, tgt, data in graph.graph.edges(data=True):
+        edge: Edge | None = data.get("edge")
+        if edge is None:
+            continue
+        if edge.type != EdgeType.CONSTRAINS.value:
+            continue
+        # Source is the decision node; target is the governed node
+        if tgt in subgraph_nodes:
+            # Verify source is actually a decision node
+            src_attrs = graph.graph.nodes.get(src, {})
+            src_node: Node | None = src_attrs.get("node")
+            if src_node is not None and src_node.type == NodeType.DECISION.value:
+                result.add(src)
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Public query functions
 # ---------------------------------------------------------------------------
@@ -303,11 +344,81 @@ def query_by_type(graph: ArchGraph, node_type: str) -> GraphData:
     return _merge_graph_data(parts, base_data)
 
 
+def _format_node_for_detail_level(node_data: dict, detail_level: str) -> dict:
+    """Format a node dict based on detail level.
+
+    - summary: only id, type, label
+    - standard: id, type, label + key metadata (no raw content)
+    - detailed: full metadata
+    """
+    if detail_level == "summary":
+        return {
+            "id": node_data.get("id", ""),
+            "type": node_data.get("type", ""),
+            "label": node_data.get("label", ""),
+        }
+    elif detail_level == "detailed":
+        return dict(node_data)
+    else:
+        # standard: id, type, label + metadata (no file_path or other bulk fields)
+        result: dict = {
+            "id": node_data.get("id", ""),
+            "type": node_data.get("type", ""),
+            "label": node_data.get("label", ""),
+        }
+        if "metadata" in node_data:
+            result["metadata"] = node_data["metadata"]
+        return result
+
+
+def _estimate_tokens(node_data: dict, detail_level: str = "standard") -> int:
+    """Estimate tokens for a node at given detail level.
+
+    Returns ``len(json.dumps(formatted_node)) // 4``.
+    """
+    formatted = _format_node_for_detail_level(node_data, detail_level)
+    return len(_json.dumps(formatted)) // 4
+
+
+# ---------------------------------------------------------------------------
+# Intent classification
+# ---------------------------------------------------------------------------
+
+#: Priority-ordered intent keyword table.  First match wins.
+_INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("create",  ["create", "add", "new", "build", "implement"]),
+    ("debug",   ["debug", "fix", "bug", "error", "broken", "issue", "troubleshoot"]),
+    ("refactor", ["refactor", "restructure", "reorganize", "move", "extract", "split"]),
+    ("delete",  ["delete", "remove", "deprecate", "drop"]),
+    ("test",    ["test", "spec", "verify", "coverage", "assert"]),
+]
+
+
+def _classify_intent(task: str) -> str:
+    """Classify task intent from a natural-language description.
+
+    Uses priority-ordered keyword matching.  The first matching intent wins.
+    Unmatched tasks return ``"modify"`` (the default).
+
+    Priority order: create > debug > refactor > delete > test > modify
+    """
+    task_lower = task.lower()
+    # Tokenize to avoid partial word matches (e.g. "error" in "errorless")
+    tokens = set(re.findall(r"[a-z]+", task_lower))
+    for intent, keywords in _INTENT_KEYWORDS:
+        for kw in keywords:
+            if kw in tokens:
+                return intent
+    return "modify"
+
+
 def context_for_task(
     graph: ArchGraph,
     task: str,
     max_nodes: int = 20,
     use_embeddings: bool = True,
+    token_budget: int = 0,
+    detail_level: str = "standard",
 ) -> GraphData:
     """Return the subgraph most relevant to a natural-language *task* description.
 
@@ -322,15 +433,293 @@ def context_for_task(
     4. Expand each selected node to include direct neighbors (depth=1).
     5. Cap the total node count at ``max_nodes``.
     6. Annotate each returned node's metadata with ``_relevance_score``.
+    7. If ``token_budget > 0``, greedily add nodes (highest relevance first)
+       until the token budget would be exceeded.  When both ``token_budget``
+       and ``max_nodes`` are set, the more restrictive constraint wins.
+    8. Annotate the returned :class:`GraphData` with ``_token_estimate``
+       (total estimated tokens for the result).
+    9. Classify task intent and apply intent-specific retrieval boosting.
+    10. Annotate the returned :class:`GraphData` with ``_retrieval_strategy``.
 
     Returns an empty :class:`GraphData` when no node scores above zero.
     """
+    # Classify intent before retrieval so we can steer the scoring
+    intent = _classify_intent(task)
+
     # Try embedding-based scoring
     if use_embeddings and _embeddings_mod.is_available():
-        return _context_for_task_embeddings(graph, task, max_nodes)
+        result = _context_for_task_embeddings(graph, task, max_nodes)
+    else:
+        # Fall back to keyword scoring (existing implementation)
+        result = _context_for_task_keywords(graph, task, max_nodes)
 
-    # Fall back to keyword scoring (existing implementation)
-    return _context_for_task_keywords(graph, task, max_nodes)
+    # Apply intent-specific retrieval strategy on top of base scoring
+    result = _apply_intent_strategy(graph, result, task, intent, max_nodes)
+
+    # Apply token_budget constraint if requested
+    if token_budget > 0 and result.nodes:
+        kept: dict[str, "Node"] = {}
+        total_tokens = 0
+        for nid, node in result.nodes.items():
+            node_dict = node.model_dump()
+            node_tokens = _estimate_tokens(node_dict, detail_level)
+            if total_tokens + node_tokens <= token_budget:
+                kept[nid] = node
+                total_tokens += node_tokens
+            # Nodes are already sorted by descending relevance; stop when budget exceeded
+        kept_ids = set(kept.keys())
+        result.nodes = kept
+        result.edges = [
+            e for e in result.edges
+            if e.source in kept_ids and e.target in kept_ids
+        ]
+        result.token_estimate = total_tokens
+    else:
+        # Compute token estimate for the full result
+        total_tokens = sum(
+            _estimate_tokens(node.model_dump(), detail_level)
+            for node in result.nodes.values()
+        )
+        result.token_estimate = total_tokens
+
+    # Annotate with retrieval strategy
+    result.retrieval_strategy = intent
+
+    return result
+
+
+def _apply_intent_strategy(
+    graph: ArchGraph,
+    result: GraphData,
+    task: str,
+    intent: str,
+    max_nodes: int,
+) -> GraphData:
+    """Apply intent-specific retrieval boosting/expansion to the base result.
+
+    This function augments *result* (already scored by keyword/embedding logic)
+    with additional nodes or score boosts based on the classified *intent*.
+
+    Strategies
+    ----------
+    create  — Boost exemplar nodes of the same type as the highest-scoring node.
+    debug   — Include upstream dependency chain (reverse BFS on imports/calls edges).
+    refactor — Include coupled nodes (sharing edges with target) + cycle members.
+    delete  — Include blast radius (downstream dependents) + contract-violating nodes.
+    test    — Include associated test files (nodes with ``source: test`` metadata).
+    modify  — No change (default behavior).
+    """
+    if intent == "modify" or not graph.graph.nodes:
+        return result
+
+    # Identify seed node ids (highest-scored nodes from base result)
+    seed_ids: set[str] = set(result.nodes.keys())
+    # Top seed: the first node in result (sorted by descending relevance)
+    top_seeds = list(result.nodes.keys())[:max(1, len(result.nodes) // 2)]
+
+    extra_nodes: dict[str, Node] = {}
+
+    if intent == "create":
+        # Boost exemplar nodes: find nodes of the same type as the top seed
+        if top_seeds:
+            top_node = result.nodes[top_seeds[0]]
+            target_type = top_node.type
+            for nid, attrs in graph.graph.nodes(data=True):
+                node = attrs.get("node")
+                if node is None or nid in seed_ids:
+                    continue
+                if node.type == target_type:
+                    # Add as exemplar with a modest relevance boost
+                    exemplar = Node(
+                        id=node.id,
+                        type=node.type,
+                        label=node.label,
+                        metadata=dict(node.metadata),
+                        file_path=node.file_path,
+                        manual=node.manual,
+                    )
+                    exemplar.metadata["_relevance_score"] = 0.5
+                    extra_nodes[nid] = exemplar
+
+    elif intent == "debug":
+        # Include upstream dependency chain: BFS on reversed graph
+        # (nodes that the seeds DEPEND ON — i.e., they import/call the dependencies)
+        dependency_edge_types = {"imports", "calls", "depends_on"}
+        # We walk outgoing edges (A imports B means A depends on B)
+        visited: set[str] = set()
+        queue: list[str] = list(top_seeds)
+        while queue:
+            current = queue.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            for _, neighbor, data in graph.graph.out_edges(current, data=True):
+                edge_obj = data.get("edge")
+                if edge_obj is None:
+                    continue
+                if edge_obj.type in dependency_edge_types and neighbor not in seed_ids:
+                    neighbor_attrs = graph.graph.nodes.get(neighbor, {})
+                    neighbor_node = neighbor_attrs.get("node")
+                    if neighbor_node is not None and neighbor not in extra_nodes:
+                        dep_node = Node(
+                            id=neighbor_node.id,
+                            type=neighbor_node.type,
+                            label=neighbor_node.label,
+                            metadata=dict(neighbor_node.metadata),
+                            file_path=neighbor_node.file_path,
+                            manual=neighbor_node.manual,
+                        )
+                        dep_node.metadata.setdefault("_relevance_score", 0)
+                        extra_nodes[neighbor] = dep_node
+                    if neighbor not in visited:
+                        queue.append(neighbor)
+
+    elif intent == "refactor":
+        # Include coupled nodes (neighbors) + any nodes that are part of cycles
+        # involving the target nodes
+        cycles = graph.detect_cycles()
+        cycle_node_ids: set[str] = set()
+        for cycle in cycles:
+            if any(nid in seed_ids for nid in cycle):
+                cycle_node_ids.update(cycle)
+
+        for nid in cycle_node_ids - seed_ids:
+            attrs = graph.graph.nodes.get(nid, {})
+            node = attrs.get("node")
+            if node is not None:
+                cycle_node = Node(
+                    id=node.id,
+                    type=node.type,
+                    label=node.label,
+                    metadata=dict(node.metadata),
+                    file_path=node.file_path,
+                    manual=node.manual,
+                )
+                cycle_node.metadata.setdefault("_relevance_score", 0)
+                extra_nodes[nid] = cycle_node
+
+        # Also include direct neighbors of top seeds not already in result
+        for seed_id in top_seeds:
+            for _, neighbor in graph.graph.out_edges(seed_id):
+                if neighbor not in seed_ids and neighbor not in extra_nodes:
+                    neighbor_attrs = graph.graph.nodes.get(neighbor, {})
+                    neighbor_node = neighbor_attrs.get("node")
+                    if neighbor_node is not None:
+                        coupled = Node(
+                            id=neighbor_node.id,
+                            type=neighbor_node.type,
+                            label=neighbor_node.label,
+                            metadata=dict(neighbor_node.metadata),
+                            file_path=neighbor_node.file_path,
+                            manual=neighbor_node.manual,
+                        )
+                        coupled.metadata.setdefault("_relevance_score", 0)
+                        extra_nodes[neighbor] = coupled
+            for neighbor, _ in graph.graph.in_edges(seed_id):
+                if neighbor not in seed_ids and neighbor not in extra_nodes:
+                    neighbor_attrs = graph.graph.nodes.get(neighbor, {})
+                    neighbor_node = neighbor_attrs.get("node")
+                    if neighbor_node is not None:
+                        coupled = Node(
+                            id=neighbor_node.id,
+                            type=neighbor_node.type,
+                            label=neighbor_node.label,
+                            metadata=dict(neighbor_node.metadata),
+                            file_path=neighbor_node.file_path,
+                            manual=neighbor_node.manual,
+                        )
+                        coupled.metadata.setdefault("_relevance_score", 0)
+                        extra_nodes[neighbor] = coupled
+
+    elif intent == "delete":
+        # Include blast radius: nodes that DEPEND ON the seeds (incoming callers/importers)
+        blast_ids: set[str] = set()
+        for seed_id in top_seeds:
+            if seed_id in graph.graph:
+                blast_ids.update(graph.get_all_ancestors(seed_id))
+        for nid in blast_ids - seed_ids:
+            attrs = graph.graph.nodes.get(nid, {})
+            node = attrs.get("node")
+            if node is not None:
+                blast_node = Node(
+                    id=node.id,
+                    type=node.type,
+                    label=node.label,
+                    metadata=dict(node.metadata),
+                    file_path=node.file_path,
+                    manual=node.manual,
+                )
+                blast_node.metadata.setdefault("_relevance_score", 0)
+                blast_node.metadata["_in_blast_radius"] = True
+                extra_nodes[nid] = blast_node
+
+        # Also include any contract-violation nodes (nodes with violates edges to seeds)
+        for seed_id in seed_ids:
+            for src, _, data in graph.graph.in_edges(seed_id, data=True):
+                edge_obj = data.get("edge")
+                if edge_obj is not None and edge_obj.type == "violates":
+                    if src not in seed_ids and src not in extra_nodes:
+                        attrs = graph.graph.nodes.get(src, {})
+                        node = attrs.get("node")
+                        if node is not None:
+                            viol_node = Node(
+                                id=node.id,
+                                type=node.type,
+                                label=node.label,
+                                metadata=dict(node.metadata),
+                                file_path=node.file_path,
+                                manual=node.manual,
+                            )
+                            viol_node.metadata.setdefault("_relevance_score", 0)
+                            extra_nodes[src] = viol_node
+
+    elif intent == "test":
+        # Include target node dependencies + test file nodes (source: test)
+        for nid, attrs in graph.graph.nodes(data=True):
+            node = attrs.get("node")
+            if node is None or nid in seed_ids:
+                continue
+            if node.metadata.get("source") == "test":
+                test_node = Node(
+                    id=node.id,
+                    type=node.type,
+                    label=node.label,
+                    metadata=dict(node.metadata),
+                    file_path=node.file_path,
+                    manual=node.manual,
+                )
+                test_node.metadata.setdefault("_relevance_score", 0)
+                extra_nodes[nid] = test_node
+
+    # Merge extra nodes into result (cap at max_nodes)
+    if extra_nodes:
+        all_nodes = dict(result.nodes)
+        for nid, node in extra_nodes.items():
+            if len(all_nodes) >= max_nodes:
+                break
+            all_nodes[nid] = node
+
+        # Re-sort all nodes by descending relevance score
+        result.nodes = dict(
+            sorted(
+                all_nodes.items(),
+                key=lambda item: (-item[1].metadata.get("_relevance_score", 0), item[0]),
+            )
+        )
+
+        # Add edges connecting newly added nodes
+        all_node_ids = set(result.nodes.keys())
+        existing_edge_keys = {(e.source, e.target, e.type) for e in result.edges}
+        for src, tgt, data in graph.graph.edges(data=True):
+            if src in all_node_ids and tgt in all_node_ids:
+                edge_obj = data.get("edge")
+                if edge_obj is not None:
+                    key = (src, tgt, edge_obj.type)
+                    if key not in existing_edge_keys:
+                        result.edges.append(edge_obj)
+                        existing_edge_keys.add(key)
+
+    return result
 
 
 def _context_for_task_embeddings(
@@ -401,6 +790,23 @@ def _context_for_task_embeddings(
         sorted(merged.nodes.items(), key=lambda item: (-item[1].metadata.get("_relevance_score", 0), item[0]))
     )
 
+    # Include decision nodes that constrain any node in the subgraph
+    extended_ids = _include_constraining_decisions(set(merged.nodes.keys()), graph)
+    for nid in extended_ids - set(merged.nodes.keys()):
+        node_attrs = graph.graph.nodes.get(nid, {})
+        node_obj = node_attrs.get("node")
+        if node_obj is not None:
+            merged.nodes[nid] = node_obj
+            # Include constrains edges for the newly added decision nodes
+            for src, tgt, data in graph.graph.edges(data=True):
+                if src == nid and tgt in merged.nodes:
+                    edge_obj = data.get("edge")
+                    if edge_obj is not None:
+                        existing_edge_keys = {(e.source, e.target, e.type) for e in merged.edges}
+                        edge_key = (src, tgt, edge_obj.type)
+                        if edge_key not in existing_edge_keys:
+                            merged.edges.append(edge_obj)
+
     return merged
 
 
@@ -464,6 +870,23 @@ def _context_for_task_keywords(
             e for e in merged.edges
             if e.source in kept_ids and e.target in kept_ids
         ]
+
+    # Include decision nodes that constrain any node in the subgraph
+    extended_ids = _include_constraining_decisions(set(merged.nodes.keys()), graph)
+    for nid in extended_ids - set(merged.nodes.keys()):
+        node_attrs = graph.graph.nodes.get(nid, {})
+        node_obj = node_attrs.get("node")
+        if node_obj is not None:
+            merged.nodes[nid] = node_obj
+            # Include constrains edges for the newly added decision nodes
+            for src, tgt, data in graph.graph.edges(data=True):
+                if src == nid and tgt in merged.nodes:
+                    edge_obj = data.get("edge")
+                    if edge_obj is not None:
+                        existing_edge_keys = {(e.source, e.target, e.type) for e in merged.edges}
+                        edge_key = (src, tgt, edge_obj.type)
+                        if edge_key not in existing_edge_keys:
+                            merged.edges.append(edge_obj)
 
     # Annotate nodes with relevance scores (as metadata, prefixed with _ to
     # indicate it is system-generated)

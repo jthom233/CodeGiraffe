@@ -25,8 +25,8 @@
 
 **Purpose**: Add new node/edge types needed by v0.11.0 features (ADRs)
 
-- [ ] T001 Add `DECISION` to `NodeType` enum and add `CONSTRAINS`, `MOTIVATED_BY`, `SUPERSEDES` to `EdgeType` enum in `src/codegiraffe/schema.py`
-- [ ] T002 [P] Add `DOMAIN` to `NodeType` enum and `BELONGS_TO`, `TESTED_BY` to `EdgeType` enum in `src/codegiraffe/schema.py` (added early to avoid cross-release schema merge conflicts — these types are inert until their respective features are implemented in v0.13.0)
+- [x] T001 Add `DECISION` to `NodeType` enum and add `CONSTRAINS`, `MOTIVATED_BY`, `SUPERSEDES` to `EdgeType` enum in `src/codegiraffe/schema.py`
+- [x] T002 [P] Add `DOMAIN` to `NodeType` enum and `BELONGS_TO`, `TESTED_BY` to `EdgeType` enum in `src/codegiraffe/schema.py` (added early to avoid cross-release schema merge conflicts — these types are inert until their respective features are implemented in v0.13.0)
 
 **Checkpoint**: Schema updated — all existing 979 tests still pass.
 
@@ -42,16 +42,16 @@
 
 > **Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T003 [P] [US1] Write token estimation tests in `tests/test_token_budget.py`: test `_estimate_tokens()` returns char_count/4 for a node with metadata and edges; test summary vs standard vs detailed detail levels produce different estimates for same node
-- [ ] T004 [P] [US1] Write token budget constraint tests in `tests/test_token_budget.py`: test `context_for_task` with `token_budget=4000` returns subgraph under 4000 estimated tokens; test response includes `_token_estimate` field; test nodes ordered by descending relevance score
-- [ ] T005 [P] [US1] Write dual-constraint tests in `tests/test_token_budget.py`: test when both `token_budget` and `max_nodes` specified, more restrictive wins; test `token_budget=100` (very small) returns single highest-relevance node or informative message
-- [ ] T006 [P] [US1] Write detail level tests in `tests/test_token_budget.py`: test `detail_level="summary"` returns only IDs and types (no metadata); test `detail_level="detailed"` includes full metadata; test more nodes fit in same budget at summary level vs detailed
+- [x] T003 [P] [US1] Write token estimation tests in `tests/test_token_budget.py`: test `_estimate_tokens()` returns char_count/4 for a node with metadata and edges; test summary vs standard vs detailed detail levels produce different estimates for same node
+- [x] T004 [P] [US1] Write token budget constraint tests in `tests/test_token_budget.py`: test `context_for_task` with `token_budget=4000` returns subgraph under 4000 estimated tokens; test response includes `_token_estimate` field; test nodes ordered by descending relevance score
+- [x] T005 [P] [US1] Write dual-constraint tests in `tests/test_token_budget.py`: test when both `token_budget` and `max_nodes` specified, more restrictive wins; test `token_budget=100` (very small) returns single highest-relevance node or informative message
+- [x] T006 [P] [US1] Write detail level tests in `tests/test_token_budget.py`: test `detail_level="summary"` returns only IDs and types (no metadata); test `detail_level="detailed"` includes full metadata; test more nodes fit in same budget at summary level vs detailed
 
 ### Implementation for US1
 
-- [ ] T007 [US1] Implement `_estimate_tokens(node_data: dict, detail_level: str) -> int` helper in `src/codegiraffe/query.py` — serialize node to JSON at given detail level, return `len(serialized) // 4`; implement `_format_node_for_detail_level(node_data: dict, detail_level: str) -> dict` to strip metadata for summary, include full for detailed
-- [ ] T008 [US1] Add `token_budget: int = 0` and `detail_level: str = "standard"` parameters to `context_for_task()` in `src/codegiraffe/query.py` — after scoring and sorting nodes by relevance, greedily add nodes until token budget exhausted; add `_token_estimate` to returned dict; when both `token_budget` and `max_nodes` set, apply whichever is more restrictive
-- [ ] T009 [US1] Update `codegiraffe_context_for` tool in `src/codegiraffe/server.py` — add `token_budget: int = 0` and `detail_level: str = "standard"` parameters; pass through to `context_for_task()`; include `_token_estimate` in formatted response
+- [x] T007 [US1] Implement `_estimate_tokens(node_data: dict, detail_level: str) -> int` helper in `src/codegiraffe/query.py` — serialize node to JSON at given detail level, return `len(serialized) // 4`; implement `_format_node_for_detail_level(node_data: dict, detail_level: str) -> dict` to strip metadata for summary, include full for detailed
+- [x] T008 [US1] Add `token_budget: int = 0` and `detail_level: str = "standard"` parameters to `context_for_task()` in `src/codegiraffe/query.py` — after scoring and sorting nodes by relevance, greedily add nodes until token budget exhausted; add `_token_estimate` to returned dict; when both `token_budget` and `max_nodes` set, apply whichever is more restrictive
+- [x] T009 [US1] Update `codegiraffe_context_for` tool in `src/codegiraffe/server.py` — add `token_budget: int = 0` and `detail_level: str = "standard"` parameters; pass through to `context_for_task()`; include `_token_estimate` in formatted response
 
 **Checkpoint**: US1 complete — `context_for` accepts token budgets and detail levels. All US1 tests pass.
 
@@ -65,15 +65,15 @@
 
 ### Tests for US2
 
-- [ ] T010 [P] [US2] Write intent classification tests in `tests/test_intent_navigation.py`: test `_classify_intent("create a new payment service")` returns "create"; test `_classify_intent("debug the timeout error")` returns "debug"; test `_classify_intent("refactor the auth module")` returns "refactor"; test `_classify_intent("delete the deprecated endpoint")` returns "delete"; test `_classify_intent("test the login flow")` returns "test"; test unclassifiable falls back to "modify"
-- [ ] T011 [P] [US2] Write intent-specific retrieval tests in `tests/test_intent_navigation.py`: test create intent returns exemplar nodes of same type; test debug intent returns upstream dependency chain; test refactor intent includes coupled files and cycles; test delete intent includes blast radius and contract violations; test "modify" intent matches current behavior
-- [ ] T012 [P] [US2] Write retrieval strategy response tests in `tests/test_intent_navigation.py`: test every `context_for` response includes `_retrieval_strategy` field; test ambiguous intent (e.g., "refactor and test") uses priority-ordered first match; test `_retrieval_strategy` value matches classified intent name
+- [x] T010 [P] [US2] Write intent classification tests in `tests/test_intent_navigation.py`: test `_classify_intent("create a new payment service")` returns "create"; test `_classify_intent("debug the timeout error")` returns "debug"; test `_classify_intent("refactor the auth module")` returns "refactor"; test `_classify_intent("delete the deprecated endpoint")` returns "delete"; test `_classify_intent("test the login flow")` returns "test"; test unclassifiable falls back to "modify"
+- [x] T011 [P] [US2] Write intent-specific retrieval tests in `tests/test_intent_navigation.py`: test create intent returns exemplar nodes of same type; test debug intent returns upstream dependency chain; test refactor intent includes coupled files and cycles; test delete intent includes blast radius and contract violations; test "modify" intent matches current behavior
+- [x] T012 [P] [US2] Write retrieval strategy response tests in `tests/test_intent_navigation.py`: test every `context_for` response includes `_retrieval_strategy` field; test ambiguous intent (e.g., "refactor and test") uses priority-ordered first match; test `_retrieval_strategy` value matches classified intent name
 
 ### Implementation for US2
 
-- [ ] T013 [US2] Implement `_classify_intent(task: str) -> str` in `src/codegiraffe/query.py` — keyword dictionary with priority-ordered matching per research.md decision #2: create → ["create", "add", "new", "build", "implement"], debug → ["debug", "fix", "bug", "error", "broken", "issue", "troubleshoot"], refactor → ["refactor", "restructure", "reorganize", "move", "extract", "split"], delete → ["delete", "remove", "deprecate", "drop"], test → ["test", "spec", "verify", "coverage", "assert"]; first match wins; unmatched → "modify"
-- [ ] T014 [US2] Implement per-intent retrieval strategies in `context_for_task()` in `src/codegiraffe/query.py` — create: boost exemplar nodes of same type as target; debug: include upstream dependency chain (reverse BFS on imports/calls edges); refactor: include coupled files via co-change data + cycles involving target; delete: include blast radius + contract violations; test: include target deps + associated test files; modify: current behavior (unchanged)
-- [ ] T015 [US2] Add `_retrieval_strategy` field to `context_for_task()` response dict in `src/codegiraffe/query.py`; update `codegiraffe_context_for` in `src/codegiraffe/server.py` to include strategy in formatted output
+- [x] T013 [US2] Implement `_classify_intent(task: str) -> str` in `src/codegiraffe/query.py` — keyword dictionary with priority-ordered matching per research.md decision #2: create → ["create", "add", "new", "build", "implement"], debug → ["debug", "fix", "bug", "error", "broken", "issue", "troubleshoot"], refactor → ["refactor", "restructure", "reorganize", "move", "extract", "split"], delete → ["delete", "remove", "deprecate", "drop"], test → ["test", "spec", "verify", "coverage", "assert"]; first match wins; unmatched → "modify"
+- [x] T014 [US2] Implement per-intent retrieval strategies in `context_for_task()` in `src/codegiraffe/query.py` — create: boost exemplar nodes of same type as target; debug: include upstream dependency chain (reverse BFS on imports/calls edges); refactor: include coupled files via co-change data + cycles involving target; delete: include blast radius + contract violations; test: include target deps + associated test files; modify: current behavior (unchanged)
+- [x] T015 [US2] Add `_retrieval_strategy` field to `context_for_task()` response dict in `src/codegiraffe/query.py`; update `codegiraffe_context_for` in `src/codegiraffe/server.py` to include strategy in formatted output
 
 **Checkpoint**: US2 complete — `context_for` classifies intent and returns strategy-appropriate subgraphs. All US1 + US2 tests pass.
 
@@ -87,16 +87,16 @@
 
 ### Tests for US5
 
-- [ ] T016 [P] [US5] Write ADR detection tests in `tests/test_decisions.py`: test `_detect_decision_markers()` finds `# DECISION: Use event bus` in Python files; test `// ADR-007: JWT over sessions` in Go/TS/Java files; test `/* ADR-003: ... */` in block comments; test decision node ID format is `decision:{file}:{line}`; test decision metadata includes text, adr_id, file_path, line_number, mined_from="comment"
-- [ ] T017 [P] [US5] Write decision constraint targeting tests in `tests/test_decisions.py`: test `constrains` edge targets specific governed nodes (matched by node ID references in decision text), not just the file module node; test when no node ID matches in text, `constrains` edge targets the nearest enclosing symbol; test `_include_constraining_decisions()` adds decision nodes when governed nodes are in subgraph; test `supersedes` edge links newer decision to older
-- [ ] T018 [P] [US5] Write decision edge case and contract tests in `tests/test_decisions.py`: test orphan decision (governed node deleted) persists with warning flag; test decision with no matches creates no edges; test files with no decision markers produce no decision nodes; test `add_relation` accepts `decision` node type with `constrains`/`motivated_by`/`supersedes` edge types (contract test — verifies existing tool handles new schema types)
+- [x] T016 [P] [US5] Write ADR detection tests in `tests/test_decisions.py`: test `_detect_decision_markers()` finds `# DECISION: Use event bus` in Python files; test `// ADR-007: JWT over sessions` in Go/TS/Java files; test `/* ADR-003: ... */` in block comments; test decision node ID format is `decision:{file}:{line}`; test decision metadata includes text, adr_id, file_path, line_number, mined_from="comment"
+- [x] T017 [P] [US5] Write decision constraint targeting tests in `tests/test_decisions.py`: test `constrains` edge targets specific governed nodes (matched by node ID references in decision text), not just the file module node; test when no node ID matches in text, `constrains` edge targets the nearest enclosing symbol; test `_include_constraining_decisions()` adds decision nodes when governed nodes are in subgraph; test `supersedes` edge links newer decision to older
+- [x] T018 [P] [US5] Write decision edge case and contract tests in `tests/test_decisions.py`: test orphan decision (governed node deleted) persists with warning flag; test decision with no matches creates no edges; test files with no decision markers produce no decision nodes; test `add_relation` accepts `decision` node type with `constrains`/`motivated_by`/`supersedes` edge types (contract test — verifies existing tool handles new schema types)
 
 ### Implementation for US5
 
-- [ ] T019 [US5] Implement `_detect_decision_markers(file_path: str, content: str) -> list[dict]` in `src/codegiraffe/scanner.py` — regex patterns per research.md decision #5: `# DECISION:`, `// ADR-\d+:`, `/* ADR-\d+:`; return list of dicts with text, adr_id, line_number; integrate into scanner pipeline as a new stage after `_infer_contract_edges()`
-- [ ] T020 [US5] Implement decision node creation and constraint targeting in scanner pipeline in `src/codegiraffe/scanner.py` — for each detected marker, create `Node(id=f"decision:{file}:{line}", type=NodeType.DECISION, ...)` with metadata; create `constrains` edges to **specific governed nodes** by: (1) scanning decision text for node ID references (e.g., "service:PaymentService"), (2) if no matches, target the nearest enclosing symbol node from the same file, (3) fallback to the file's module node; for ADR-numbered decisions, group by ADR ID
-- [ ] T021 [US5] Implement `_include_constraining_decisions(subgraph_nodes, graph)` in `src/codegiraffe/query.py` — given a set of nodes in a subgraph result, find all decision nodes connected via `constrains` edges and add them to the result; integrate into `context_for_task()` after initial subgraph extraction
-- [ ] T022 [US5] Add decision node and edge styling to `src/codegiraffe/dashboard.py` — decision nodes: color `#2196F3` (blue), shape `tag`; constrains edges: blue dotted, width 1.5; supersedes edges: gray dashed, width 1; add to `TYPE_COLORS`, `TYPE_SHAPES`, and edge style maps
+- [x] T019 [US5] Implement `_detect_decision_markers(file_path: str, content: str) -> list[dict]` in `src/codegiraffe/scanner.py` — regex patterns per research.md decision #5: `# DECISION:`, `// ADR-\d+:`, `/* ADR-\d+:`; return list of dicts with text, adr_id, line_number; integrate into scanner pipeline as a new stage after `_infer_contract_edges()`
+- [x] T020 [US5] Implement decision node creation and constraint targeting in scanner pipeline in `src/codegiraffe/scanner.py` — for each detected marker, create `Node(id=f"decision:{file}:{line}", type=NodeType.DECISION, ...)` with metadata; create `constrains` edges to **specific governed nodes** by: (1) scanning decision text for node ID references (e.g., "service:PaymentService"), (2) if no matches, target the nearest enclosing symbol node from the same file, (3) fallback to the file's module node; for ADR-numbered decisions, group by ADR ID
+- [x] T021 [US5] Implement `_include_constraining_decisions(subgraph_nodes, graph)` in `src/codegiraffe/query.py` — given a set of nodes in a subgraph result, find all decision nodes connected via `constrains` edges and add them to the result; integrate into `context_for_task()` after initial subgraph extraction
+- [x] T022 [US5] Add decision node and edge styling to `src/codegiraffe/dashboard.py` — decision nodes: color `#2196F3` (blue), shape `tag`; constrains edges: blue dotted, width 1.5; supersedes edges: gray dashed, width 1; add to `TYPE_COLORS`, `TYPE_SHAPES`, and edge style maps
 
 **Checkpoint**: US5 complete — decisions detected from code comments and auto-included in context. All US1 + US2 + US5 tests pass.
 
@@ -110,14 +110,14 @@
 
 ### Tests for US7
 
-- [ ] T023 [P] [US7] Write pattern extraction tests in `tests/test_patterns.py`: test `extract_patterns()` with 4 endpoint nodes sharing naming convention returns pattern brief with naming_pattern, common_attributes, exemplar; test outlier node flagged as anti-pattern when deviating from >66% convention; test `sample_size` in result matches input cluster size
-- [ ] T024 [P] [US7] Write minimum cluster tests in `tests/test_patterns.py`: test fewer than 3 nodes of a type returns insufficient data message; test exactly 3 nodes is the minimum for pattern extraction; test node types with no instances return appropriate error
-- [ ] T025 [P] [US7] Write pattern similarity and contract tests in `tests/test_patterns.py`: test `_extract_naming_pattern()` detects common prefixes/suffixes in node IDs; test common_attributes populated with attributes present in >66% of nodes; test 50/50 split patterns reported as alternatives (not single convention); contract test: verify `codegiraffe_patterns` tool accepts required params (project_path, node_type) and returns valid pattern brief JSON structure
+- [x] T023 [P] [US7] Write pattern extraction tests in `tests/test_patterns.py`: test `extract_patterns()` with 4 endpoint nodes sharing naming convention returns pattern brief with naming_pattern, common_attributes, exemplar; test outlier node flagged as anti-pattern when deviating from >66% convention; test `sample_size` in result matches input cluster size
+- [x] T024 [P] [US7] Write minimum cluster tests in `tests/test_patterns.py`: test fewer than 3 nodes of a type returns insufficient data message; test exactly 3 nodes is the minimum for pattern extraction; test node types with no instances return appropriate error
+- [x] T025 [P] [US7] Write pattern similarity and contract tests in `tests/test_patterns.py`: test `_extract_naming_pattern()` detects common prefixes/suffixes in node IDs; test common_attributes populated with attributes present in >66% of nodes; test 50/50 split patterns reported as alternatives (not single convention); contract test: verify `codegiraffe_patterns` tool accepts required params (project_path, node_type) and returns valid pattern brief JSON structure
 
 ### Implementation for US7
 
-- [ ] T026 [US7] Create `src/codegiraffe/patterns.py` — implement `extract_patterns(graph: ArchGraph, node_type: str, min_cluster: int = 3) -> dict` that: filters nodes by type, validates minimum cluster size, extracts naming patterns via `_extract_naming_pattern()`, counts attribute frequency, identifies outliers (missing >50% of conventions), selects exemplar (node closest to cluster center); implement `_extract_naming_pattern(node_ids: list[str]) -> str` using common prefix/suffix detection
-- [ ] T027 [US7] Add `codegiraffe_patterns` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `node_type` (required), `min_cluster` (optional, default 3); call `extract_patterns()`; format result as pattern brief text
+- [x] T026 [US7] Create `src/codegiraffe/patterns.py` — implement `extract_patterns(graph: ArchGraph, node_type: str, min_cluster: int = 3) -> dict` that: filters nodes by type, validates minimum cluster size, extracts naming patterns via `_extract_naming_pattern()`, counts attribute frequency, identifies outliers (missing >50% of conventions), selects exemplar (node closest to cluster center); implement `_extract_naming_pattern(node_ids: list[str]) -> str` using common prefix/suffix detection
+- [x] T027 [US7] Add `codegiraffe_patterns` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `node_type` (required), `min_cluster` (optional, default 3); call `extract_patterns()`; format result as pattern brief text
 
 **Checkpoint**: US7 complete — convention mining tool available. All v0.11.0 tests pass.
 
@@ -127,9 +127,9 @@
 
 **Purpose**: Final integration, version bump, full test run
 
-- [ ] T028 Run full test suite (`python -m pytest tests/ -v`) and verify all existing 979 tests + new ~57 tests pass
-- [ ] T029 Update version to `0.11.0` in `src/codegiraffe/__init__.py` and `pyproject.toml`
-- [ ] T030 Update `README.md` tools table with `codegiraffe_patterns` and enhanced `context_for` parameters
+- [x] T028 Run full test suite (`python -m pytest tests/ -v`) and verify all existing 979 tests + new ~57 tests pass
+- [x] T029 Update version to `0.11.0` in `src/codegiraffe/__init__.py` and `pyproject.toml`
+- [x] T030 Update `README.md` tools table with `codegiraffe_patterns` and enhanced `context_for` parameters
 
 **Checkpoint**: v0.11.0 release-ready — 29 MCP tools, ~1036 tests passing.
 
