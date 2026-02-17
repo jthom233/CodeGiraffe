@@ -494,6 +494,9 @@ def context_for_task(
     # Apply intent-specific retrieval strategy on top of base scoring
     result = _apply_intent_strategy(graph, result, task, intent, max_nodes)
 
+    # Apply domain boosting: if any domain name appears in the task, boost members
+    result = _apply_domain_boosting(graph, result, task, max_nodes)
+
     # Apply confidence filtering if requested
     if min_confidence > 0.0:
         result.edges = [e for e in result.edges if e.confidence >= min_confidence]
@@ -760,6 +763,75 @@ def _apply_intent_strategy(
                     if key not in existing_edge_keys:
                         result.edges.append(edge_obj)
                         existing_edge_keys.add(key)
+
+    return result
+
+
+def _apply_domain_boosting(
+    graph: ArchGraph,
+    result: GraphData,
+    task: str,
+    max_nodes: int,
+) -> GraphData:
+    """Boost domain-member nodes when the task mentions a known domain name.
+
+    For each domain node in the graph, if the domain's label appears in *task*,
+    all members of that domain are:
+    1. Added to the result (if not already present and within *max_nodes*).
+    2. Given a boosted ``_relevance_score`` so they rank higher.
+    """
+    from codegiraffe.domains import get_domain_membership
+    from codegiraffe.schema import NodeType as _NodeType
+
+    # Collect domain nodes
+    domain_nodes: list = []
+    for _, attrs in graph.graph.nodes(data=True):
+        node = attrs.get("node")
+        if node is not None and node.type == _NodeType.DOMAIN:
+            domain_nodes.append(node)
+
+    if not domain_nodes:
+        return result
+
+    task_lower = task.lower()
+
+    # Build membership map: node_id -> domain_label
+    membership = get_domain_membership(graph)
+
+    # Determine which domains are mentioned in the task
+    matched_domains: set[str] = set()
+    for domain_node in domain_nodes:
+        if domain_node.label.lower() in task_lower:
+            matched_domains.add(domain_node.label)
+
+    if not matched_domains:
+        return result
+
+    _DOMAIN_BOOST = 100
+    for node_id, domain_label in membership.items():
+        if domain_label not in matched_domains:
+            continue
+
+        node_attrs = graph.graph.nodes.get(node_id, {})
+        member_node = node_attrs.get("node")
+        if member_node is None:
+            continue
+
+        if node_id in result.nodes:
+            existing_score = result.nodes[node_id].metadata.get("_relevance_score", 0)
+            result.nodes[node_id].metadata["_relevance_score"] = existing_score + _DOMAIN_BOOST
+        elif len(result.nodes) < max_nodes:
+            member_node.metadata["_relevance_score"] = _DOMAIN_BOOST
+            result.nodes[node_id] = member_node
+
+    # Re-sort by descending relevance score
+    if result.nodes:
+        result.nodes = dict(
+            sorted(
+                result.nodes.items(),
+                key=lambda item: (-item[1].metadata.get("_relevance_score", 0), item[0]),
+            )
+        )
 
     return result
 
@@ -1073,6 +1145,44 @@ def _compute_cross_team_impact(
     return cross_team
 
 
+def _compute_domain_groups(
+    graph: ArchGraph,
+    downstream: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    """Group downstream node IDs by their domain membership.
+
+    Parameters
+    ----------
+    graph:
+        The architecture graph (used to read domain membership).
+    downstream:
+        The list of downstream impact entries from ``compute_blast_radius``.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Maps domain name to sorted list of downstream node IDs in that domain.
+        Returns an empty dict when no domains are defined.
+    """
+    from codegiraffe.domains import get_domain_membership
+
+    membership = get_domain_membership(graph)
+    if not membership:
+        return {}
+
+    groups: dict[str, list[str]] = {}
+    for entry in downstream:
+        nid = entry["node_id"]
+        domain_name = membership.get(nid)
+        if domain_name is not None:
+            groups.setdefault(domain_name, []).append(nid)
+
+    for name in groups:
+        groups[name].sort()
+
+    return groups
+
+
 def compute_blast_radius(
     graph: ArchGraph,
     node_id: str,
@@ -1211,6 +1321,9 @@ def compute_blast_radius(
     # Cross-team impact — downstream nodes owned by a different team
     cross_team_impact = _compute_cross_team_impact(graph, node_id, downstream)
 
+    # Domain groups — group impacted downstream nodes by domain membership
+    domain_groups = _compute_domain_groups(graph, downstream)
+
     result: dict[str, Any] = {
         "target_node": target_info,
         "downstream": downstream,
@@ -1219,11 +1332,38 @@ def compute_blast_radius(
         "cycles": relevant_cycles,
         "critical_paths": critical_paths,
         "cross_team_impact": cross_team_impact,
+        "domain_groups": domain_groups,
     }
     if include_upstream:
         result["upstream"] = upstream
 
     return result
+
+
+def compute_risk_with_coverage(base_risk: float, node: "Node") -> float:
+    """Apply a 1.5x risk multiplier for nodes with no test coverage.
+
+    A node is considered uncovered when its ``_test_coverage`` metadata key is
+    present and equals ``0.0``, or when the key is absent entirely (unknown
+    coverage).  A node is considered covered when ``_test_coverage`` is present
+    and greater than zero.
+
+    Parameters
+    ----------
+    base_risk:
+        The raw risk score for the node.
+    node:
+        The graph node whose metadata is inspected for ``_test_coverage``.
+
+    Returns
+    -------
+    float
+        ``base_risk * 1.5`` if uncovered/unknown, ``base_risk`` otherwise.
+    """
+    coverage = node.metadata.get("_test_coverage")
+    if coverage is None or coverage == 0.0:
+        return base_risk * 1.5
+    return base_risk
 
 
 def generate_impact_summary(blast_radius: dict[str, Any], graph: ArchGraph) -> str:
@@ -2052,9 +2192,28 @@ def suggest_tests(
                         strategy="blast_radius",
                     )
 
+    # Annotate all suggestions with coverage_status based on test node metadata
+    annotated: dict[str, TestSuggestion] = {}
+    for key, suggestion in suggestions.items():
+        cov_status = "unknown"
+        for _nid, attrs in graph.graph.nodes(data=True):
+            n: Node | None = attrs.get("node")
+            if n is None:
+                continue
+            if n.file_path == suggestion.file_path or _nid == suggestion.file_path:
+                cov = n.metadata.get("_test_coverage")
+                if cov is None:
+                    cov_status = "unknown"
+                elif cov > 0.0:
+                    cov_status = "covered"
+                else:
+                    cov_status = "uncovered"
+                break
+        annotated[key] = suggestion.model_copy(update={"coverage_status": cov_status})
+
     # Sort by score descending, truncate
     sorted_suggestions = sorted(
-        suggestions.values(), key=lambda s: (-s.score, s.file_path)
+        annotated.values(), key=lambda s: (-s.score, s.file_path)
     )
     return sorted_suggestions[:max_suggestions]
 
@@ -2177,3 +2336,170 @@ def file_coupling(
     # Sort by coupling descending, limit to top 20
     pairs.sort(key=lambda p: (-p.coupling, p.file_a, p.file_b))
     return pairs[:20]
+
+
+# ---------------------------------------------------------------------------
+# Dependency-aware task ordering
+# ---------------------------------------------------------------------------
+
+
+def order_tasks(graph: ArchGraph, tasks: list[dict]) -> dict:
+    """Order tasks based on graph dependencies.
+
+    Each task is a dict with ``name`` (str) and ``target_files`` (list[str]).
+
+    Algorithm
+    ---------
+    1. Map each task's target files to module nodes in the graph.
+    2. Build a directed task-dependency subgraph: task A must precede task B
+       when a file touched by A is imported by a file touched by B (i.e. B's
+       module has an ``imports`` edge pointing at A's module).
+    3. Attempt a topological sort on the task dependency graph.  If a cycle is
+       detected, fall back to the original order and surface cycle information.
+    4. Group tasks at the same topological level into parallel groups.
+    5. Detect same-file conflicts (multiple tasks targeting the same file).
+
+    Parameters
+    ----------
+    graph:
+        The loaded ``ArchGraph`` for the project.
+    tasks:
+        List of task dicts, each with ``"name"`` and ``"target_files"`` keys.
+
+    Returns
+    -------
+    dict with keys:
+
+    ``ordered_tasks``
+        List of task dicts enriched with an ``"order"`` integer (0-based
+        topological level).
+
+    ``parallel_groups``
+        List of lists of task indices that can run concurrently.  Tasks in the
+        same group have no mutual dependency.
+
+    ``conflict_zones``
+        List of ``{"file": str, "tasks": [task_name, ...]}`` dicts for files
+        touched by more than one task.
+
+    ``dependency_edges``
+        List of ``{"from": task_name, "to": task_name, "reason": str}`` dicts
+        describing why one task must precede another.
+
+    When cycles are detected a top-level ``"cycle"`` key is also present with a
+    human-readable description.
+    """
+    if not tasks:
+        return {
+            "ordered_tasks": [],
+            "parallel_groups": [],
+            "conflict_zones": [],
+            "dependency_edges": [],
+        }
+
+    n = len(tasks)
+
+    # Step 1: Map each task's target files to graph node IDs
+    task_node_map: list[list[str]] = []  # index -> list of node IDs
+    for task in tasks:
+        files = task.get("target_files", [])
+        file_node_mapping = map_files_to_nodes(graph, files)
+        node_ids: list[str] = []
+        for nids in file_node_mapping.values():
+            node_ids.extend(nids)
+        task_node_map.append(node_ids)
+
+    # Step 2: Detect conflict zones (multiple tasks share the same file)
+    file_to_task_names: dict[str, list[str]] = {}
+    for task, files in zip(tasks, [t.get("target_files", []) for t in tasks]):
+        for fp in files:
+            file_to_task_names.setdefault(fp, []).append(task["name"])
+
+    conflict_zones = [
+        {"file": fp, "tasks": task_names}
+        for fp, task_names in file_to_task_names.items()
+        if len(task_names) > 1
+    ]
+
+    # Step 3: Build task dependency graph
+    from codegiraffe.schema import EdgeType  # local import to avoid circular deps
+    from collections import defaultdict
+
+    task_dep_graph: nx.DiGraph = nx.DiGraph()
+    task_dep_graph.add_nodes_from(range(n))
+
+    dependency_edges: list[dict] = []
+
+    for j in range(n):
+        for i in range(n):
+            if i == j:
+                continue
+            nodes_i = set(task_node_map[i])
+            nodes_j = set(task_node_map[j])
+            if not nodes_i or not nodes_j:
+                continue
+            for nj in nodes_j:
+                for ni in nodes_i:
+                    edge_data = graph.graph.edges.get((nj, ni), {})
+                    edge_obj = edge_data.get("edge")
+                    if edge_obj is not None and edge_obj.type == EdgeType.IMPORTS:
+                        if not task_dep_graph.has_edge(i, j):
+                            task_dep_graph.add_edge(i, j)
+                            dependency_edges.append({
+                                "from": tasks[i]["name"],
+                                "to": tasks[j]["name"],
+                                "reason": (
+                                    f"imports ({tasks[j]['name']} imports "
+                                    f"from {tasks[i]['name']})"
+                                ),
+                            })
+
+    # Step 4: Topological sort & level assignment
+    cycle_info: str | None = None
+    try:
+        topo_order = list(nx.topological_sort(task_dep_graph))
+    except nx.NetworkXUnfeasible:
+        cycles = list(nx.simple_cycles(task_dep_graph))
+        cycle_desc = "; ".join(
+            " -> ".join(tasks[idx]["name"] for idx in c) for c in cycles
+        )
+        cycle_info = f"Circular dependency detected: {cycle_desc}"
+        topo_order = list(range(n))
+
+    level: dict[int, int] = {idx: 0 for idx in range(n)}
+    for idx in topo_order:
+        for pred in task_dep_graph.predecessors(idx):
+            level[idx] = max(level[idx], level[pred] + 1)
+
+    # Step 5: Build parallel groups
+    level_to_indices: dict[int, list[int]] = defaultdict(list)
+    for idx in topo_order:
+        level_to_indices[level[idx]].append(idx)
+
+    parallel_groups = [
+        level_to_indices[lvl]
+        for lvl in sorted(level_to_indices.keys())
+    ]
+
+    # Step 6: Assemble ordered_tasks
+    ordered_tasks = []
+    for idx in topo_order:
+        task = tasks[idx]
+        entry = {
+            "name": task["name"],
+            "target_files": task.get("target_files", []),
+            "order": level[idx],
+        }
+        if cycle_info:
+            entry["note"] = "cycle detected -- ordering may be approximate"
+        ordered_tasks.append(entry)
+
+    result: dict = {
+        "ordered_tasks": ordered_tasks,
+        "parallel_groups": parallel_groups,
+        "conflict_zones": conflict_zones,
+        "dependency_edges": dependency_edges,
+    }
+    if cycle_info:
+        result["cycle"] = cycle_info
+    return result

@@ -244,14 +244,14 @@
 
 ### Tests for US8
 
-- [ ] T052 [P] [US8] Write coverage parsing tests in `tests/test_coverage_mapper.py`: test `parse_coverage_py()` reads coverage.py JSON and returns file→percentage mapping; test `parse_istanbul()` reads Istanbul JSON; test `parse_lcov()` reads LCOV format; test `auto` format detection selects correct parser
-- [ ] T053 [P] [US8] Write coverage mapping tests in `tests/test_coverage_mapper.py`: test `map_coverage_to_nodes()` sets `_test_coverage` metadata on matching nodes; test uncovered nodes (0%) get metadata; test file not in coverage data gets no metadata; test graceful degradation when no coverage data provided
-- [ ] T054 [P] [US8] Write coverage-enhanced risk/test and contract tests in `tests/test_coverage_mapper.py`: test `risk_assessment` gives uncovered nodes 1.5x risk multiplier; test `suggest_tests` returns `coverage_status="uncovered"` for unmapped nodes; test `suggest_tests` returns `coverage_status="covered"` for mapped nodes; contract test: verify `codegiraffe_coverage` tool accepts required params (project_path, coverage_path) and returns valid mapping summary JSON
+- [x] T052 [P] [US8] Write coverage parsing tests in `tests/test_coverage_mapper.py`: test `parse_coverage_py()` reads coverage.py JSON and returns file→percentage mapping; test `parse_istanbul()` reads Istanbul JSON; test `parse_lcov()` reads LCOV format; test `auto` format detection selects correct parser
+- [x] T053 [P] [US8] Write coverage mapping tests in `tests/test_coverage_mapper.py`: test `map_coverage_to_nodes()` sets `_test_coverage` metadata on matching nodes; test uncovered nodes (0%) get metadata; test file not in coverage data gets no metadata; test graceful degradation when no coverage data provided
+- [x] T054 [P] [US8] Write coverage-enhanced risk/test and contract tests in `tests/test_coverage_mapper.py`: test `risk_assessment` gives uncovered nodes 1.5x risk multiplier; test `suggest_tests` returns `coverage_status="uncovered"` for unmapped nodes; test `suggest_tests` returns `coverage_status="covered"` for mapped nodes; contract test: verify `codegiraffe_coverage` tool accepts required params (project_path, coverage_path) and returns valid mapping summary JSON
 
 ### Implementation for US8
 
-- [ ] T055 [US8] Create `src/codegiraffe/coverage_mapper.py` — implement `parse_coverage_py(path: str) -> dict[str, float]`, `parse_istanbul(path: str) -> dict[str, float]`, `parse_lcov(path: str) -> dict[str, float]`, `auto_detect_format(path: str) -> str`; implement `map_coverage_to_nodes(graph: ArchGraph, coverage: dict)` setting `_test_coverage` metadata on nodes whose `file_path` matches coverage keys; create `tested_by` edges from covered nodes to their corresponding test module nodes (using the `TESTED_BY` edge type from schema.py)
-- [ ] T056 [US8] Add `codegiraffe_coverage` tool in `src/codegiraffe/server.py`; update `compute_risk_assessment()` in `src/codegiraffe/query.py` to apply 1.5x risk multiplier for nodes with `_test_coverage == 0` or missing coverage; update `suggest_tests_for_changes()` in `src/codegiraffe/query.py` to include `coverage_status` field
+- [x] T055 [US8] Create `src/codegiraffe/coverage_mapper.py` — implement `parse_coverage_py(path: str) -> dict[str, float]`, `parse_istanbul(path: str) -> dict[str, float]`, `parse_lcov(path: str) -> dict[str, float]`, `auto_detect_format(path: str) -> str`; implement `map_coverage_to_nodes(graph: ArchGraph, coverage: dict)` setting `_test_coverage` metadata on nodes whose `file_path` matches coverage keys; create `tested_by` edges from covered nodes to their corresponding test module nodes (using the `TESTED_BY` edge type from schema.py)
+- [x] T056 [US8] Add `codegiraffe_coverage` tool in `src/codegiraffe/server.py`; update `compute_risk_assessment()` in `src/codegiraffe/query.py` to apply 1.5x risk multiplier for nodes with `_test_coverage == 0` or missing coverage; update `suggest_tests_for_changes()` in `src/codegiraffe/query.py` to include `coverage_status` field
 
 **Checkpoint**: US8 complete — coverage data maps to nodes, risk and test suggestions enhanced.
 
@@ -265,14 +265,14 @@
 
 ### Tests for US9
 
-- [ ] T057 [P] [US9] Write graph diff computation tests in `tests/test_graph_diff.py`: test `compute_graph_diff()` with two ArchGraph instances detects nodes added, removed, modified; test edges added/removed detected; test identical graphs produce empty diff; test contracts affected listed
-- [ ] T058 [P] [US9] Write new cycle detection tests in `tests/test_graph_diff.py`: test diff that introduces a cycle flags it in `new_cycles`; test diff that removes a cycle doesn't flag it; test diff with no cycle changes returns empty `new_cycles`
-- [ ] T059 [P] [US9] Write git worktree integration and contract tests in `tests/test_graph_diff.py`: test `build_graph_at_ref()` creates temporary worktree and scans; test worktree cleanup after scan; test error when refs have no common ancestor; contract test: verify `codegiraffe_pr_diff` tool accepts required params (project_path, base_ref) and returns structured diff report JSON with nodes_added/removed/modified, edges_added/removed, contracts_affected, new_cycles, summary
+- [x] T057 [P] [US9] Write graph diff computation tests in `tests/test_graph_diff.py`: test `compute_graph_diff()` with two ArchGraph instances detects nodes added, removed, modified; test edges added/removed detected; test identical graphs produce empty diff; test contracts affected listed
+- [x] T058 [P] [US9] Write new cycle detection tests in `tests/test_graph_diff.py`: test diff that introduces a cycle flags it in `new_cycles`; test diff that removes a cycle doesn't flag it; test diff with no cycle changes returns empty `new_cycles`
+- [x] T059 [P] [US9] Write git worktree integration and contract tests in `tests/test_graph_diff.py`: test `build_graph_at_ref()` creates temporary worktree and scans; test worktree cleanup after scan; test error when refs have no common ancestor; contract test: verify `codegiraffe_pr_diff` tool accepts required params (project_path, base_ref) and returns structured diff report JSON with nodes_added/removed/modified, edges_added/removed, contracts_affected, new_cycles, summary
 
 ### Implementation for US9
 
-- [ ] T060 [US9] Create `src/codegiraffe/graph_diff.py` — implement `compute_graph_diff(base_graph: ArchGraph, head_graph: ArchGraph) -> dict` comparing node sets (added/removed/modified by metadata diff), edge sets, contracts affected, new cycles (cycles in head not in base); implement `build_graph_at_ref(project_path: str, ref: str, scanner_mode: str) -> ArchGraph` using `git worktree add` to temp dir, scan, build graph, `git worktree remove`
-- [ ] T061 [US9] Add `codegiraffe_pr_diff` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `base_ref` (required), `head_ref` (optional, default "HEAD"); call `build_graph_at_ref` for both refs, `compute_graph_diff`, return structured report with summary
+- [x] T060 [US9] Create `src/codegiraffe/graph_diff.py` — implement `compute_graph_diff(base_graph: ArchGraph, head_graph: ArchGraph) -> dict` comparing node sets (added/removed/modified by metadata diff), edge sets, contracts affected, new cycles (cycles in head not in base); implement `build_graph_at_ref(project_path: str, ref: str, scanner_mode: str) -> ArchGraph` using `git worktree add` to temp dir, scan, build graph, `git worktree remove`
+- [x] T061 [US9] Add `codegiraffe_pr_diff` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `base_ref` (required), `head_ref` (optional, default "HEAD"); call `build_graph_at_ref` for both refs, `compute_graph_diff`, return structured report with summary
 
 **Checkpoint**: US9 complete — PR architectural diffs available.
 
@@ -286,13 +286,13 @@
 
 ### Tests for US10
 
-- [ ] T062 [P] [US10] Write task ordering tests in `tests/test_task_ordering.py`: test `order_tasks()` with task A (modifying imported file) appears before task B (importing it); test tasks C and D with no graph overlap marked as parallelizable; test tasks touching same file flagged as conflict zones; test circular dependency detected and reported
-- [ ] T063 [P] [US10] Write parallel group and contract tests in `tests/test_task_ordering.py`: test `parallel_groups` contains task indices at same topological level; test `dependency_edges` includes (task_a, task_b, reason) triples; test single task returns trivial plan; contract test: verify `codegiraffe_order_tasks` tool accepts required params (project_path, tasks JSON) and returns execution plan JSON with ordered_tasks, parallel_groups, conflict_zones, dependency_edges
+- [x] T062 [P] [US10] Write task ordering tests in `tests/test_task_ordering.py`: test `order_tasks()` with task A (modifying imported file) appears before task B (importing it); test tasks C and D with no graph overlap marked as parallelizable; test tasks touching same file flagged as conflict zones; test circular dependency detected and reported
+- [x] T063 [P] [US10] Write parallel group and contract tests in `tests/test_task_ordering.py`: test `parallel_groups` contains task indices at same topological level; test `dependency_edges` includes (task_a, task_b, reason) triples; test single task returns trivial plan; contract test: verify `codegiraffe_order_tasks` tool accepts required params (project_path, tasks JSON) and returns execution plan JSON with ordered_tasks, parallel_groups, conflict_zones, dependency_edges
 
 ### Implementation for US10
 
-- [ ] T064 [US10] Implement `order_tasks(graph: ArchGraph, tasks: list[dict]) -> dict` in `src/codegiraffe/query.py` — map each task's `target_files` to module nodes, build task dependency subgraph from module `imports` edges, topological sort via `nx.topological_sort()`, group tasks at same level as parallel groups, detect same-file conflicts; return `ordered_tasks`, `parallel_groups`, `conflict_zones`, `dependency_edges`
-- [ ] T065 [US10] Add `codegiraffe_order_tasks` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `tasks` (required, JSON array with `name` and `target_files` fields); parse JSON, call `order_tasks()`, format result
+- [x] T064 [US10] Implement `order_tasks(graph: ArchGraph, tasks: list[dict]) -> dict` in `src/codegiraffe/query.py` — map each task's `target_files` to module nodes, build task dependency subgraph from module `imports` edges, topological sort via `nx.topological_sort()`, group tasks at same level as parallel groups, detect same-file conflicts; return `ordered_tasks`, `parallel_groups`, `conflict_zones`, `dependency_edges`
+- [x] T065 [US10] Add `codegiraffe_order_tasks` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `tasks` (required, JSON array with `name` and `target_files` fields); parse JSON, call `order_tasks()`, format result
 
 **Checkpoint**: US10 complete — task ordering with parallelization.
 
@@ -306,14 +306,14 @@
 
 ### Tests for US11
 
-- [ ] T066 [P] [US11] Write domain inference tests in `tests/test_domains.py`: test `infer_domains()` clusters nodes by top-level directory; test flat structure falls back to node ID prefix clustering; test domains have correct node_count; test no meaningful clusters returns empty list
-- [ ] T067 [P] [US11] Write domain query tests in `tests/test_domains.py`: test `context_for` with domain name as task prioritizes domain-member nodes; test `blast_radius` groups impacted nodes by domain; test manual domain definition persists across rescans; test domain add/remove operations
-- [ ] T068 [P] [US11] Write domain persistence and contract tests in `tests/test_domains.py`: test manual domains have `manual=True`; test inferred domains rebuilt on rescan; test `belongs_to` edges connect nodes to domain nodes; contract test: verify `codegiraffe_domains` tool accepts required params (project_path) and optional params (action, name, node_ids) and returns valid domain list or confirmation JSON
+- [x] T066 [P] [US11] Write domain inference tests in `tests/test_domains.py`: test `infer_domains()` clusters nodes by top-level directory; test flat structure falls back to node ID prefix clustering; test domains have correct node_count; test no meaningful clusters returns empty list
+- [x] T067 [P] [US11] Write domain query tests in `tests/test_domains.py`: test `context_for` with domain name as task prioritizes domain-member nodes; test `blast_radius` groups impacted nodes by domain; test manual domain definition persists across rescans; test domain add/remove operations
+- [x] T068 [P] [US11] Write domain persistence and contract tests in `tests/test_domains.py`: test manual domains have `manual=True`; test inferred domains rebuilt on rescan; test `belongs_to` edges connect nodes to domain nodes; contract test: verify `codegiraffe_domains` tool accepts required params (project_path) and optional params (action, name, node_ids) and returns valid domain list or confirmation JSON
 
 ### Implementation for US11
 
-- [ ] T069 [US11] Create `src/codegiraffe/domains.py` — implement `infer_domains(graph: ArchGraph) -> list[dict]` clustering nodes by directory path or ID prefix; implement `add_domain(graph: ArchGraph, name: str, node_ids: list[str])` creating domain node with `belongs_to` edges; implement `remove_domain(graph: ArchGraph, name: str)`; implement `list_domains(graph: ArchGraph) -> list[dict]`
-- [ ] T070 [US11] Add `codegiraffe_domains` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `action` (optional: list/infer/add/remove), `name` (optional), `node_ids` (optional JSON array); update `context_for_task()` in `src/codegiraffe/query.py` to boost domain-member nodes when task contains a domain name; update `compute_blast_radius()` to group by domain in `domain_groups` field
+- [x] T069 [US11] Create `src/codegiraffe/domains.py` — implement `infer_domains(graph: ArchGraph) -> list[dict]` clustering nodes by directory path or ID prefix; implement `add_domain(graph: ArchGraph, name: str, node_ids: list[str])` creating domain node with `belongs_to` edges; implement `remove_domain(graph: ArchGraph, name: str)`; implement `list_domains(graph: ArchGraph) -> list[dict]`
+- [x] T070 [US11] Add `codegiraffe_domains` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `action` (optional: list/infer/add/remove), `name` (optional), `node_ids` (optional JSON array); update `context_for_task()` in `src/codegiraffe/query.py` to boost domain-member nodes when task contains a domain name; update `compute_blast_radius()` to group by domain in `domain_groups` field
 
 **Checkpoint**: US11 complete — domain abstraction layer available.
 
@@ -360,10 +360,10 @@
 
 ## Phase 18: v0.13.0 Polish & Cross-Cutting
 
-- [ ] T078 Add domain visual grouping to `src/codegiraffe/dashboard.py` — compound nodes via Cytoscape.js parent-child for domain clusters
-- [ ] T079 Run full test suite and verify all existing + new ~63 tests pass
-- [ ] T080 Update version to `0.13.0` in `src/codegiraffe/__init__.py` and `pyproject.toml`
-- [ ] T081 Update `README.md` with all 8 new tools (codegiraffe_patterns, codegiraffe_annotate, codegiraffe_sync_files, codegiraffe_coverage, codegiraffe_pr_diff, codegiraffe_order_tasks, codegiraffe_domains, codegiraffe_migration_plan) and enhanced tool parameter documentation
+- [x] T078 Add domain visual grouping to `src/codegiraffe/dashboard.py` — compound nodes via Cytoscape.js parent-child for domain clusters
+- [x] T079 Run full test suite and verify all existing + new ~63 tests pass
+- [x] T080 Update version to `0.13.0` in `src/codegiraffe/__init__.py` and `pyproject.toml`
+- [x] T081 Update `README.md` with all 8 new tools (codegiraffe_patterns, codegiraffe_annotate, codegiraffe_sync_files, codegiraffe_coverage, codegiraffe_pr_diff, codegiraffe_order_tasks, codegiraffe_domains, codegiraffe_migration_plan) and enhanced tool parameter documentation
 
 **Checkpoint**: v0.13.0 release-ready — 36 MCP tools, ~1141 tests passing.
 

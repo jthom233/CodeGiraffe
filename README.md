@@ -98,7 +98,7 @@ Add to your `claude_desktop_config.json`:
 
 ## MCP Tools
 
-Code Giraffe exposes **31 tools** that any MCP client can call:
+Code Giraffe exposes **36 tools** that any MCP client can call:
 
 ### `codegiraffe_init`
 
@@ -586,7 +586,7 @@ codegiraffe_blast_radius(
 
 ### `codegiraffe_risk_assessment`
 
-Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4) + (descendants/total * 0.2).
+Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4) + (descendants/total * 0.2). Incorporates test coverage data — uncovered nodes receive a 1.5x risk multiplier.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -596,7 +596,7 @@ Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4)
 **Example:**
 ```
 codegiraffe_risk_assessment(project_path="/home/user/my-project")
---> [{"node_id": "service:AuthService", "risk_score": 0.82, "degree": 12, "betweenness": 0.45, "descendants": 8}, ...]
+--> [{"node_id": "service:AuthService", "risk_score": 0.82, "degree": 12, "betweenness": 0.45, "descendants": 8, "coverage": "partial"}, ...]
 ```
 
 ---
@@ -722,7 +722,7 @@ codegiraffe_validate_changes(project_path="/home/user/my-project")
 
 ### `codegiraffe_suggest_tests`
 
-Suggest test files to run based on uncommitted (or arbitrary) changes. Uses graph relationships, naming conventions, and blast radius analysis to identify the most relevant tests.
+Suggest test files to run based on uncommitted (or arbitrary) changes. Uses graph relationships, naming conventions, and blast radius analysis to identify the most relevant tests. Now includes `coverage_status` field (covered/uncovered/unknown).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -743,13 +743,13 @@ codegiraffe_suggest_tests(project_path="/home/user/my-project")
     **3 test(s) suggested**
 
     ### High Relevance (score >= 0.7)
-    - tests/test_auth.py (0.90) — graph: imports changed module [graph]
+    - tests/test_auth.py (0.90) — graph: imports changed module [graph] (coverage: covered)
 
     ### Medium Relevance (0.3 <= score < 0.7)
-    - tests/test_users.py (0.60) — naming: matches changed file users.py [naming]
+    - tests/test_users.py (0.60) — naming: matches changed file users.py [naming] (coverage: uncovered)
 
     ### Low Relevance (score < 0.3)
-    - tests/test_api.py (0.30) — blast radius: transitive dependency [blast_radius]
+    - tests/test_api.py (0.30) — blast radius: transitive dependency [blast_radius] (coverage: unknown)
 ```
 
 ---
@@ -828,6 +828,165 @@ codegiraffe_sync_files(
   file_paths=["src/auth.py", "src/users.py"]
 )
 --> "Synced 2 files. Nodes: 47 -> 49 (delta +2). Edges: 63 -> 66 (delta +3)."
+```
+
+---
+
+### `codegiraffe_coverage`
+
+Map test coverage data from coverage.py, Istanbul, or LCOV files to graph nodes. Links covered/uncovered code regions to their corresponding nodes for risk assessment.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `coverage_path` | `str` | required | Path to coverage file (.coverage, coverage.json, or .lcov) |
+| `format` | `str` | required | Coverage format: `"coverage.py"`, `"istanbul"`, or `"lcov"` |
+
+**Example:**
+```
+codegiraffe_coverage(
+  project_path="/home/user/my-project",
+  coverage_path=".coverage",
+  format="coverage.py"
+)
+--> "Mapped coverage data: 127 nodes covered (78%), 36 nodes uncovered (22%)"
+```
+
+---
+
+### `codegiraffe_pr_diff`
+
+Compare graph architecture at two git refs to detect structural changes. Useful for PR review to understand what's being added/removed at the architecture level.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `base_ref` | `str` | required | Base git ref (branch, tag, or commit) |
+| `head_ref` | `str` | required | Head git ref to compare against |
+
+**Example:**
+```
+codegiraffe_pr_diff(
+  project_path="/home/user/my-project",
+  base_ref="main",
+  head_ref="feature/new-api"
+)
+--> {
+      "nodes_added": ["endpoint:/api/v2/users", "service:UserServiceV2"],
+      "nodes_removed": [],
+      "edges_added": [{"source": "endpoint:/api/v2/users", "target": "table:users", "type": "reads"}],
+      "structural_changes": 2
+    }
+```
+
+---
+
+### `codegiraffe_order_tasks`
+
+Order a list of tasks by dependency topology, grouping parallelizable tasks and identifying conflict zones.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `tasks` | `str` | required | JSON array of tasks with `id`, `description`, and optional `dependencies` fields |
+
+**Example:**
+```
+codegiraffe_order_tasks(
+  project_path="/home/user/my-project",
+  tasks='[
+    {"id": "task-1", "description": "Add auth endpoint", "dependencies": []},
+    {"id": "task-2", "description": "Add user table", "dependencies": []},
+    {"id": "task-3", "description": "Add user service", "dependencies": ["task-1", "task-2"]}
+  ]'
+)
+--> {
+      "ordered_groups": [
+        ["task-1", "task-2"],  # Can run in parallel
+        ["task-3"]              # Depends on both above
+      ],
+      "conflict_zones": []
+    }
+```
+
+---
+
+### `codegiraffe_domains`
+
+Infer or manage domain groupings from directory structure. Groups related services/modules into logical domains.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `action` | `str` | required | Action: `"infer"`, `"list"`, `"create"`, or `"update"` |
+| `name` | `str` | optional | Domain name (required for `create`/`update`) |
+| `node_ids` | `list[str]` | optional | Node IDs to assign to domain (for `create`/`update`) |
+
+**Example:**
+```
+codegiraffe_domains(
+  project_path="/home/user/my-project",
+  action="infer"
+)
+--> {
+      "domains": [
+        {
+          "name": "auth",
+          "nodes": ["endpoint:/api/login", "service:AuthService", "table:users"],
+          "inferred_from": "src/auth/*"
+        },
+        {
+          "name": "payments",
+          "nodes": ["endpoint:/api/payments", "service:PaymentService", "queue:payment-events"],
+          "inferred_from": "src/payments/*"
+        }
+      ]
+    }
+```
+
+---
+
+### `codegiraffe_migration_plan`
+
+Generate an ordered migration plan for large refactors, identifying safe stages and breaking large changes into phases.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `description` | `str` | required | Description of the refactor (e.g., "migrate auth from Firebase to JWT") |
+| `target_nodes` | `list[str]` | optional | Specific nodes involved in the refactor |
+
+**Example:**
+```
+codegiraffe_migration_plan(
+  project_path="/home/user/my-project",
+  description="migrate auth from Firebase to JWT",
+  target_nodes=["service:AuthService", "endpoint:/api/login"]
+)
+--> {
+      "phases": [
+        {
+          "phase": 1,
+          "title": "Create JWT infrastructure",
+          "nodes": ["service:TokenService"],
+          "estimated_effort": "1-2 days"
+        },
+        {
+          "phase": 2,
+          "title": "Dual-mode endpoints (Firebase + JWT)",
+          "nodes": ["endpoint:/api/login"],
+          "estimated_effort": "2-3 days"
+        },
+        {
+          "phase": 3,
+          "title": "Migrate consumers to JWT",
+          "nodes": ["service:UserService", "component:Dashboard"],
+          "estimated_effort": "1-2 days"
+        }
+      ],
+      "total_estimated_effort": "4-7 days",
+      "breaking_points": []
+    }
 ```
 
 ---
@@ -1484,6 +1643,18 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Enhanced `codegiraffe_blast_radius` with `cross_team_impact` detection for ownership-aware analysis
 - [x] Confidence-weighted blast radius: impact calculations weighted by edge confidence
 - [x] 1154+ tests
+
+### v0.13.0 — Advanced Analysis
+
+- [x] 5 new MCP tools: `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan` (36 tools total)
+- [x] Test coverage mapping: map coverage.py/Istanbul/LCOV data to graph nodes for risk assessment
+- [x] Enhanced `codegiraffe_risk_assessment` with coverage data: uncovered nodes receive 1.5x risk multiplier
+- [x] Enhanced `codegiraffe_suggest_tests` with `coverage_status` field (covered/uncovered/unknown)
+- [x] PR diffing: compare architecture at two git refs to detect structural changes
+- [x] Dependency-aware task ordering: topological sort with parallel groups and conflict zone detection
+- [x] Domain model abstraction: infer or manage logical domain groupings from directory structure
+- [x] CI/CD integration workflow: migration planning for large refactors with phased rollout
+- [x] 1318+ tests
 
 ### Future
 

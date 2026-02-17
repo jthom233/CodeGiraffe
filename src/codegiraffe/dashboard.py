@@ -280,7 +280,7 @@ body {
     queue: '#E67E22', env_var: '#F39C12', config: '#D4AC0D',
     worker: '#E74C3C', frontend_component: '#9B59B6', event: '#1ABC9C',
     external_api: '#95A5A6', module: '#D35400', contract: '#8E44AD',
-    decision: '#2196F3'
+    decision: '#2196F3', domain: '#f0f0f0'
   };
   const TYPE_SHAPES = {
     endpoint: 'diamond', database_table: 'barrel', worker: 'hexagon',
@@ -320,16 +320,43 @@ body {
 
   function d3ToCytoscape(d3Data) {
     const elements = [];
+    const domainNodes = new Set();
+    
+    // First pass: identify domain nodes
     (d3Data.nodes || []).forEach(n => {
+      if (n.type === 'domain') {
+        domainNodes.add(n.id);
+      }
+    });
+    
+    // Build a map of node -> parent domain via belongs_to edges
+    const nodeToParent = {};
+    (d3Data.links || []).forEach(e => {
+      if (e.type === 'belongs_to' && domainNodes.has(e.target)) {
+        nodeToParent[e.source] = e.target;
+      }
+    });
+    
+    // Second pass: add all nodes with parent relationships
+    (d3Data.nodes || []).forEach(n => {
+      const nodeData = {
+        id: n.id, label: n.label || n.id, type: n.type || 'unknown',
+        file_path: n.file_path || '', manual: n.manual || false,
+        metadata: n.metadata || {}
+      };
+      
+      // If this node belongs to a domain, set parent
+      if (nodeToParent[n.id]) {
+        nodeData.parent = nodeToParent[n.id];
+      }
+      
       elements.push({
         group: 'nodes',
-        data: {
-          id: n.id, label: n.label || n.id, type: n.type || 'unknown',
-          file_path: n.file_path || '', manual: n.manual || false,
-          metadata: n.metadata || {}
-        }
+        data: nodeData
       });
     });
+    
+    // Third pass: add edges
     (d3Data.links || []).forEach(e => {
       const conf = (typeof e.confidence === 'number') ? e.confidence : 1.0;
       elements.push({
@@ -379,6 +406,19 @@ body {
           style: {
             'border-color': '#fff',
             'border-width': 3
+          }
+        },
+        {
+          selector: 'node:parent',
+          style: {
+            'background-color': '#f0f0f0',
+            'border-color': '#888',
+            'border-width': 2,
+            'padding': '10px',
+            'text-valign': 'top',
+            'text-halign': 'center',
+            'font-weight': 'bold',
+            'color': '#333'
           }
         },
         {
