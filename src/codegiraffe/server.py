@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from urllib.parse import quote as _url_quote
 
 import networkx as nx
 from mcp.server.fastmcp import FastMCP
@@ -2289,6 +2290,93 @@ def codegiraffe_migration_plan(
         lines.append("")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard launch tool
+# ---------------------------------------------------------------------------
+
+
+def _is_port_in_use(port: int) -> bool:
+    """Return True if *port* is already bound on localhost."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+@mcp.tool()
+def codegiraffe_dashboard(project_path: str, port: int = 8251) -> str:
+    """Launch the Code Giraffe web dashboard for the given project.
+
+    Spawns a background HTTP server serving the interactive Cytoscape.js
+    dashboard and opens the user's default browser to the dashboard URL.
+
+    The project must be initialized first (run *codegiraffe_init* if you
+    haven't already).  If a dashboard server is already running on *port*,
+    the existing URL is returned without spawning a second process.
+
+    Parameters
+    ----------
+    project_path:
+        Absolute path to the project root whose graph should be displayed.
+    port:
+        Local port to bind the dashboard HTTP server on (default 8251).
+    """
+    import subprocess
+    import sys
+    import threading
+    import time
+    import webbrowser
+
+    # Validate that the project has been initialized.
+    if not _storage.exists(project_path):
+        return (
+            f"No architecture graph found for '{project_path}'. "
+            "Run codegiraffe_init first, then launch the dashboard."
+        )
+
+    url = f"http://localhost:{port}/dashboard?project_path={_url_quote(project_path, safe='')}"
+
+    # If the port is already occupied, assume the dashboard is running.
+    if _is_port_in_use(port):
+        webbrowser.open(url)
+        return (
+            f"Dashboard already running at {url}\n"
+            "Opened browser to existing dashboard."
+        )
+
+    # Spawn the HTTP server as a background subprocess.
+    # Detached from our stdin/stdout so it survives in the background but
+    # still belongs to the same terminal session (no explicit daemonize).
+    server_script = __file__
+    subprocess.Popen(  # noqa: S603
+        [
+            sys.executable,
+            server_script,
+            "--transport",
+            "streamable-http",
+            "--port",
+            str(port),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+    # Open the browser after a brief pause to let the server bind its port.
+    def _open_browser() -> None:
+        time.sleep(1.5)
+        webbrowser.open(url)
+
+    threading.Thread(target=_open_browser, daemon=True).start()
+
+    return (
+        f"Dashboard launched at {url}\n"
+        f"Browser will open automatically. "
+        f"The server will stop when this terminal session ends."
+    )
 
 
 # ---------------------------------------------------------------------------

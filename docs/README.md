@@ -17,7 +17,7 @@
 
 ## Tool Reference
 
-- **[Tool Index](tools/README.md)** — Master table of all 36 MCP tools
+- **[Tool Index](tools/README.md)** — Master table of all 37 MCP tools
 
 | Category | Tools | Page |
 |---|---|---|
