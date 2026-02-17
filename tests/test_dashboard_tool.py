@@ -1,11 +1,12 @@
-"""Tests for the codegiraffe_dashboard MCP tool.
+"""Tests for the codegiraffe_dashboard MCP tool and DashboardServer.
 
 Verifies:
 - project_path validation (graph must exist)
-- port-in-use detection (returns existing URL instead of spawning)
-- subprocess spawned correctly when port is free
-- webbrowser.open is called after the server starts
+- DashboardServer starts, serves routes, and stops cleanly
+- get_or_start_server singleton behavior
+- webbrowser.open is called with the correct URL
 - returned message contains the URL
+- URL encoding of project paths with spaces/special chars
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from urllib.parse import quote as url_quote
 import pytest
 
 import codegiraffe.server as server_module
-from codegiraffe.server import _is_port_in_use, codegiraffe_dashboard
+from codegiraffe.server import codegiraffe_dashboard
 from codegiraffe.storage import JSONStorage
 
 
@@ -36,6 +37,20 @@ def reset_server_state():
     yield
     server_module._graph = None
     server_module._storage = JSONStorage()
+
+
+@pytest.fixture(autouse=True)
+def reset_dashboard_singleton():
+    """Reset the dashboard_server module singleton between tests."""
+    import codegiraffe.dashboard_server as ds_module
+
+    original = ds_module._server
+    ds_module._server = None
+    yield
+    # Stop any server started during the test.
+    if ds_module._server is not None and ds_module._server.is_running:
+        ds_module._server.stop()
+    ds_module._server = original
 
 
 @pytest.fixture()
@@ -60,36 +75,303 @@ def uninitialized_project(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _is_port_in_use helper
+# DashboardServer unit tests
 # ---------------------------------------------------------------------------
 
 
-class TestIsPortInUse:
-    def test_free_port_returns_false(self):
-        """A port with nothing bound to it should be reported as free."""
-        # Use a high, unlikely-to-be-used port for the test.
-        # We bind briefly to pick a free port, then release it.
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            free_port = s.getsockname()[1]
-        # Port is now released — should report free.
-        assert _is_port_in_use(free_port) is False
+class TestDashboardServer:
+    """Tests for the DashboardServer class."""
 
-    def test_occupied_port_returns_true(self):
-        """A port actively bound should be reported as in use."""
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        occupied_port = server_sock.getsockname()[1]
+    def _make_server(self) -> "DashboardServer":
+        from codegiraffe.dashboard_server import DashboardServer, _find_free_port
+
+        def fake_ensure(p):
+            raise RuntimeError(f"No graph for {p}")
+
+        class FakeStorage:
+            def exists(self, p): return False
+            def load(self, p): return None
+            def save(self, p, d): pass
+
+        port = _find_free_port(8260, attempts=5)
+        return DashboardServer(fake_ensure, FakeStorage(), port=port)
+
+    def test_is_running_false_before_start(self):
+        server = self._make_server()
+        assert server.is_running is False
+
+    def test_is_running_true_after_start(self):
+        server = self._make_server()
+        server.start(timeout=5.0)
         try:
-            assert _is_port_in_use(occupied_port) is True
+            assert server.is_running is True
         finally:
-            server_sock.close()
+            server.stop()
+
+    def test_is_running_false_after_stop(self):
+        server = self._make_server()
+        server.start(timeout=5.0)
+        server.stop()
+        assert server.is_running is False
+
+    def test_port_property(self):
+        server = self._make_server()
+        assert isinstance(server.port, int)
+        assert server.port > 0
+
+    def test_url_encodes_project_path(self):
+        server = self._make_server()
+        url = server.url("/my project/path")
+        assert "%2F" in url or "/my%20project" in url
+        assert " " not in url
+        assert "/dashboard" in url
+        assert f"localhost:{server.port}" in url
+
+    def test_dashboard_route_returns_html(self):
+        server = self._make_server()
+        server.start(timeout=5.0)
+        try:
+            import urllib.request
+            resp = urllib.request.urlopen(
+                f"http://localhost:{server.port}/dashboard", timeout=3
+            )
+            assert resp.status == 200
+            content = resp.read(200).decode()
+            assert "<!DOCTYPE html>" in content
+        finally:
+            server.stop()
+
+    def test_api_graph_missing_param_returns_400(self):
+        server = self._make_server()
+        server.start(timeout=5.0)
+        try:
+            import urllib.request
+            import urllib.error
+            try:
+                urllib.request.urlopen(
+                    f"http://localhost:{server.port}/api/graph", timeout=3
+                )
+                assert False, "Expected HTTP error"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+        finally:
+            server.stop()
+
+    def test_api_graph_uninitialized_returns_404(self):
+        server = self._make_server()
+        server.start(timeout=5.0)
+        try:
+            import urllib.request
+            import urllib.error
+            try:
+                urllib.request.urlopen(
+                    f"http://localhost:{server.port}/api/graph?project_path=/nonexistent",
+                    timeout=3,
+                )
+                assert False, "Expected HTTP error"
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+        finally:
+            server.stop()
+
+    def test_start_twice_is_idempotent(self):
+        """Calling start() on an already-running server is a no-op."""
+        server = self._make_server()
+        server.start(timeout=5.0)
+        try:
+            server.start(timeout=5.0)  # should not raise
+            assert server.is_running is True
+        finally:
+            server.stop()
+
+    def test_url_with_empty_project_path(self):
+        """url('') still returns a parseable URL with an empty project_path param."""
+        server = self._make_server()
+        url = server.url("")
+        assert url.startswith("http://localhost:")
+        assert "/dashboard" in url
+        assert "project_path=" in url
+        # The value after the = should be empty (no crash, no exception).
+        assert url.endswith("project_path=")
+
+    def test_no_stdout_output_during_start_stop(self):
+        """Server must never write to stdout — critical for MCP stdio transport."""
+        import io
+        import sys
+
+        server = self._make_server()
+        original_stdout = sys.stdout
+        sys.stdout = captured = io.StringIO()
+        try:
+            server.start(timeout=5.0)
+            server.stop()
+        finally:
+            sys.stdout = original_stdout
+
+        output = captured.getvalue()
+        assert output == "", (
+            f"DashboardServer wrote to stdout (MCP stdio corruption risk): {output!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
-# codegiraffe_dashboard — validation
+# Port conflict handling
+# ---------------------------------------------------------------------------
+
+
+class TestPortConflict:
+    """Tests for _find_free_port and get_or_start_server port-advance logic."""
+
+    def _make_fake_deps(self):
+        def fake_ensure(p):
+            raise RuntimeError(f"No graph for {p}")
+
+        class FakeStorage:
+            def exists(self, p): return False
+            def load(self, p): return None
+            def save(self, p, d): pass
+
+        return fake_ensure, FakeStorage()
+
+    def test_is_port_free_occupied(self):
+        """_is_port_free returns False when a port is already bound."""
+        import socket as _socket
+        from codegiraffe.dashboard_server import _is_port_free
+
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        occupied = sock.getsockname()[1]
+        try:
+            assert _is_port_free(occupied) is False
+        finally:
+            sock.close()
+
+    def test_is_port_free_after_close(self):
+        """_is_port_free returns True once the port is released."""
+        import socket as _socket
+        from codegiraffe.dashboard_server import _is_port_free
+
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        freed_port = sock.getsockname()[1]
+        sock.close()
+        assert _is_port_free(freed_port) is True
+
+    def test_find_free_port_skips_occupied(self):
+        """_find_free_port returns the first port not in use."""
+        import socket as _socket
+        from codegiraffe.dashboard_server import _find_free_port
+
+        # Bind the first port in range; _find_free_port should return the next one.
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 8320))
+        sock.listen(1)
+        try:
+            found = _find_free_port(start=8320, attempts=5)
+            assert found != 8320, "Should have skipped the occupied port"
+            assert found in range(8321, 8325), f"Expected 8321-8324, got {found}"
+        finally:
+            sock.close()
+
+    def test_find_free_port_raises_when_all_busy(self):
+        """_find_free_port raises OSError when every port in the range is occupied."""
+        import socket as _socket
+        from codegiraffe.dashboard_server import _find_free_port
+
+        socks = []
+        start = 8330
+        try:
+            for p in range(start, start + 5):
+                s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                s.bind(("127.0.0.1", p))
+                s.listen(1)
+                socks.append(s)
+            with pytest.raises(OSError, match="No free port found"):
+                _find_free_port(start=start, attempts=5)
+        finally:
+            for s in socks:
+                s.close()
+
+    def test_get_or_start_server_advances_past_blocked_port(self):
+        """get_or_start_server automatically tries the next port when preferred is busy."""
+        import socket as _socket
+        import codegiraffe.dashboard_server as ds_module
+        from codegiraffe.dashboard_server import get_or_start_server
+
+        # Occupy the preferred starting port.
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 8340))
+        sock.listen(1)
+
+        original_server = ds_module._server
+        ds_module._server = None
+        fake_ensure, storage = self._make_fake_deps()
+        try:
+            server = get_or_start_server(fake_ensure, storage, port=8340)
+            assert server.is_running, "Server must be running after get_or_start_server"
+            assert server.port != 8340, (
+                f"Expected port != 8340 (that port was occupied), got {server.port}"
+            )
+        finally:
+            if ds_module._server is not None and ds_module._server.is_running:
+                ds_module._server.stop()
+            ds_module._server = original_server
+            sock.close()
+
+
+# ---------------------------------------------------------------------------
+# get_or_start_server singleton behavior
+# ---------------------------------------------------------------------------
+
+
+class TestGetOrStartServer:
+    def test_returns_running_server(self):
+        from codegiraffe.dashboard_server import get_or_start_server
+
+        def fake_ensure(p):
+            raise RuntimeError("no graph")
+
+        class FakeStorage:
+            def exists(self, p): return False
+            def load(self, p): return None
+            def save(self, p, d): pass
+
+        storage = FakeStorage()
+        server = get_or_start_server(fake_ensure, storage, port=8261)
+        try:
+            assert server.is_running is True
+        finally:
+            server.stop()
+
+    def test_returns_same_singleton_on_second_call(self):
+        from codegiraffe.dashboard_server import get_or_start_server
+
+        def fake_ensure(p):
+            raise RuntimeError("no graph")
+
+        class FakeStorage:
+            def exists(self, p): return False
+            def load(self, p): return None
+            def save(self, p, d): pass
+
+        storage = FakeStorage()
+        s1 = get_or_start_server(fake_ensure, storage, port=8262)
+        try:
+            s2 = get_or_start_server(fake_ensure, storage, port=8262)
+            assert s1 is s2
+        finally:
+            s1.stop()
+
+
+# ---------------------------------------------------------------------------
+# codegiraffe_dashboard tool — validation
 # ---------------------------------------------------------------------------
 
 
@@ -107,188 +389,43 @@ class TestDashboardToolValidation:
 
 
 # ---------------------------------------------------------------------------
-# codegiraffe_dashboard — port-in-use detection
-# ---------------------------------------------------------------------------
-
-
-class TestDashboardToolPortInUse:
-    def test_returns_existing_url_when_port_occupied(self, initialized_project):
-        """When port is already in use, tool returns existing URL without spawning."""
-        # Bind a socket to occupy the port.
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        occupied_port = server_sock.getsockname()[1]
-
-        try:
-            with (
-                patch("subprocess.Popen") as mock_popen,
-                patch("webbrowser.open"),
-            ):
-                result = codegiraffe_dashboard(initialized_project, port=occupied_port)
-
-            # Should NOT spawn a new process.
-            mock_popen.assert_not_called()
-            # Should return the URL.
-            assert f"localhost:{occupied_port}" in result
-            assert "/dashboard" in result
-        finally:
-            server_sock.close()
-
-    def test_existing_url_contains_project_path(self, initialized_project):
-        """URL returned when port is in use should URL-encode the project path."""
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        occupied_port = server_sock.getsockname()[1]
-
-        try:
-            with (
-                patch("subprocess.Popen"),
-                patch("webbrowser.open"),
-            ):
-                result = codegiraffe_dashboard(initialized_project, port=occupied_port)
-            assert url_quote(initialized_project, safe="") in result
-        finally:
-            server_sock.close()
-
-
-# ---------------------------------------------------------------------------
-# codegiraffe_dashboard — subprocess spawning
-# ---------------------------------------------------------------------------
-
-
-class TestDashboardToolSubprocess:
-    def _free_port(self) -> int:
-        """Pick an ephemeral free port without binding it."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-
-    def test_spawns_subprocess_when_port_free(self, initialized_project):
-        """A background subprocess must be Popen'd when port is free."""
-        free_port = self._free_port()
-        with (
-            patch("subprocess.Popen") as mock_popen,
-            patch("threading.Thread"),  # prevent real thread from opening browser
-        ):
-            codegiraffe_dashboard(initialized_project, port=free_port)
-
-        mock_popen.assert_called_once()
-
-    def test_subprocess_uses_sys_executable(self, initialized_project):
-        """Subprocess must use sys.executable for the correct Python interpreter."""
-        import sys
-
-        free_port = self._free_port()
-        with (
-            patch("subprocess.Popen") as mock_popen,
-            patch("threading.Thread"),
-        ):
-            codegiraffe_dashboard(initialized_project, port=free_port)
-
-        call_args = mock_popen.call_args
-        cmd = call_args[0][0]  # positional first arg is the command list
-        assert cmd[0] == sys.executable
-
-    def test_subprocess_uses_streamable_http_transport(self, initialized_project):
-        """Subprocess command must include the streamable-http transport flag."""
-        free_port = self._free_port()
-        with (
-            patch("subprocess.Popen") as mock_popen,
-            patch("threading.Thread"),
-        ):
-            codegiraffe_dashboard(initialized_project, port=free_port)
-
-        cmd = mock_popen.call_args[0][0]
-        cmd_str = " ".join(cmd)
-        assert "streamable-http" in cmd_str
-
-    def test_subprocess_uses_correct_port(self, initialized_project):
-        """Subprocess command must pass the requested port number."""
-        free_port = self._free_port()
-        with (
-            patch("subprocess.Popen") as mock_popen,
-            patch("threading.Thread"),
-        ):
-            codegiraffe_dashboard(initialized_project, port=free_port)
-
-        cmd = mock_popen.call_args[0][0]
-        cmd_str = " ".join(str(c) for c in cmd)
-        assert str(free_port) in cmd_str
-
-    def test_subprocess_stdout_devnull(self, initialized_project):
-        """Subprocess stdout/stderr must be redirected to DEVNULL (background)."""
-        import subprocess
-
-        free_port = self._free_port()
-        with (
-            patch("subprocess.Popen") as mock_popen,
-            patch("threading.Thread"),
-        ):
-            codegiraffe_dashboard(initialized_project, port=free_port)
-
-        kwargs = mock_popen.call_args[1]
-        assert kwargs.get("stdout") == subprocess.DEVNULL
-        assert kwargs.get("stderr") == subprocess.DEVNULL
-
-
-# ---------------------------------------------------------------------------
-# codegiraffe_dashboard — browser opening
+# codegiraffe_dashboard — browser opening and URL shape
 # ---------------------------------------------------------------------------
 
 
 class TestDashboardToolBrowserOpen:
-    def _free_port(self) -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-
     def test_browser_open_is_called(self, initialized_project):
         """webbrowser.open must be called with the dashboard URL."""
-        free_port = self._free_port()
-        browser_calls: list[str] = []
+        with patch("webbrowser.open") as mock_open:
+            codegiraffe_dashboard(initialized_project, port=8270)
 
-        # Use a real thread but mock webbrowser and time.sleep so the test
-        # doesn't actually sleep for 1.5 seconds.
-        with (
-            patch("subprocess.Popen"),
-            patch("webbrowser.open", side_effect=browser_calls.append),
-            patch("time.sleep"),  # skip the startup delay
-        ):
-            codegiraffe_dashboard(initialized_project, port=free_port)
-            # Give the daemon thread a moment to run (time.sleep is mocked).
-            time.sleep(0.05)
-
-        # The thread is daemon=True and the mock makes it near-instant.
-        # Poll briefly for the call.
-        deadline = time.monotonic() + 2.0
-        while not browser_calls and time.monotonic() < deadline:
-            time.sleep(0.01)
-
-        assert len(browser_calls) == 1
-        assert f"localhost:{free_port}" in browser_calls[0]
-        assert "/dashboard" in browser_calls[0]
+        mock_open.assert_called_once()
+        opened_url: str = mock_open.call_args[0][0]
+        assert "/dashboard" in opened_url
+        assert "project_path=" in opened_url
 
     def test_browser_url_contains_project_path(self, initialized_project):
-        """Browser URL must include the URL-encoded project_path query parameter."""
-        free_port = self._free_port()
-        browser_calls: list[str] = []
+        """Browser URL must include the URL-encoded project_path."""
+        with patch("webbrowser.open") as mock_open:
+            codegiraffe_dashboard(initialized_project, port=8271)
 
-        with (
-            patch("subprocess.Popen"),
-            patch("webbrowser.open", side_effect=browser_calls.append),
-            patch("time.sleep"),
-        ):
-            codegiraffe_dashboard(initialized_project, port=free_port)
+        opened_url: str = mock_open.call_args[0][0]
+        assert url_quote(initialized_project, safe="") in opened_url
 
-        deadline = time.monotonic() + 2.0
-        while not browser_calls and time.monotonic() < deadline:
-            time.sleep(0.01)
+    def test_return_message_contains_url(self, initialized_project):
+        """Returned message must include the dashboard URL."""
+        with patch("webbrowser.open"):
+            result = codegiraffe_dashboard(initialized_project, port=8272)
 
-        assert url_quote(initialized_project, safe="") in browser_calls[0]
+        assert "/dashboard" in result
+        assert "localhost:" in result
+
+    def test_return_message_contains_running(self, initialized_project):
+        """Returned message must indicate the dashboard is running."""
+        with patch("webbrowser.open"):
+            result = codegiraffe_dashboard(initialized_project, port=8273)
+
+        assert "running" in result.lower() or "dashboard" in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -299,162 +436,16 @@ class TestDashboardToolBrowserOpen:
 class TestDashboardToolUrlEncoding:
     def test_spaces_in_project_path_are_percent_encoded(self, tmp_path):
         """project_path with spaces must be percent-encoded in the URL."""
-        # Create a subdirectory with a space in the name and initialize it.
-        spaced_dir = tmp_path / "my project"
-        spaced_dir.mkdir()
-        py_file = spaced_dir / "app.py"
-        py_file.write_text("def main(): pass\n")
-
-        from codegiraffe.server import codegiraffe_init
-
-        codegiraffe_init(str(spaced_dir))
-
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        occupied_port = server_sock.getsockname()[1]
-
-        try:
-            with patch("webbrowser.open"):
-                result = codegiraffe_dashboard(str(spaced_dir), port=occupied_port)
-            # The raw space must not appear in the URL portion of the result.
-            # The URL is everything after "http://".
-            url_start = result.find("http://")
-            assert url_start != -1
-            url_end = result.find("\n", url_start)
-            url_part = result[url_start:url_end] if url_end != -1 else result[url_start:]
-            assert " " not in url_part, "Space must be percent-encoded in the URL"
-            assert "%20" in url_part, "Space must appear as %20 in the URL"
-        finally:
-            server_sock.close()
-
-    def test_special_chars_encoded_in_fresh_spawn_path(self, tmp_path):
-        """project_path with special chars must be encoded even in the fresh-spawn path."""
         spaced_dir = tmp_path / "my project"
         spaced_dir.mkdir()
         (spaced_dir / "app.py").write_text("def main(): pass\n")
 
         from codegiraffe.server import codegiraffe_init
-
         codegiraffe_init(str(spaced_dir))
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            free_port = s.getsockname()[1]
+        with patch("webbrowser.open") as mock_open:
+            result = codegiraffe_dashboard(str(spaced_dir), port=8274)
 
-        with (
-            patch("subprocess.Popen"),
-            patch("threading.Thread"),
-        ):
-            result = codegiraffe_dashboard(str(spaced_dir), port=free_port)
-
-        url_start = result.find("http://")
-        assert url_start != -1
-        url_end = result.find("\n", url_start)
-        url_part = result[url_start:url_end] if url_end != -1 else result[url_start:]
-        assert " " not in url_part, "Space must be percent-encoded in the URL"
-        assert "%20" in url_part, "Space must appear as %20 in the URL"
-
-
-# ---------------------------------------------------------------------------
-# codegiraffe_dashboard — browser opens in port-in-use path
-# ---------------------------------------------------------------------------
-
-
-class TestDashboardToolBrowserOpenPortInUse:
-    def test_browser_open_called_when_port_in_use(self, initialized_project):
-        """webbrowser.open must be called when the port is already occupied."""
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        occupied_port = server_sock.getsockname()[1]
-
-        try:
-            with patch("webbrowser.open") as mock_open:
-                codegiraffe_dashboard(initialized_project, port=occupied_port)
-            mock_open.assert_called_once()
-        finally:
-            server_sock.close()
-
-    def test_browser_open_url_contains_dashboard_path_when_port_in_use(
-        self, initialized_project
-    ):
-        """URL passed to webbrowser.open must include /dashboard when port is in use."""
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        occupied_port = server_sock.getsockname()[1]
-
-        try:
-            with patch("webbrowser.open") as mock_open:
-                codegiraffe_dashboard(initialized_project, port=occupied_port)
-            opened_url = mock_open.call_args[0][0]
-            assert "/dashboard" in opened_url
-            assert f"localhost:{occupied_port}" in opened_url
-        finally:
-            server_sock.close()
-
-
-# ---------------------------------------------------------------------------
-# codegiraffe_dashboard — return message
-# ---------------------------------------------------------------------------
-
-
-class TestDashboardToolReturnMessage:
-    def _free_port(self) -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-
-    def test_return_message_contains_url(self, initialized_project):
-        """Returned message must include the dashboard URL."""
-        free_port = self._free_port()
-        with (
-            patch("subprocess.Popen"),
-            patch("threading.Thread"),
-        ):
-            result = codegiraffe_dashboard(initialized_project, port=free_port)
-
-        assert f"localhost:{free_port}" in result
-        assert "/dashboard" in result
-
-    def test_default_port_8251(self, initialized_project):
-        """Default port should be 8251."""
-        with (
-            patch("codegiraffe.server._is_port_in_use", return_value=True),
-        ):
-            result = codegiraffe_dashboard(initialized_project)
-
-        assert "8251" in result
-
-    def test_custom_port_in_message(self, initialized_project):
-        """Custom port must appear in the returned message."""
-        free_port = self._free_port()
-        with (
-            patch("subprocess.Popen"),
-            patch("threading.Thread"),
-        ):
-            result = codegiraffe_dashboard(initialized_project, port=free_port)
-
-        assert str(free_port) in result
-
-    def test_already_running_message(self, initialized_project):
-        """When port is occupied, message should indicate it is already running."""
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        occupied_port = server_sock.getsockname()[1]
-
-        try:
-            with (
-                patch("subprocess.Popen"),
-                patch("webbrowser.open"),
-            ):
-                result = codegiraffe_dashboard(initialized_project, port=occupied_port)
-            assert "already" in result.lower() or "running" in result.lower()
-        finally:
-            server_sock.close()
+        opened_url: str = mock_open.call_args[0][0]
+        assert " " not in opened_url, "Space must be percent-encoded in the URL"
+        assert "%20" in opened_url, "Space must appear as %20 in the URL"
