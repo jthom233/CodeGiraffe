@@ -331,11 +331,13 @@ body {
       });
     });
     (d3Data.links || []).forEach(e => {
+      const conf = (typeof e.confidence === 'number') ? e.confidence : 1.0;
       elements.push({
         group: 'edges',
         data: {
           id: e.source + '-' + e.target + '-' + e.type,
-          source: e.source, target: e.target, type: e.type || ''
+          source: e.source, target: e.target, type: e.type || '',
+          confidence: conf
         }
       });
     });
@@ -391,7 +393,11 @@ body {
             'font-size': '8px',
             'color': '#556',
             'text-rotation': 'autorotate',
-            'text-margin-y': -8
+            'text-margin-y': -8,
+            'opacity': function(ele) {
+              const conf = ele.data('confidence');
+              return (typeof conf === 'number') ? Math.max(0.3, conf) : 1.0;
+            }
           }
         },
         {
@@ -495,6 +501,24 @@ body {
             'target-arrow-color': '#9E9E9E',
             'line-style': 'dashed',
             'width': 1
+          }
+        },
+        {
+          selector: 'node[?metadata]',
+          style: {
+            'border-width': function(ele) {
+              const meta = ele.data('metadata') || {};
+              return meta.owner ? 3 : 2;
+            },
+            'border-color': function(ele) {
+              const meta = ele.data('metadata') || {};
+              if (!meta.owner) return '#0f3460';
+              const stability = meta.stability;
+              if (stability === 'deprecated') return '#E74C3C';
+              if (stability === 'experimental') return '#F39C12';
+              if (stability === 'legacy') return '#95A5A6';
+              return '#27AE60';
+            }
           }
         }
       ],

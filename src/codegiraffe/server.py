@@ -284,6 +284,7 @@ def codegiraffe_context_for(
     include_changes: bool = False,
     token_budget: int = 0,
     detail_level: str = "standard",
+    min_confidence: float = 0.0,
 ) -> str:
     """Get the most relevant subgraph for a natural-language task description.
 
@@ -309,6 +310,12 @@ def codegiraffe_context_for(
     - ``"standard"`` — id, type, label + metadata (default)
     - ``"detailed"`` — full node data including file_path
 
+    When *min_confidence* > 0, edges with confidence below this threshold are
+    excluded from the result.  Useful for filtering out low-certainty inferred
+    edges (e.g. contract inference at 0.5) and retaining only stronger signals.
+    Confidence levels: contains=1.0, import/AST=0.9, call/inheritance=0.8,
+    interface satisfaction=0.7, contract inference=0.5.
+
     The response includes ``_token_estimate`` showing total estimated tokens
     and ``_retrieval_strategy`` showing the classified task intent used to
     steer retrieval (one of: ``create``, ``debug``, ``refactor``, ``delete``,
@@ -326,6 +333,7 @@ def codegiraffe_context_for(
             use_embeddings=use_embeddings,
             token_budget=token_budget,
             detail_level=detail_level,
+            min_confidence=min_confidence,
         )
 
         if include_impact:
@@ -857,6 +865,90 @@ def codegiraffe_add_contract(
 
 
 # ---------------------------------------------------------------------------
+# Ownership and annotation tools (v0.12.0)
+# ---------------------------------------------------------------------------
+
+_VALID_STABILITY_VALUES = {"stable", "experimental", "deprecated", "legacy"}
+
+
+@mcp.tool()
+def codegiraffe_annotate(
+    project_path: str,
+    node_id: str,
+    owner: str | None = None,
+    stability: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Annotate a graph node with ownership and stability information.
+
+    Sets one or more of the following metadata fields on the target node:
+
+    - *owner*: Team or person responsible for this component (e.g. ``"@auth-team"``).
+    - *stability*: Stability classification — one of ``"stable"``,
+      ``"experimental"``, ``"deprecated"``, or ``"legacy"``.
+    - *notes*: Free-form text notes about this component.
+
+    Annotations are preserved across rescans and persist in graph storage.
+    At least one of *owner*, *stability*, or *notes* must be provided.
+
+    Parameters
+    ----------
+    project_path:
+        Root directory of the project.
+    node_id:
+        ID of the node to annotate.
+    owner:
+        Team or individual owner string (e.g. ``"@auth-team"``).
+    stability:
+        Stability level: ``"stable"``, ``"experimental"``, ``"deprecated"``, or ``"legacy"``.
+    notes:
+        Free-form notes about this node.
+    """
+    try:
+        if stability is not None and stability not in _VALID_STABILITY_VALUES:
+            return (
+                f"Error: invalid stability '{stability}'. "
+                f"Must be one of: {', '.join(sorted(_VALID_STABILITY_VALUES))}"
+            )
+
+        graph = _ensure_graph(project_path)
+
+        if node_id not in graph.graph:
+            candidates = list(graph.graph.nodes)
+            msg = f"Error: node '{node_id}' not found in graph."
+            return msg
+
+        node = graph.graph.nodes[node_id].get("node")
+        if node is None:
+            return f"Error: node '{node_id}' has no data."
+
+        # Apply annotations — only update fields that were provided
+        if owner is not None:
+            node.metadata["owner"] = owner
+        if stability is not None:
+            node.metadata["stability"] = stability
+        if notes is not None:
+            node.metadata["notes"] = notes
+
+        # Persist updated graph
+        _storage.save(project_path, graph.to_data())
+
+        updated_fields = [
+            f
+            for f, v in [("owner", owner), ("stability", stability), ("notes", notes)]
+            if v is not None
+        ]
+        if not updated_fields:
+            return f"No fields provided to annotate on '{node_id}'."
+
+        return (
+            f"Annotated node '{node_id}' with: {', '.join(updated_fields)}"
+        )
+    except Exception as exc:
+        return f"Error annotating node: {exc}"
+
+
+# ---------------------------------------------------------------------------
 # Change impact validation tools (v0.10.0)
 # ---------------------------------------------------------------------------
 
@@ -1212,6 +1304,67 @@ def codegiraffe_sync(project_path: str, include_tests: bool = False) -> str:
         )
     except Exception as exc:
         return f"Error syncing graph: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_sync_files(
+    project_path: str,
+    file_paths: str,
+    scanner_mode: str = "regex",
+) -> str:
+    """Incrementally sync specific changed files in the architecture graph.
+
+    Instead of re-scanning the entire project, only rescans the files listed
+    in *file_paths*.  Non-manual nodes and outgoing edges from each listed
+    file are removed and replaced with freshly scanned content.  Manual
+    annotations survive the sync.  Files that no longer exist are handled
+    as deletions (their nodes/edges are removed).
+
+    Parameters
+    ----------
+    project_path:
+        Absolute path to the project root (must already be initialized with
+        ``codegiraffe_init``).
+    file_paths:
+        Files to re-scan.  Accepts either a JSON array of absolute paths
+        (e.g. ``["path/a.py","path/b.py"]``) or a comma-separated string
+        (e.g. ``"path/a.py,path/b.py"``).
+    scanner_mode:
+        Scanner strategy — ``"regex"`` (default) or ``"ast"``.
+
+    Returns
+    -------
+    str
+        JSON string with keys ``added``, ``removed``, and ``preserved``,
+        each containing ``nodes`` and ``edges`` counts.
+    """
+    global _graph  # noqa: PLW0603
+
+    try:
+        from codegiraffe.scanner import sync_files
+
+        # Parse file_paths: accept JSON array or comma-separated string
+        if file_paths.strip().startswith("["):
+            paths = json.loads(file_paths)
+        else:
+            paths = [p.strip() for p in file_paths.split(",") if p.strip()]
+
+        graph = _ensure_graph(project_path)
+
+        summary = sync_files(
+            graph=graph,
+            project_path=project_path,
+            file_paths=paths,
+            scanner_mode=scanner_mode,
+        )
+
+        # Persist updated graph
+        _storage.save(project_path, graph.to_data())
+
+        return json.dumps(summary)
+
+    except Exception as exc:
+        return f"Error in incremental sync: {exc}"
 
 
 @mcp.tool()

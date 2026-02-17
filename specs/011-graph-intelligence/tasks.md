@@ -147,7 +147,7 @@
 
 **Purpose**: Add `confidence` field to Edge model — foundational for US3 and affects all downstream tools.
 
-- [ ] T031 Add `confidence: float = 1.0` field to `Edge` Pydantic model in `src/codegiraffe/graph.py` — default 1.0 ensures backward compatibility with existing stored graphs (Pydantic `model_validate` auto-fills default)
+- [x] T031 Add `confidence: float = 1.0` field to `Edge` Pydantic model in `src/codegiraffe/graph.py` — default 1.0 ensures backward compatibility with existing stored graphs (Pydantic `model_validate` auto-fills default)
 
 **Checkpoint**: Edge model updated — all existing tests still pass (default confidence = 1.0 is backward compatible).
 
@@ -161,16 +161,16 @@
 
 ### Tests for US3
 
-- [ ] T032 [P] [US3] Write confidence assignment tests in `tests/test_confidence.py`: test AST-parsed import edge gets confidence 1.0; test regex import edge gets 0.9; test call-graph direct match gets 0.8; test call-graph fallback gets 0.6; test interface satisfaction gets 0.7; test contract inference gets 0.5; test manual edge gets 1.0; test cross-file inference gets 0.8
-- [ ] T033 [P] [US3] Write confidence filtering tests in `tests/test_confidence.py`: test `context_for` with `min_confidence=0.8` excludes edges below 0.8; test `min_confidence=0.0` (default) includes all edges; test `min_confidence=1.0` only includes AST and manual edges
-- [ ] T034 [P] [US3] Write confidence-weighted impact tests in `tests/test_confidence.py`: test `blast_radius` with high-confidence path produces higher severity than same path at low confidence; test backward compatibility — loading graph with no confidence field defaults edges to 1.0
+- [x] T032 [P] [US3] Write confidence assignment tests in `tests/test_confidence.py`: test AST-parsed import edge gets confidence 1.0; test regex import edge gets 0.9; test call-graph direct match gets 0.8; test call-graph fallback gets 0.6; test interface satisfaction gets 0.7; test contract inference gets 0.5; test manual edge gets 1.0; test cross-file inference gets 0.8
+- [x] T033 [P] [US3] Write confidence filtering tests in `tests/test_confidence.py`: test `context_for` with `min_confidence=0.8` excludes edges below 0.8; test `min_confidence=0.0` (default) includes all edges; test `min_confidence=1.0` only includes AST and manual edges
+- [x] T034 [P] [US3] Write confidence-weighted impact tests in `tests/test_confidence.py`: test `blast_radius` with high-confidence path produces higher severity than same path at low confidence; test backward compatibility — loading graph with no confidence field defaults edges to 1.0
 
 ### Implementation for US3
 
-- [ ] T035 [US3] Update scanner pipeline functions in `src/codegiraffe/scanner.py` to assign confidence values: `_infer_import_edges()` → 0.9 (regex) or 1.0 (AST via ast_scanner); `_infer_call_edges()` → 0.8 (direct) or 0.6 (fallback); `_infer_interface_satisfaction()` → 0.7; `_infer_contract_edges()` → 0.5; inheritance regex → 0.8; contains edges → 1.0
-- [ ] T036 [US3] Add `min_confidence: float = 0.0` parameter to `context_for_task()` in `src/codegiraffe/query.py` — filter edges below threshold before subgraph extraction; update `codegiraffe_context_for` in `src/codegiraffe/server.py` with new parameter
-- [ ] T037 [US3] Update `compute_blast_radius()` in `src/codegiraffe/query.py` to weight impact severity by edge confidence — multiply severity score by confidence of the traversed edge; low-confidence paths produce lower severity ratings. **Note**: T044 (US4) also modifies this function to add cross-team impact — T044 must build on T037's changes.
-- [ ] T038 [US3] Add confidence-based edge opacity to `src/codegiraffe/dashboard.py` — edge opacity = max(0.3, confidence); update edge style generation to include opacity
+- [x] T035 [US3] Update scanner pipeline functions in `src/codegiraffe/scanner.py` to assign confidence values: `_infer_import_edges()` → 0.9 (regex) or 1.0 (AST via ast_scanner); `_infer_call_edges()` → 0.8 (direct) or 0.6 (fallback); `_infer_interface_satisfaction()` → 0.7; `_infer_contract_edges()` → 0.5; inheritance regex → 0.8; contains edges → 1.0
+- [x] T036 [US3] Add `min_confidence: float = 0.0` parameter to `context_for_task()` in `src/codegiraffe/query.py` — filter edges below threshold before subgraph extraction; update `codegiraffe_context_for` in `src/codegiraffe/server.py` with new parameter
+- [x] T037 [US3] Update `compute_blast_radius()` in `src/codegiraffe/query.py` to weight impact severity by edge confidence — multiply severity score by confidence of the traversed edge; low-confidence paths produce lower severity ratings. **Note**: T044 (US4) also modifies this function to add cross-team impact — T044 must build on T037's changes.
+- [x] T038 [US3] Add confidence-based edge opacity to `src/codegiraffe/dashboard.py` — edge opacity = max(0.3, confidence); update edge style generation to include opacity
 
 **Checkpoint**: US3 complete — all edges have confidence scores, filtering and weighted impact work. All tests pass.
 
@@ -184,15 +184,15 @@
 
 ### Tests for US4
 
-- [ ] T039 [P] [US4] Write CODEOWNERS parsing tests in `tests/test_ownership.py`: test `parse_codeowners()` with standard CODEOWNERS format; test gitignore-style pattern matching maps files to owners; test most specific rule wins (last match); test missing CODEOWNERS returns empty mapping
-- [ ] T040 [P] [US4] Write annotation tests in `tests/test_ownership.py`: test `codegiraffe_annotate` sets owner, stability, notes on a node; test annotations persist in node metadata; test `context_for` results include ownership annotations; test `stability=deprecated` visible in response
-- [ ] T041 [P] [US4] Write cross-team impact and contract tests in `tests/test_ownership.py`: test `blast_radius` flags nodes with different `owner` than changed node as cross-team impact; test cross-team report includes owner names; test nodes without ownership annotation are not flagged; contract test: verify `codegiraffe_annotate` tool accepts required params (project_path, node_id) and optional params (owner, stability, notes) and returns confirmation JSON
+- [x] T039 [P] [US4] Write CODEOWNERS parsing tests in `tests/test_ownership.py`: test `parse_codeowners()` with standard CODEOWNERS format; test gitignore-style pattern matching maps files to owners; test most specific rule wins (last match); test missing CODEOWNERS returns empty mapping
+- [x] T040 [P] [US4] Write annotation tests in `tests/test_ownership.py`: test `codegiraffe_annotate` sets owner, stability, notes on a node; test annotations persist in node metadata; test `context_for` results include ownership annotations; test `stability=deprecated` visible in response
+- [x] T041 [P] [US4] Write cross-team impact and contract tests in `tests/test_ownership.py`: test `blast_radius` flags nodes with different `owner` than changed node as cross-team impact; test cross-team report includes owner names; test nodes without ownership annotation are not flagged; contract test: verify `codegiraffe_annotate` tool accepts required params (project_path, node_id) and optional params (owner, stability, notes) and returns confirmation JSON
 
 ### Implementation for US4
 
-- [ ] T042 [US4] Create `src/codegiraffe/ownership.py` — implement `parse_codeowners(project_path: str) -> dict[str, str]` mapping file patterns to owners using gitignore-style matching; implement `infer_ownership_from_blame(project_path: str, file_path: str) -> str` returning most frequent committer via `git log --format=%an`; implement `map_ownership_to_nodes(graph: ArchGraph, ownership: dict)` setting `owner` metadata on nodes
-- [ ] T043 [US4] Add `codegiraffe_annotate` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `node_id` (required), `owner` (optional), `stability` (optional: stable/experimental/deprecated/legacy), `notes` (optional); update node metadata directly
-- [ ] T044 [US4] Update `compute_blast_radius()` in `src/codegiraffe/query.py` to include `cross_team_impact` in result — when annotated nodes have different `owner` than the changed node, flag them in a separate list; add ownership badge overlay to `src/codegiraffe/dashboard.py`
+- [x] T042 [US4] Create `src/codegiraffe/ownership.py` — implement `parse_codeowners(project_path: str) -> dict[str, str]` mapping file patterns to owners using gitignore-style matching; implement `infer_ownership_from_blame(project_path: str, file_path: str) -> str` returning most frequent committer via `git log --format=%an`; implement `map_ownership_to_nodes(graph: ArchGraph, ownership: dict)` setting `owner` metadata on nodes
+- [x] T043 [US4] Add `codegiraffe_annotate` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `node_id` (required), `owner` (optional), `stability` (optional: stable/experimental/deprecated/legacy), `notes` (optional); update node metadata directly
+- [x] T044 [US4] Update `compute_blast_radius()` in `src/codegiraffe/query.py` to include `cross_team_impact` in result — when annotated nodes have different `owner` than the changed node, flag them in a separate list; add ownership badge overlay to `src/codegiraffe/dashboard.py`
 
 **Checkpoint**: US4 complete — ownership annotations and cross-team impact flagging work. All tests pass.
 
@@ -206,13 +206,13 @@
 
 ### Tests for US6
 
-- [ ] T045 [P] [US6] Write incremental sync tests in `tests/test_incremental_sync.py`: test `sync_files()` with single changed file only rescans that file; test old edges from changed file removed before new edges added; test deleted file removes all its nodes and edges; test manual annotations on synced nodes are preserved
-- [ ] T046 [P] [US6] Write edge invalidation and contract tests in `tests/test_incremental_sync.py`: test new import edges added without duplicating existing; test modified file with new function adds new node without losing siblings; test edge from non-synced file to synced file is preserved (only source-file edges invalidated); contract test: verify `codegiraffe_sync_files` tool accepts required params (project_path, file_paths) and returns summary JSON with added/removed/preserved counts
+- [x] T045 [P] [US6] Write incremental sync tests in `tests/test_incremental_sync.py`: test `sync_files()` with single changed file only rescans that file; test old edges from changed file removed before new edges added; test deleted file removes all its nodes and edges; test manual annotations on synced nodes are preserved
+- [x] T046 [P] [US6] Write edge invalidation and contract tests in `tests/test_incremental_sync.py`: test new import edges added without duplicating existing; test modified file with new function adds new node without losing siblings; test edge from non-synced file to synced file is preserved (only source-file edges invalidated); contract test: verify `codegiraffe_sync_files` tool accepts required params (project_path, file_paths) and returns summary JSON with added/removed/preserved counts
 
 ### Implementation for US6
 
-- [ ] T047 [US6] Implement `sync_files(graph: ArchGraph, project_path: str, file_paths: list[str], scanner_mode: str = "regex") -> dict` in `src/codegiraffe/scanner.py` — for each file: find all nodes with matching `file_path`, collect non-manual edges where source or target is one of those nodes, remove those edges, remove non-manual nodes from that file, rescan the file, re-add nodes and edges, re-run inference stages (`_infer_import_edges`, `_infer_call_edges`, etc.) for just those files; for deleted files: remove all nodes and edges originating from that file
-- [ ] T048 [US6] Add `codegiraffe_sync_files` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `file_paths` (required, JSON array or comma-separated list), `scanner_mode` (optional, default "regex"); call `sync_files()`; return summary of nodes/edges added, removed, preserved
+- [x] T047 [US6] Implement `sync_files(graph: ArchGraph, project_path: str, file_paths: list[str], scanner_mode: str = "regex") -> dict` in `src/codegiraffe/scanner.py` — for each file: find all nodes with matching `file_path`, collect non-manual edges where source or target is one of those nodes, remove those edges, remove non-manual nodes from that file, rescan the file, re-add nodes and edges, re-run inference stages (`_infer_import_edges`, `_infer_call_edges`, etc.) for just those files; for deleted files: remove all nodes and edges originating from that file
+- [x] T048 [US6] Add `codegiraffe_sync_files` tool in `src/codegiraffe/server.py` — parameters: `project_path` (required), `file_paths` (required, JSON array or comma-separated list), `scanner_mode` (optional, default "regex"); call `sync_files()`; return summary of nodes/edges added, removed, preserved
 
 **Checkpoint**: US6 complete — incremental sync works. All tests pass.
 
@@ -220,9 +220,9 @@
 
 ## Phase 11: v0.12.0 Polish & Cross-Cutting
 
-- [ ] T049 Run full test suite and verify all existing + new ~42 tests pass
-- [ ] T050 Update version to `0.12.0` in `src/codegiraffe/__init__.py` and `pyproject.toml`
-- [ ] T051 Update `README.md` with `codegiraffe_annotate`, `codegiraffe_sync_files` tools and confidence scoring docs
+- [x] T049 Run full test suite and verify all existing + new ~42 tests pass
+- [x] T050 Update version to `0.12.0` in `src/codegiraffe/__init__.py` and `pyproject.toml`
+- [x] T051 Update `README.md` with `codegiraffe_annotate`, `codegiraffe_sync_files` tools and confidence scoring docs
 
 **Checkpoint**: v0.12.0 release-ready — 31 MCP tools, ~1078 tests passing.
 

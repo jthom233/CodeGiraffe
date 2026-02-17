@@ -104,6 +104,42 @@ def _compute_severity(distance: int) -> str:
         return "indirect"
 
 
+def _compute_severity_with_confidence(distance: int, path_confidence: float) -> str:
+    """Map hop distance to a severity tier, downgraded for low-confidence paths.
+
+    When the minimum edge confidence along the path to a downstream node is
+    below 0.6, the severity is prefixed with ``"uncertain_"`` to indicate the
+    impact is plausible but not strongly supported by evidence.
+
+    - ``"direct"`` / ``"uncertain_direct"`` for distance 1
+    - ``"transitive"`` / ``"uncertain_transitive"`` for distances 2-3
+    - ``"indirect"`` / ``"uncertain_indirect"`` for distance > 3
+    """
+    base = _compute_severity(distance)
+    if path_confidence < 0.6:
+        return f"uncertain_{base}"
+    return base
+
+
+def _path_min_confidence(graph_nx: Any, path: list[str]) -> float:
+    """Return the minimum edge confidence along a path of node IDs.
+
+    Walks consecutive pairs in *path*, looks up the edge data in *graph_nx*,
+    and returns the minimum confidence found.  Returns 1.0 for empty paths
+    or single-node paths (no edges to traverse).
+    """
+    if len(path) < 2:
+        return 1.0
+    min_conf = 1.0
+    for i in range(len(path) - 1):
+        src, tgt = path[i], path[i + 1]
+        edge_data = graph_nx.edges.get((src, tgt), {})
+        edge_obj = edge_data.get("edge")
+        if edge_obj is not None:
+            min_conf = min(min_conf, edge_obj.confidence)
+    return min_conf
+
+
 def _detect_git_renames(project_path: str, since: str | None = None) -> dict[str, str]:
     """Use git diff to find renamed files since the last scan.
 
@@ -419,6 +455,7 @@ def context_for_task(
     use_embeddings: bool = True,
     token_budget: int = 0,
     detail_level: str = "standard",
+    min_confidence: float = 0.0,
 ) -> GraphData:
     """Return the subgraph most relevant to a natural-language *task* description.
 
@@ -440,6 +477,7 @@ def context_for_task(
        (total estimated tokens for the result).
     9. Classify task intent and apply intent-specific retrieval boosting.
     10. Annotate the returned :class:`GraphData` with ``_retrieval_strategy``.
+    11. If ``min_confidence > 0``, edges below the threshold are excluded.
 
     Returns an empty :class:`GraphData` when no node scores above zero.
     """
@@ -455,6 +493,10 @@ def context_for_task(
 
     # Apply intent-specific retrieval strategy on top of base scoring
     result = _apply_intent_strategy(graph, result, task, intent, max_nodes)
+
+    # Apply confidence filtering if requested
+    if min_confidence > 0.0:
+        result.edges = [e for e in result.edges if e.confidence >= min_confidence]
 
     # Apply token_budget constraint if requested
     if token_budget > 0 and result.nodes:
@@ -973,6 +1015,64 @@ def _compute_contract_impact(graph: ArchGraph, node_id: str) -> list[dict[str, A
     return impact
 
 
+def _compute_cross_team_impact(
+    graph: ArchGraph,
+    node_id: str,
+    downstream: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Identify downstream nodes owned by a different team than *node_id*.
+
+    Compares the ``owner`` metadata field of *node_id* against each node in
+    *downstream*.  Only nodes that have an explicit ``owner`` annotation that
+    differs from the changed node's owner are flagged.
+
+    Nodes without an owner annotation (on either side) are NOT included.
+
+    Parameters
+    ----------
+    graph:
+        The architecture graph.
+    node_id:
+        The ID of the changed node.
+    downstream:
+        The downstream impact list from :func:`compute_blast_radius`.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        List of cross-team impact entries, each with ``node_id``, ``owner``,
+        ``changed_node_owner``, ``label``, ``type``, and ``distance``.
+    """
+    changed_node_data = graph.graph.nodes.get(node_id, {}).get("node")
+    if changed_node_data is None:
+        return []
+
+    changed_owner = changed_node_data.metadata.get("owner")
+    # If the changed node has no owner, we cannot detect cross-team impact
+    if not changed_owner:
+        return []
+
+    cross_team: list[dict[str, Any]] = []
+    for item in downstream:
+        desc_id = item["node_id"]
+        desc_node = graph.graph.nodes.get(desc_id, {}).get("node")
+        if desc_node is None:
+            continue
+        desc_owner = desc_node.metadata.get("owner")
+        # Only flag if the downstream node has an owner that differs
+        if desc_owner and desc_owner != changed_owner:
+            cross_team.append({
+                "node_id": desc_id,
+                "label": desc_node.label,
+                "type": desc_node.type,
+                "distance": item["distance"],
+                "owner": desc_owner,
+                "changed_node_owner": changed_owner,
+            })
+
+    return cross_team
+
+
 def compute_blast_radius(
     graph: ArchGraph,
     node_id: str,
@@ -1037,13 +1137,16 @@ def compute_blast_radius(
         desc_node = graph.graph.nodes[desc_id].get("node")
         if desc_node is None:
             continue
+        path = paths.get(desc_id, [])
+        path_conf = _path_min_confidence(graph.graph, path)
         downstream.append({
             "node_id": desc_id,
             "label": desc_node.label,
             "type": desc_node.type,
             "distance": dist,
-            "severity": _compute_severity(dist),
-            "path": paths.get(desc_id, []),
+            "severity": _compute_severity_with_confidence(dist, path_conf),
+            "confidence": path_conf,
+            "path": path,
             "file_path": desc_node.file_path,
         })
 
@@ -1105,6 +1208,9 @@ def compute_blast_radius(
     # Contract impact — consumers of contracts produced by this node
     contract_impact = _compute_contract_impact(graph, node_id)
 
+    # Cross-team impact — downstream nodes owned by a different team
+    cross_team_impact = _compute_cross_team_impact(graph, node_id, downstream)
+
     result: dict[str, Any] = {
         "target_node": target_info,
         "downstream": downstream,
@@ -1112,6 +1218,7 @@ def compute_blast_radius(
         "contract_impact": contract_impact,
         "cycles": relevant_cycles,
         "critical_paths": critical_paths,
+        "cross_team_impact": cross_team_impact,
     }
     if include_upstream:
         result["upstream"] = upstream
@@ -1144,10 +1251,10 @@ def generate_impact_summary(blast_radius: dict[str, Any], graph: ArchGraph) -> s
     lines.append(f"**Total blast radius:** {total} nodes affected")
     lines.append("")
 
-    # Group downstream by severity
-    direct = [n for n in downstream if n["severity"] == "direct"]
-    transitive = [n for n in downstream if n["severity"] == "transitive"]
-    indirect = [n for n in downstream if n["severity"] == "indirect"]
+    # Group downstream by severity (handles both normal and uncertain_ prefixed values)
+    direct = [n for n in downstream if n["severity"] in ("direct", "uncertain_direct")]
+    transitive = [n for n in downstream if n["severity"] in ("transitive", "uncertain_transitive")]
+    indirect = [n for n in downstream if n["severity"] in ("indirect", "uncertain_indirect")]
 
     target_id = target["id"]
 

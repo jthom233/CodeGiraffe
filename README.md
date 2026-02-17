@@ -98,7 +98,7 @@ Add to your `claude_desktop_config.json`:
 
 ## MCP Tools
 
-Code Giraffe exposes **29 tools** that any MCP client can call:
+Code Giraffe exposes **31 tools** that any MCP client can call:
 
 ### `codegiraffe_init`
 
@@ -185,6 +185,7 @@ The killer tool. Given a natural-language task description, returns the minimal 
 | `use_embeddings` | `bool` | `true` | Use embedding-based semantic scoring when available |
 | `include_impact` | `bool` | `false` | Augment nodes with `_blast_radius_count` and `_risk_score` metadata |
 | `include_changes` | `bool` | `false` | Boost nodes affected by uncommitted git changes (adds `_recently_changed` and `_in_change_blast_radius` metadata) |
+| `min_confidence` | `float` | `0.0` | Filter edges below this confidence threshold (0.0-1.0) |
 | `token_budget` | `int` | `0` | Maximum estimated tokens for response (0 = unlimited) |
 | `detail_level` | `str` | `"standard"` | Response detail level: `"summary"` (minimal tokens), `"standard"` (balanced), `"detailed"` (full context) |
 
@@ -562,7 +563,7 @@ codegiraffe_cypher(project_path="/home/user/my-project", query="MATCH (n:endpoin
 
 ### `codegiraffe_blast_radius`
 
-Analyze the blast radius of changing a specific node. Returns what breaks downstream, ranked by severity (direct, transitive, indirect), plus any circular dependencies and hotspots.
+Analyze the blast radius of changing a specific node. Returns what breaks downstream, ranked by severity (direct, transitive, indirect), plus any circular dependencies and hotspots. Edge confidence is weighted into the impact calculation.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -781,6 +782,84 @@ codegiraffe_file_coupling(project_path="/home/user/my-project", depth=50)
     ### Implicit Coupling (not in graph)
     - config.py ↔ settings.py: 50% coupling over 5 co-changes — consider adding a graph relationship
 ```
+
+---
+
+### `codegiraffe_annotate`
+
+Annotate nodes with metadata including owner, stability status, and custom notes. Annotations are marked as manual and survive re-scans.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `node_id` | `str` | required | Node ID to annotate |
+| `owner` | `str \| None` | `None` | Owner team/person for this node |
+| `stability` | `str \| None` | `None` | Stability status: `stable`, `experimental`, `deprecated`, `legacy` |
+| `notes` | `str \| None` | `None` | Free-form notes or documentation for this node |
+
+**Example:**
+```
+codegiraffe_annotate(
+  project_path="/home/user/my-project",
+  node_id="service:PaymentService",
+  owner="payments-team",
+  stability="stable",
+  notes="Stripe integration. Critical path. Do not break."
+)
+--> "Annotated service:PaymentService: owner=payments-team, stability=stable"
+```
+
+---
+
+### `codegiraffe_sync_files`
+
+Incrementally sync specific changed files without a full rescan. Faster than `codegiraffe_sync` for small changes.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `file_paths` | `list[str]` | required | Absolute or relative file paths to sync |
+| `scanner_mode` | `str` | `"regex"` | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
+
+**Example:**
+```
+codegiraffe_sync_files(
+  project_path="/home/user/my-project",
+  file_paths=["src/auth.py", "src/users.py"]
+)
+--> "Synced 2 files. Nodes: 47 -> 49 (delta +2). Edges: 63 -> 66 (delta +3)."
+```
+
+---
+
+## Edge Confidence Scoring
+
+All edges in the architecture graph now carry a `confidence` value (0.0-1.0) that reflects the reliability of the detected relationship. Higher confidence means the edge is more likely to be accurate; lower confidence indicates the relationship was inferred with less certainty.
+
+**Confidence values by detection method:**
+
+| Detection Method | Confidence |
+|---|---|
+| AST-parsed edges (tree-sitter) | 1.0 |
+| Regex imports with exact matches | 0.9 |
+| Inheritance (extends/implements) | 0.8 |
+| Call-graph edges (high certainty) | 0.8 |
+| Call-graph edges (lower certainty) | 0.6 |
+| Interface satisfaction (Go) | 0.7 |
+| Contract inference | 0.5 |
+
+When querying with `codegiraffe_context_for`, use the `min_confidence` parameter to filter out lower-confidence edges and focus on well-established relationships:
+
+```
+codegiraffe_context_for(
+  project_path="/home/user/my-project",
+  task="add rate limiting to payments endpoint",
+  min_confidence=0.7
+)
+--> Only edges with confidence >= 0.7 are included in the subgraph
+```
+
+Blast radius analysis weights impact calculations by edge confidence, so high-confidence direct impacts are weighted more heavily than speculative transitive impacts.
 
 ---
 
@@ -1394,6 +1473,17 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Architectural decision record (ADR) detection: identifies and surfaces architectural decisions from patterns
 - [x] Convention mining: `codegiraffe_patterns` analyzes naming conventions, structural patterns, and detects anti-patterns
 - [x] 1087+ tests
+
+### v0.12.0 — Graph Enrichment
+
+- [x] 2 new MCP tools: `codegiraffe_annotate`, `codegiraffe_sync_files` (31 tools total)
+- [x] Edge confidence scoring: all edges carry confidence value (0.0-1.0) based on detection method
+- [x] Enhanced `codegiraffe_context_for` with `min_confidence` parameter to filter edges by confidence
+- [x] Ownership and annotation layer: nodes annotated with owner, stability status (stable/experimental/deprecated/legacy), and notes
+- [x] Incremental file sync: `codegiraffe_sync_files` for fast updates of changed files only
+- [x] Enhanced `codegiraffe_blast_radius` with `cross_team_impact` detection for ownership-aware analysis
+- [x] Confidence-weighted blast radius: impact calculations weighted by edge confidence
+- [x] 1154+ tests
 
 ### Future
 

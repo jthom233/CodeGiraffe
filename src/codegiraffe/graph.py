@@ -32,6 +32,7 @@ class Edge(BaseModel):
     type: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     manual: bool = False
+    confidence: float = 1.0
 
 
 class GraphData(BaseModel):
