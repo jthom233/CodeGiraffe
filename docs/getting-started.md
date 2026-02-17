@@ -126,4 +126,4 @@ codegiraffe_context_for(
 
 - [Architecture](architecture.md) — Understand the data model, module layout, and built-in node/edge types
 - [Multi-Language Scanner](scanner.md) — See what each language recognizer detects and how to extend it
-- [Tool Reference](tools/README.md) — Full reference for all 36 MCP tools
+- [Tool Reference](tools/README.md) — Full reference for all 37 MCP tools

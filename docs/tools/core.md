@@ -186,3 +186,27 @@ codegiraffe_detect_drift(project_path="/home/user/my-project")
 ```
 
 ---
+
+### `codegiraffe_dashboard`
+
+Launch the interactive Cytoscape.js web dashboard for a project. Spawns a background HTTP server and opens the user's default browser. If a server is already running on the requested port, the existing URL is returned and the browser is opened to it without spawning a second process.
+
+| Parameter | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `project_path` | `str` | — | yes | Absolute path to the project root whose graph should be displayed |
+| `port` | `int` | `8251` | no | Local port to bind the dashboard HTTP server on |
+
+The project must be initialized first — run `codegiraffe_init` if no graph exists yet.
+
+**Example:**
+```
+codegiraffe_dashboard(project_path="/home/user/my-project")
+--> "Dashboard launched at http://localhost:8251/dashboard?project_path=...
+     Browser will open automatically. The server will stop when this terminal session ends."
+
+codegiraffe_dashboard(project_path="/home/user/my-project", port=9000)
+--> "Dashboard already running at http://localhost:9000/dashboard?project_path=...
+     Opened browser to existing dashboard."
+```
+
+---
