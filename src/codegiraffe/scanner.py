@@ -710,6 +710,7 @@ def _infer_import_edges(
                 source=source_id,
                 target=target_id,
                 type=EdgeType.IMPORTS,
+                confidence=0.9,
                 metadata={
                     "symbols": unique_symbols,
                     "style": meta["style"],
@@ -1050,6 +1051,7 @@ def _infer_inheritance_edges(
                                 source=child_id,
                                 target=parent_id,
                                 type=EdgeType.IMPLEMENTS.value,
+                                confidence=0.8,
                                 metadata={
                                     "inferred": True,
                                     "cross_file": not same_file,
@@ -1096,6 +1098,7 @@ def _infer_import_edges_universal(
                     source=source_mod_id,
                     target=target_mod_id,
                     type=EdgeType.IMPORTS.value,
+                    confidence=0.9,
                     metadata={
                         "symbols": imp.symbols,
                         "style": imp.style,
@@ -1137,6 +1140,7 @@ def _infer_inheritance_edges_universal(
                     source=child_id,
                     target=parent_id,
                     type=EdgeType.IMPLEMENTS.value,
+                    confidence=0.8,
                     metadata={
                         "inferred": True,
                         "cross_file": not same_file,
@@ -1218,6 +1222,7 @@ def _infer_api_contracts(result: ScanResult) -> None:
                 source=ep_node.id,
                 target=contract_id,
                 type=EdgeType.PRODUCES.value,
+                confidence=0.5,
                 metadata={"inferred": True},
             ))
             existing_edges.add(edge_key)
@@ -1230,6 +1235,7 @@ def _infer_api_contracts(result: ScanResult) -> None:
                     source=consumer.id,
                     target=contract_id,
                     type=EdgeType.CONSUMES_CONTRACT.value,
+                    confidence=0.5,
                     metadata={"inferred": True},
                 ))
                 existing_edges.add(edge_key)
@@ -1301,6 +1307,7 @@ def _infer_event_contracts(result: ScanResult) -> None:
                 source=producer.id,
                 target=contract_id,
                 type=EdgeType.PRODUCES.value,
+                confidence=0.5,
                 metadata={"inferred": True},
             ))
             existing_edges.add(edge_key)
@@ -1313,6 +1320,7 @@ def _infer_event_contracts(result: ScanResult) -> None:
                     source=consumer.id,
                     target=contract_id,
                     type=EdgeType.CONSUMES_CONTRACT.value,
+                    confidence=0.5,
                     metadata={"inferred": True},
                 ))
                 existing_edges.add(edge_key)
@@ -1379,6 +1387,7 @@ def _infer_config_contracts(result: ScanResult) -> None:
                 source=producer_id,
                 target=contract_id,
                 type=EdgeType.PRODUCES.value,
+                confidence=0.5,
                 metadata={"inferred": True},
             ))
             existing_edges.add(edge_key)
@@ -1390,6 +1399,7 @@ def _infer_config_contracts(result: ScanResult) -> None:
                     source=cid,
                     target=contract_id,
                     type=EdgeType.CONSUMES_CONTRACT.value,
+                    confidence=0.5,
                     metadata={"inferred": True},
                 ))
                 existing_edges.add(edge_key)
@@ -1457,6 +1467,7 @@ def _infer_data_contracts(result: ScanResult) -> None:
                     source=writer_id,
                     target=contract_id,
                     type=EdgeType.PRODUCES.value,
+                    confidence=0.5,
                     metadata={"inferred": True},
                 ))
                 existing_edges.add(edge_key)
@@ -1468,6 +1479,7 @@ def _infer_data_contracts(result: ScanResult) -> None:
                     source=reader_id,
                     target=contract_id,
                     type=EdgeType.CONSUMES_CONTRACT.value,
+                    confidence=0.5,
                     metadata={"inferred": True},
                 ))
                 existing_edges.add(edge_key)
@@ -1524,6 +1536,7 @@ def _infer_interface_satisfaction(result: ScanResult) -> None:
                             source=struct_node_id,
                             target=iface_node_id,
                             type=EdgeType.IMPLEMENTS.value,
+                            confidence=0.7,
                             metadata={
                                 "inferred": True,
                                 "mechanism": "duck_type",
@@ -1607,6 +1620,7 @@ def _infer_call_edges(result: ScanResult) -> None:
                 source=caller_node_id,
                 target=callee_node_id,
                 type=EdgeType.CALLS.value,
+                confidence=0.8,
                 metadata={
                     "inferred": True,
                     "caller": call.caller,
@@ -1629,6 +1643,218 @@ def _infer_contract_edges(result: ScanResult) -> None:
     _infer_event_contracts(result)
     _infer_config_contracts(result)
     _infer_data_contracts(result)
+
+
+# ---------------------------------------------------------------------------
+# Architectural Decision Record (ADR) detection
+# ---------------------------------------------------------------------------
+
+_DECISION_HASH_RE = re.compile(r"#\s+DECISION:\s*(.+)")
+_DECISION_LINE_COMMENT_RE = re.compile(r"//\s+ADR-(\d+):\s*(.+)")
+_DECISION_BLOCK_COMMENT_RE = re.compile(r"/\*\s*ADR-(\d+):\s*(.+?)(?=\s*\*/|$)", re.DOTALL | re.MULTILINE)
+
+
+def _detect_decision_markers(file_path: str, content: str) -> list[dict]:
+    """Detect DECISION: and ADR-NNN: markers in code comments.
+
+    Scans *content* for architectural decision markers in three styles:
+
+    - ``# DECISION: <text>`` — Python/Ruby/Bash hash comments
+    - ``// ADR-NNN: <text>`` — C/Go/Java/TypeScript line comments
+    - ``/* ADR-NNN: <text> */`` — block comments
+
+    Returns a list of dicts with keys:
+        text (str), adr_id (str | None), file_path (str),
+        line_number (int, 1-indexed), mined_from (str)
+    """
+    if not content:
+        return []
+
+    results: list[dict] = []
+    lines = content.splitlines()
+
+    for lineno, line in enumerate(lines, start=1):
+        # --- Hash-style: # DECISION: <text> ---
+        m = _DECISION_HASH_RE.search(line)
+        if m:
+            results.append(
+                {
+                    "text": m.group(1).strip(),
+                    "adr_id": None,
+                    "file_path": file_path,
+                    "line_number": lineno,
+                    "mined_from": "comment",
+                }
+            )
+            continue
+
+        # --- Line comment style: // ADR-NNN: <text> ---
+        m = _DECISION_LINE_COMMENT_RE.search(line)
+        if m:
+            results.append(
+                {
+                    "text": m.group(2).strip(),
+                    "adr_id": m.group(1),
+                    "file_path": file_path,
+                    "line_number": lineno,
+                    "mined_from": "comment",
+                }
+            )
+            continue
+
+    # --- Block comment style: /* ADR-NNN: <text> */ ---
+    # Process the entire content for block comments
+    for m in _DECISION_BLOCK_COMMENT_RE.finditer(content):
+        match_start = m.start()
+        lineno = content[:match_start].count("\n") + 1
+        text = m.group(2).strip().rstrip("*/").strip()
+        results.append(
+            {
+                "text": text,
+                "adr_id": m.group(1),
+                "file_path": file_path,
+                "line_number": lineno,
+                "mined_from": "comment",
+            }
+        )
+
+    # Deduplicate: block comment scan may re-find line comment matches in content.
+    # Keep only unique (file_path, line_number) entries, preserving first occurrence.
+    seen: set[tuple[str, int]] = set()
+    unique: list[dict] = []
+    for r in results:
+        key = (r["file_path"], r["line_number"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    return unique
+
+
+def _infer_decision_edges(result: ScanResult, markers: list[dict]) -> None:
+    """Create decision nodes and constrains/supersedes edges from detected markers.
+
+    For each marker:
+
+    1. Creates a ``decision:{file_path}:{line_number}`` node.
+    2. Creates ``constrains`` edges:
+       - If the decision text contains an existing node ID, target that node.
+       - Otherwise target the module node for the same file (fallback).
+       - If no module node exists, no constrains edge is created.
+    3. Creates ``supersedes`` edges between decisions sharing the same ADR ID
+       (newer line number supersedes older).
+    """
+    if not markers:
+        return
+
+    existing_node_ids = {n.id for n in result.nodes}
+    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+
+    # Build per-file module lookup: file_path -> module node_id
+    file_to_module: dict[str, str] = {}
+    for node in result.nodes:
+        if node.type == NodeType.MODULE.value and node.file_path:
+            file_to_module[node.file_path] = node.id
+
+    # Track created decision nodes by ADR ID for supersedes inference
+    adr_id_to_decisions: dict[str, list[tuple[int, str]]] = {}
+
+    for marker in markers:
+        file_path = marker["file_path"]
+        line_number = marker["line_number"]
+        text = marker["text"]
+        adr_id = marker.get("adr_id")
+
+        node_id = f"decision:{file_path}:{line_number}"
+
+        # Create the decision node
+        if node_id not in existing_node_ids:
+            decision_node = Node(
+                id=node_id,
+                type=NodeType.DECISION.value,
+                label=text,
+                file_path=file_path,
+                metadata={
+                    "text": text,
+                    "adr_id": adr_id,
+                    "file_path": file_path,
+                    "line_number": line_number,
+                    "mined_from": marker.get("mined_from", "comment"),
+                },
+            )
+            result.nodes.append(decision_node)
+            existing_node_ids.add(node_id)
+
+        # Track for supersedes inference
+        if adr_id is not None:
+            adr_id_to_decisions.setdefault(adr_id, []).append((line_number, node_id))
+
+        # --- constrains edge targeting ---
+        # 1. Scan decision text for references to existing node IDs
+        target_node_id: str | None = None
+        for candidate_id in existing_node_ids:
+            if candidate_id == node_id:
+                continue
+            if candidate_id in text:
+                target_node_id = candidate_id
+                break
+
+        # 2. Fallback: use the module node for this file
+        if target_node_id is None:
+            target_node_id = file_to_module.get(file_path)
+
+        # 3. Create constrains edge if a target was found
+        if target_node_id is not None:
+            edge_key = (node_id, target_node_id, EdgeType.CONSTRAINS.value)
+            if edge_key not in existing_edges:
+                result.edges.append(
+                    Edge(
+                        source=node_id,
+                        target=target_node_id,
+                        type=EdgeType.CONSTRAINS.value,
+                        metadata={"inferred": True},
+                    )
+                )
+                existing_edges.add(edge_key)
+
+    # --- supersedes edges: newer line supersedes older for same ADR ID ---
+    for adr_id, entries in adr_id_to_decisions.items():
+        if len(entries) < 2:
+            continue
+        entries_sorted = sorted(entries, key=lambda t: t[0])
+        for i in range(1, len(entries_sorted)):
+            newer_node_id = entries_sorted[i][1]
+            older_node_id = entries_sorted[i - 1][1]
+            edge_key = (newer_node_id, older_node_id, EdgeType.SUPERSEDES.value)
+            if edge_key not in existing_edges:
+                result.edges.append(
+                    Edge(
+                        source=newer_node_id,
+                        target=older_node_id,
+                        type=EdgeType.SUPERSEDES.value,
+                        metadata={"inferred": True, "adr_id": adr_id},
+                    )
+                )
+                existing_edges.add(edge_key)
+
+
+def _infer_decision_marker_edges(
+    result: ScanResult, per_file_contents: dict
+) -> None:
+    """Orchestrate decision marker detection across all scanned files.
+
+    Iterates over *per_file_contents* (mapping of relative_path -> content),
+    detects ADR markers in each file, and calls ``_infer_decision_edges`` to
+    materialise decision nodes and their associated edges.
+    """
+    all_markers: list[dict] = []
+    for rel_path, content in per_file_contents.items():
+        file_path_str = str(rel_path)
+        markers = _detect_decision_markers(file_path_str, content)
+        all_markers.extend(markers)
+
+    if all_markers:
+        _infer_decision_edges(result, all_markers)
 
 
 # ---------------------------------------------------------------------------
@@ -1778,6 +2004,7 @@ def scan_project(
                     source=module_id,
                     target=node.id,
                     type=EdgeType.CONTAINS.value,
+                    confidence=1.0,
                     metadata={"inferred": True},
                 ))
 
@@ -1822,4 +2049,352 @@ def scan_project(
     # Contract inference (detects cross-component agreements)
     _infer_contract_edges(merged)
 
+    # Decision marker inference (detects ADR comments in source files)
+    _infer_decision_marker_edges(merged, file_contents)
+
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Incremental sync (v0.12.0)
+# ---------------------------------------------------------------------------
+
+
+def sync_files(
+    graph: "ArchGraph",
+    project_path: str,
+    file_paths: list[str],
+    scanner_mode: str = "regex",
+) -> dict:
+    """Incrementally sync specific files in the architecture graph.
+
+    For each file in *file_paths*:
+
+    1. Find all non-manual nodes whose ``file_path`` metadata matches the
+       file (stored as a path relative to *project_path*).
+    2. Collect all non-manual edges where the source node is one of those
+       file-local nodes (outgoing edges from the file's namespace).
+    3. Remove those non-manual edges, then remove the non-manual nodes.
+    4. If the file still exists on disk: re-scan it using the project
+       registry and re-add the resulting nodes and edges.
+    5. If the file has been deleted: the removal in step 3 is sufficient.
+    6. After all files are processed, re-run scoped inference stages
+       (import edges, cross-file edges, contract inference) so that
+       cross-file relationships stay correct.
+    7. Manual nodes and edges (``manual=True``) are never removed.
+
+    Parameters
+    ----------
+    graph:
+        The :class:`~codegiraffe.graph.ArchGraph` to update in-place.
+    project_path:
+        Absolute path to the project root (used for path resolution and
+        the scanner registry).
+    file_paths:
+        List of **absolute** paths to the files that have changed.
+    scanner_mode:
+        ``"regex"`` (default) or ``"ast"`` — selects the scanner registry.
+
+    Returns
+    -------
+    dict
+        ``{"added": {"nodes": N, "edges": N},
+           "removed": {"nodes": N, "edges": N},
+           "preserved": {"nodes": N, "edges": N}}``
+    """
+    from codegiraffe.registry import get_default_registry
+
+    root = Path(project_path)
+
+    # Build the active registry
+    if scanner_mode == "ast":
+        from codegiraffe.ast_scanner import get_ast_registry
+        active_registry = get_ast_registry()
+    else:
+        active_registry = get_default_registry()
+
+    # Set project root on recognizers that support it
+    _seen_recognizers: set[int] = set()
+    for ext in active_registry.registered_extensions:
+        for recognizer in active_registry.get_recognizers(Path(f"dummy{ext}")):
+            rid = id(recognizer)
+            if rid not in _seen_recognizers:
+                _seen_recognizers.add(rid)
+                if hasattr(recognizer, "set_project_root"):
+                    recognizer.set_project_root(project_path)
+
+    # Normalise input paths to relative strings (how they are stored in nodes)
+    rel_paths: list[str] = []
+    abs_paths: list[Path] = []
+    for fp in file_paths:
+        abs_path = Path(fp)
+        try:
+            rel = str(abs_path.relative_to(root))
+        except ValueError:
+            rel = str(abs_path)
+        rel_paths.append(rel)
+        abs_paths.append(root / rel)
+
+    # Counters
+    removed_nodes = 0
+    removed_edges = 0
+    added_nodes = 0
+    added_edges = 0
+
+    # ------------------------------------------------------------------
+    # Step 1 & 2: Identify nodes and edges to remove for all changed files.
+    # Defer restoration of "keep" edges until after new nodes are re-added.
+    # ------------------------------------------------------------------
+
+    # Accumulated list of edges to re-add after node replacement.
+    # These are: (a) manual edges touching synced-file nodes, and
+    # (b) non-manual edges whose SOURCE is from a non-synced file but whose
+    #     TARGET is in a synced file (incoming cross-file edges).
+    all_edges_to_restore: list[Edge] = []
+
+    for rel_path_str in rel_paths:
+        # Find non-manual nodes from this file
+        file_node_ids: set[str] = set()
+
+        for nid, attrs in list(graph.graph.nodes(data=True)):
+            node = attrs.get("node")
+            if node is None:
+                continue
+            if node.file_path == rel_path_str and not node.manual:
+                file_node_ids.add(nid)
+
+        # Categorise all edges involving file_node_ids:
+        #   - outgoing non-manual from file node: REMOVE
+        #   - incoming from another file (non-manual): RESTORE after node re-add
+        #   - manual edges (any direction): RESTORE after node re-add
+        #   - internal (both endpoints in file): REMOVE (will be re-inferred)
+
+        edges_to_remove_keys: list[tuple[str, str]] = []
+
+        for u, v, edge_data in list(graph.graph.edges(data=True)):
+            edge = edge_data.get("edge")
+            if edge is None:
+                continue
+
+            source_in_file = u in file_node_ids
+            target_in_file = v in file_node_ids
+
+            if not source_in_file and not target_in_file:
+                continue  # Unrelated edge — leave alone
+
+            if edge.manual:
+                # Always preserve manual edges; defer re-add until after new nodes
+                all_edges_to_restore.append(edge)
+                continue
+
+            if source_in_file:
+                # Outgoing from file node (includes internal edges) — remove
+                edges_to_remove_keys.append((u, v))
+            elif target_in_file and not source_in_file:
+                # Incoming from a non-synced file — preserve per spec
+                all_edges_to_restore.append(edge)
+
+        # Remove outgoing non-manual edges explicitly
+        for u, v in edges_to_remove_keys:
+            if graph.graph.has_edge(u, v):
+                graph.graph.remove_edge(u, v)
+                removed_edges += 1
+
+        # Remove nodes (NetworkX also removes any still-attached incident edges)
+        for nid in file_node_ids:
+            if nid in graph.graph:
+                graph.graph.remove_node(nid)
+                removed_nodes += 1
+
+    # ------------------------------------------------------------------
+    # Step 3: Re-scan existing files and collect new nodes/edges
+    # ------------------------------------------------------------------
+    new_file_merged = ScanResult()
+    new_file_contents: dict[Path, str] = {}
+    new_per_file_results: dict[Path, ScanResult] = {}
+
+    for rel_path_str, abs_path in zip(rel_paths, abs_paths):
+        if not abs_path.exists():
+            continue  # File deleted — nothing to re-add
+
+        suffix = abs_path.suffix.lower()
+        applicable = active_registry.get_recognizers(abs_path)
+        if not applicable:
+            continue
+
+        try:
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        rel_path = Path(rel_path_str)
+        new_file_contents[rel_path] = content
+
+        file_nodes: list[Node] = []
+        file_edges: list[Edge] = []
+        file_imports: list[ImportInfo] = []
+        file_implementations: list[ImplementationInfo] = []
+        file_calls: list[CallInfo] = []
+        file_interfaces: list[InterfaceInfo] = []
+        file_method_sets: list[MethodSetEntry] = []
+
+        for recognizer in applicable:
+            file_result = recognizer.recognize(rel_path, content)
+            file_nodes.extend(file_result.nodes)
+            file_edges.extend(file_result.edges)
+            file_imports.extend(file_result.imports)
+            file_implementations.extend(file_result.implementations)
+            file_calls.extend(file_result.calls)
+            file_interfaces.extend(file_result.interfaces)
+            file_method_sets.extend(file_result.method_sets)
+
+        # Create module node (mirrors scan_project logic)
+        module_path = _file_to_module_path_universal(abs_path, project_path, suffix)
+        module_id = f"mod:{module_path}"
+        module_label = (
+            module_path.rsplit(".", 1)[-1] if "." in module_path else module_path
+        )
+
+        module_node = Node(
+            id=module_id,
+            type=NodeType.MODULE.value,
+            label=module_label,
+            file_path=rel_path_str,
+            metadata={
+                "package": (
+                    module_path.rsplit(".", 1)[0] if "." in module_path else ""
+                ),
+                "source": "production",
+                "language": _suffix_to_language(suffix),
+            },
+        )
+        file_nodes.append(module_node)
+
+        # Contains edges from module to all entities in this file
+        for node in file_nodes:
+            if node.id != module_id:
+                file_edges.append(Edge(
+                    source=module_id,
+                    target=node.id,
+                    type=EdgeType.CONTAINS.value,
+                    metadata={"inferred": True},
+                    confidence=1.0,
+                ))
+
+        combined = ScanResult(
+            nodes=file_nodes,
+            edges=file_edges,
+            imports=file_imports,
+            implementations=file_implementations,
+            calls=file_calls,
+            interfaces=file_interfaces,
+            method_sets=file_method_sets,
+        )
+        new_per_file_results[rel_path] = combined
+        new_file_merged.merge(combined)
+
+    # ------------------------------------------------------------------
+    # Step 4: Add new nodes and direct edges to the graph
+    # ------------------------------------------------------------------
+    existing_node_ids: set[str] = set(graph.graph.nodes())
+
+    for node in new_file_merged.nodes:
+        if node.id not in existing_node_ids:
+            graph.add_node(node)
+            existing_node_ids.add(node.id)
+            added_nodes += 1
+        else:
+            # Refresh metadata on an already-existing node (e.g. after edit)
+            graph.graph.nodes[node.id]["node"] = node
+
+    # Existing edge set for deduplication
+    existing_edge_keys: set[tuple[str, str, str]] = set()
+    for u, v, edge_data in graph.graph.edges(data=True):
+        e = edge_data.get("edge")
+        if e is not None:
+            existing_edge_keys.add((u, v, e.type))
+
+    for edge in new_file_merged.edges:
+        key = (edge.source, edge.target, edge.type)
+        if key not in existing_edge_keys:
+            graph.add_edge(edge)
+            existing_edge_keys.add(key)
+            added_edges += 1
+
+    # ------------------------------------------------------------------
+    # Step 4b: Restore deferred edges (incoming cross-file + manual).
+    # Must happen AFTER new nodes are added so endpoints exist.
+    # ------------------------------------------------------------------
+    for edge in all_edges_to_restore:
+        key = (edge.source, edge.target, edge.type)
+        if key not in existing_edge_keys:
+            if edge.source in graph.graph and edge.target in graph.graph:
+                graph.add_edge(edge)
+                existing_edge_keys.add(key)
+
+    # ------------------------------------------------------------------
+    # Step 5: Re-run scoped inference against full graph state
+    # ------------------------------------------------------------------
+    if new_per_file_results:
+        # Build a ScanResult that represents the current full graph
+        # (needed so inference functions can see all nodes)
+        full_result = ScanResult()
+        for nid, attrs in graph.graph.nodes(data=True):
+            node = attrs.get("node")
+            if node is not None:
+                full_result.nodes.append(node)
+        for u, v, edge_data in graph.graph.edges(data=True):
+            edge = edge_data.get("edge")
+            if edge is not None:
+                full_result.edges.append(edge)
+
+        # Attach structured data from new files only
+        full_result.imports.extend(new_file_merged.imports)
+        full_result.implementations.extend(new_file_merged.implementations)
+        full_result.calls.extend(new_file_merged.calls)
+        full_result.interfaces.extend(new_file_merged.interfaces)
+        full_result.method_sets.extend(new_file_merged.method_sets)
+
+        # Infer edges
+        _infer_import_edges_universal(full_result, new_per_file_results)
+        if new_file_contents:
+            _infer_import_edges(full_result, new_file_contents, project_path)
+            _infer_cross_file_edges(full_result, new_file_contents)
+
+        class_registry: dict[str, str] = {
+            (node.metadata.get("class_name") or node.label): node.id
+            for node in full_result.nodes
+            if node.type == NodeType.SERVICE.value
+        }
+        _infer_inheritance_edges_universal(full_result, new_per_file_results)
+        _infer_inheritance_edges(full_result, class_registry, new_file_contents)
+        _infer_interface_satisfaction(full_result)
+        _infer_call_edges(full_result)
+        _infer_decision_marker_edges(full_result, new_file_contents)
+
+        # Flush newly inferred edges back into the graph (deduplicated)
+        for edge in full_result.edges:
+            key = (edge.source, edge.target, edge.type)
+            if key not in existing_edge_keys:
+                if edge.source in graph.graph and edge.target in graph.graph:
+                    graph.add_edge(edge)
+                    existing_edge_keys.add(key)
+                    added_edges += 1
+
+    return {
+        "added": {"nodes": added_nodes, "edges": added_edges},
+        "removed": {"nodes": removed_nodes, "edges": removed_edges},
+        "preserved": {
+            "nodes": sum(
+                1 for nid, attrs in graph.graph.nodes(data=True)
+                if (n := attrs.get("node")) is not None
+                and n.file_path not in rel_paths
+            ),
+            "edges": sum(
+                1 for u, v, ed in graph.graph.edges(data=True)
+                if (e := ed.get("edge")) is not None
+                and (sn := graph.graph.nodes.get(u, {}).get("node")) is not None
+                and sn.file_path not in rel_paths
+            ),
+        },
+    }

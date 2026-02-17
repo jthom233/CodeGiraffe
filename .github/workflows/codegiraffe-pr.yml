@@ -1,0 +1,78 @@
+name: CodeGiraffe Architectural Review
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  BLAST_RADIUS_THRESHOLD: 10  # configurable — PRs exceeding this are flagged
+
+jobs:
+  architectural-review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history required for git diff
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CodeGiraffe
+        run: pip install codegiraffe
+
+      - name: Initialize graph
+        run: |
+          python -c "
+          from codegiraffe.scanner import scan_project
+          from codegiraffe.storage import JSONStorage
+          s = JSONStorage('.codegiraffe')
+          s.save(scan_project('.'))
+          "
+
+      - name: Validate changes
+        id: validate
+        run: |
+          python -c "
+          import json
+          from codegiraffe.storage import JSONStorage
+          from codegiraffe.graph import ArchGraph
+          from codegiraffe.query import compute_blast_radius, suggest_tests_for_changes
+          from codegiraffe.git_utils import get_changed_files
+
+          storage = JSONStorage('.codegiraffe')
+          data = storage.load()
+          graph = ArchGraph()
+          graph.load(data)
+
+          changed = get_changed_files('.')
+          results = {
+              'changed_files': changed,
+              'blast_radius': [],
+              'test_suggestions': [],
+          }
+
+          for f in changed[:5]:
+              br = compute_blast_radius(graph, f'module:{f}')
+              results['blast_radius'].append({
+                  'file': f,
+                  'downstream_count': len(br.get('downstream', [])),
+              })
+
+          with open('review-results.json', 'w') as fp:
+              json.dump(results, fp)
+          "
+
+      - name: Format and post PR comment
+        if: always()
+        run: |
+          python .github/scripts/format-pr-comment.py review-results.json \
+            | gh pr comment ${{ github.event.pull_request.number }} --body-file -
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -24,6 +24,7 @@ from codegiraffe.query import (
     generate_impact_summary,
     get_contracts,
     map_files_to_nodes,
+    order_tasks,
     query_by_node,
     query_by_type,
     suggest_tests,
@@ -37,6 +38,14 @@ from codegiraffe.git_utils import (
     is_git_repo,
     NotAGitRepoError,
 )
+from codegiraffe.domains import (
+    add_domain as _add_domain,
+    infer_domains as _infer_domains,
+    list_domains as _list_domains,
+    remove_domain as _remove_domain,
+)
+from codegiraffe.migration import generate_migration_plan
+from codegiraffe.patterns import extract_patterns as _extract_patterns
 from codegiraffe.scanner import scan_project
 from codegiraffe.storage import JSONStorage, StorageBackend
 from codegiraffe.versioning import VersionStore
@@ -281,6 +290,9 @@ def codegiraffe_context_for(
     use_embeddings: bool = True,
     include_impact: bool = False,
     include_changes: bool = False,
+    token_budget: int = 0,
+    detail_level: str = "standard",
+    min_confidence: float = 0.0,
 ) -> str:
     """Get the most relevant subgraph for a natural-language task description.
 
@@ -296,12 +308,41 @@ def codegiraffe_context_for(
     receive a score boost and ``_recently_changed`` / ``_in_change_blast_radius``
     metadata annotations.
 
+    When *token_budget* > 0, the result is trimmed so that the total estimated
+    token cost stays within the budget (highest-relevance nodes kept first).
+    When both *token_budget* and *max_nodes* are set, the more restrictive
+    constraint wins.
+
+    *detail_level* controls how much metadata each node carries:
+    - ``"summary"``  — id, type, label only (smallest token footprint)
+    - ``"standard"`` — id, type, label + metadata (default)
+    - ``"detailed"`` — full node data including file_path
+
+    When *min_confidence* > 0, edges with confidence below this threshold are
+    excluded from the result.  Useful for filtering out low-certainty inferred
+    edges (e.g. contract inference at 0.5) and retaining only stronger signals.
+    Confidence levels: contains=1.0, import/AST=0.9, call/inheritance=0.8,
+    interface satisfaction=0.7, contract inference=0.5.
+
+    The response includes ``_token_estimate`` showing total estimated tokens
+    and ``_retrieval_strategy`` showing the classified task intent used to
+    steer retrieval (one of: ``create``, ``debug``, ``refactor``, ``delete``,
+    ``test``, ``modify``).
+
     Useful for scoping what parts of the architecture are relevant before
     making changes.
     """
     try:
         graph = _ensure_graph(project_path)
-        subgraph = context_for_task(graph, task, max_nodes, use_embeddings=use_embeddings)
+        subgraph = context_for_task(
+            graph,
+            task,
+            max_nodes,
+            use_embeddings=use_embeddings,
+            token_budget=token_budget,
+            detail_level=detail_level,
+            min_confidence=min_confidence,
+        )
 
         if include_impact:
             total_nodes = len(graph.graph)
@@ -832,6 +873,198 @@ def codegiraffe_add_contract(
 
 
 # ---------------------------------------------------------------------------
+# Ownership and annotation tools (v0.12.0)
+# ---------------------------------------------------------------------------
+
+_VALID_STABILITY_VALUES = {"stable", "experimental", "deprecated", "legacy"}
+
+
+@mcp.tool()
+def codegiraffe_annotate(
+    project_path: str,
+    node_id: str,
+    owner: str | None = None,
+    stability: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Annotate a graph node with ownership and stability information.
+
+    Sets one or more of the following metadata fields on the target node:
+
+    - *owner*: Team or person responsible for this component (e.g. ``"@auth-team"``).
+    - *stability*: Stability classification — one of ``"stable"``,
+      ``"experimental"``, ``"deprecated"``, or ``"legacy"``.
+    - *notes*: Free-form text notes about this component.
+
+    Annotations are preserved across rescans and persist in graph storage.
+    At least one of *owner*, *stability*, or *notes* must be provided.
+
+    Parameters
+    ----------
+    project_path:
+        Root directory of the project.
+    node_id:
+        ID of the node to annotate.
+    owner:
+        Team or individual owner string (e.g. ``"@auth-team"``).
+    stability:
+        Stability level: ``"stable"``, ``"experimental"``, ``"deprecated"``, or ``"legacy"``.
+    notes:
+        Free-form notes about this node.
+    """
+    try:
+        if stability is not None and stability not in _VALID_STABILITY_VALUES:
+            return (
+                f"Error: invalid stability '{stability}'. "
+                f"Must be one of: {', '.join(sorted(_VALID_STABILITY_VALUES))}"
+            )
+
+        graph = _ensure_graph(project_path)
+
+        if node_id not in graph.graph:
+            candidates = list(graph.graph.nodes)
+            msg = f"Error: node '{node_id}' not found in graph."
+            return msg
+
+        node = graph.graph.nodes[node_id].get("node")
+        if node is None:
+            return f"Error: node '{node_id}' has no data."
+
+        # Apply annotations — only update fields that were provided
+        if owner is not None:
+            node.metadata["owner"] = owner
+        if stability is not None:
+            node.metadata["stability"] = stability
+        if notes is not None:
+            node.metadata["notes"] = notes
+
+        # Persist updated graph
+        _storage.save(project_path, graph.to_data())
+
+        updated_fields = [
+            f
+            for f, v in [("owner", owner), ("stability", stability), ("notes", notes)]
+            if v is not None
+        ]
+        if not updated_fields:
+            return f"No fields provided to annotate on '{node_id}'."
+
+        return (
+            f"Annotated node '{node_id}' with: {', '.join(updated_fields)}"
+        )
+    except Exception as exc:
+        return f"Error annotating node: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Domain model abstraction (v0.13.0 / US11)
+# ---------------------------------------------------------------------------
+
+_VALID_DOMAIN_ACTIONS = {"list", "infer", "add", "remove"}
+
+
+@mcp.tool()
+def codegiraffe_domains(
+    project_path: str,
+    action: str = "list",
+    name: str = "",
+    node_ids: str = "",
+) -> str:
+    """Manage business domain groupings in the architecture graph.
+
+    Domains cluster related nodes (services, modules, endpoints, etc.) by
+    business capability, making blast-radius and context queries domain-aware.
+
+    Actions:
+
+    - ``list`` -- Show all defined domains with member counts.
+    - ``infer`` -- Auto-cluster nodes by directory structure or ID prefix and
+      add the inferred domains to the graph (only clusters with 2+ members).
+    - ``add`` -- Create a manual domain named *name* with the nodes listed in
+      *node_ids* (comma-separated).  Manual domains survive rescans.
+    - ``remove`` -- Delete the domain named *name* and its belongs_to edges.
+
+    Parameters
+    ----------
+    project_path:
+        Root directory of the project (must be initialised with
+        codegiraffe_init first).
+    action:
+        One of list, infer, add, remove.
+    name:
+        Domain name -- required for add and remove.
+    node_ids:
+        Comma-separated node IDs -- required for add.
+    """
+    try:
+        if action not in _VALID_DOMAIN_ACTIONS:
+            return (
+                f"Error: invalid action '{action}'. "
+                f"Must be one of: {', '.join(sorted(_VALID_DOMAIN_ACTIONS))}"
+            )
+
+        graph = _ensure_graph(project_path)
+
+        if action == "list":
+            domains = _list_domains(graph)
+            if not domains:
+                return "No domains defined. Use action='infer' or action='add' to create domains."
+            lines = ["Domains:"]
+            for d in domains:
+                manual_tag = " [manual]" if d.get("manual") else ""
+                lines.append(f"  {d['name']}{manual_tag}: {d['node_count']} member(s)")
+            return "\n".join(lines)
+
+        elif action == "infer":
+            inferred = _infer_domains(graph)
+            if not inferred:
+                return (
+                    "No meaningful domain clusters found. "
+                    "Ensure the project has been scanned (codegiraffe_init) and "
+                    "nodes have file_path metadata or typed IDs."
+                )
+            added: list[str] = []
+            for domain in inferred:
+                _add_domain(graph, domain["name"], domain["node_ids"])
+                added.append(f"  {domain['name']}: {domain['node_count']} member(s)")
+            _storage.save(project_path, graph.to_data())
+            return "Inferred and added domains:\n" + "\n".join(added)
+
+        elif action == "add":
+            if not name:
+                return "Error: 'name' is required for action='add'"
+            member_ids = [n.strip() for n in node_ids.split(",") if n.strip()]
+            if not member_ids:
+                return "Error: 'node_ids' must be a non-empty comma-separated list for action='add'"
+            warnings: list[str] = []
+            for nid in member_ids:
+                if nid not in graph.graph:
+                    warnings.append(f"Warning: node '{nid}' not found in graph")
+            _add_domain(graph, name, member_ids)
+            _storage.save(project_path, graph.to_data())
+            lines = [f"Added domain '{name}' with {len(member_ids)} member(s)."]
+            if warnings:
+                lines.append("")
+                lines.extend(warnings)
+            return "\n".join(lines)
+
+        elif action == "remove":
+            if not name:
+                return "Error: 'name' is required for action='remove'"
+            domain_id = f"domain:{name}"
+            if domain_id not in graph.graph:
+                return f"Domain '{name}' not found in graph."
+            _remove_domain(graph, name)
+            _storage.save(project_path, graph.to_data())
+            return f"Removed domain '{name}'."
+
+        return "Error: unknown action"  # pragma: no cover
+
+    except Exception as exc:
+        return f"Error managing domains: {exc}"
+
+
+# ---------------------------------------------------------------------------
 # Change impact validation tools (v0.10.0)
 # ---------------------------------------------------------------------------
 
@@ -946,6 +1179,205 @@ def codegiraffe_file_coupling(
         min_coupling=min_coupling,
     )
     return _format_coupling_report(pairs, file_path)
+
+
+@mcp.tool()
+def codegiraffe_order_tasks(
+    project_path: str,
+    tasks: str,
+) -> str:
+    """Order a list of tasks based on graph dependencies to minimize integration conflicts.
+
+    Analyses the architecture graph to determine which tasks must run before
+    others (because of import/dependency relationships), groups independent
+    tasks as parallelisable, and flags same-file conflict zones.
+
+    Parameters
+    ----------
+    project_path:
+        Absolute path to the project whose graph to query.
+    tasks:
+        JSON array of task objects.  Each object must have:
+        - ``"name"`` (str) -- human-readable task name
+        - ``"target_files"`` (list[str]) -- file paths the task touches
+
+    Returns a markdown report with:
+    - Ordered execution plan with parallelisable groups
+    - Dependency edges (why one task precedes another)
+    - Conflict zones (files touched by multiple tasks)
+    - Cycle warnings when circular dependencies are detected
+    """
+    try:
+        graph = _ensure_graph(project_path)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    try:
+        task_list = json.loads(tasks)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return f"Error: invalid JSON for tasks parameter -- {exc}"
+
+    if not isinstance(task_list, list):
+        return "Error: tasks must be a JSON array of task objects."
+
+    result = order_tasks(graph, task_list)
+    return _format_order_tasks_report(result)
+
+
+def _format_order_tasks_report(result: dict) -> str:
+    """Format the order_tasks() result as a markdown report."""
+    lines = ["## Dependency-Aware Task Execution Plan", ""]
+
+    ordered_tasks = result.get("ordered_tasks", [])
+    parallel_groups = result.get("parallel_groups", [])
+    conflict_zones = result.get("conflict_zones", [])
+    dependency_edges = result.get("dependency_edges", [])
+    cycle = result.get("cycle")
+
+    if cycle:
+        lines.append(f"> **Warning:** {cycle}")
+        lines.append("")
+
+    if not ordered_tasks:
+        lines.append("No tasks provided.")
+        return "\n".join(lines)
+
+    total_groups = len(parallel_groups)
+    lines.append(f"### Execution Plan ({total_groups} group(s))")
+    lines.append("")
+    for group_idx, group in enumerate(parallel_groups, start=1):
+        if len(group) == 1:
+            task = ordered_tasks[group[0]] if group[0] < len(ordered_tasks) else None
+            if task:
+                note = " *(cycle -- ordering approximate)*" if task.get("note") else ""
+                lines.append(f"**Step {group_idx} -- sequential group:** {task['name']}{note}")
+                if task["target_files"]:
+                    lines.append(f"  - Files: {', '.join(f'`{f}`' for f in task['target_files'])}")
+        else:
+            lines.append(f"**Step {group_idx} -- parallel group ({len(group)} tasks):**")
+            for idx in group:
+                if idx < len(ordered_tasks):
+                    task = ordered_tasks[idx]
+                    note = " *(cycle -- ordering approximate)*" if task.get("note") else ""
+                    lines.append(f"  - {task['name']}{note}")
+                    if task["target_files"]:
+                        lines.append(f"    - Files: {', '.join(f'`{f}`' for f in task['target_files'])}")
+        lines.append("")
+
+    if dependency_edges:
+        lines.append("### Dependency Edges")
+        lines.append("")
+        for edge in dependency_edges:
+            lines.append(f"- **{edge['from']}** -> **{edge['to']}** ({edge['reason']})")
+        lines.append("")
+
+    if conflict_zones:
+        lines.append("### Conflict Zones")
+        lines.append("")
+        lines.append("The following files are touched by multiple tasks and may cause merge conflicts:")
+        lines.append("")
+        for zone in conflict_zones:
+            task_list_str = ", ".join(f"*{t}*" for t in zone["tasks"])
+            lines.append(f"- `{zone['file']}`: {task_list_str}")
+        lines.append("")
+    else:
+        lines.append("### Conflict Zones")
+        lines.append("")
+        lines.append("No conflict zones detected -- each file is touched by at most one task.")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+
+
+
+@mcp.tool()
+def codegiraffe_coverage(
+    project_path: str,
+    coverage_path: str,
+    format: str = "auto",  # noqa: A002
+) -> str:
+    """Load a coverage report and annotate graph nodes with test coverage data.
+
+    Parses the given coverage file and sets ``_test_coverage`` metadata (0-100)
+    on every graph node whose ``file_path`` matches an entry in the coverage
+    report.  If a node has no coverage data its metadata is left unchanged.
+
+    Supported formats (auto-detected by default):
+
+    - ``"coverage_py"`` -- coverage.py JSON output (``coverage json``)
+    - ``"istanbul"``    -- Istanbul/NYC JSON output (JavaScript)
+    - ``"lcov"``        -- LCOV line coverage format
+
+    Returns a markdown summary of annotated nodes.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    from codegiraffe.coverage_mapper import (  # noqa: PLC0415
+        auto_detect_format,
+        map_coverage_to_nodes,
+        parse_coverage_py,
+        parse_istanbul,
+        parse_lcov,
+    )
+
+    import os as _os  # noqa: PLC0415
+
+    if not _os.path.exists(coverage_path):
+        return f"Error: coverage file not found: {coverage_path}"
+
+    try:
+        fmt = format if format != "auto" else auto_detect_format(coverage_path)
+    except Exception as exc:
+        return f"Error detecting coverage format: {exc}"
+
+    parsers = {
+        "coverage_py": parse_coverage_py,
+        "istanbul": parse_istanbul,
+        "lcov": parse_lcov,
+    }
+    if fmt not in parsers:
+        valid_formats = ", ".join(parsers)
+        return f"Error: unsupported format '{fmt}'. Use one of: {valid_formats}."
+    try:
+        coverage_data = parsers[fmt](coverage_path)
+    except Exception as exc:
+        return f"Error parsing coverage file: {exc}"
+
+    map_coverage_to_nodes(graph, coverage_data)
+
+    lines = ["## Coverage Mapping Report", ""]
+    lines.append(f"**Format:** {fmt}")
+    lines.append(f"**Coverage file:** {coverage_path}")
+    lines.append(f"**Files in coverage data:** {len(coverage_data)}")
+    lines.append("")
+
+    annotated_nodes: list[tuple[str, str, float]] = []
+    for nid, attrs in graph.graph.nodes(data=True):
+        node = attrs.get("node")
+        if node is None:
+            continue
+        cov = node.metadata.get("_test_coverage")
+        if cov is not None:
+            annotated_nodes.append((nid, node.file_path or "", cov))
+
+    if not annotated_nodes:
+        lines.append("No graph nodes matched coverage data.")
+    else:
+        lines.append(f"**Annotated nodes:** {len(annotated_nodes)}")
+        lines.append("")
+        lines.append("| Node | File | Coverage |")
+        lines.append("|---|---|---|")
+        for nid, fp, cov in sorted(annotated_nodes, key=lambda x: x[0]):
+            lines.append(f"| `{nid}` | `{fp}` | {cov:.1f}% |")
+
+    lines.append("")
+    return "\n".join(lines)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1187,6 +1619,67 @@ def codegiraffe_sync(project_path: str, include_tests: bool = False) -> str:
         )
     except Exception as exc:
         return f"Error syncing graph: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_sync_files(
+    project_path: str,
+    file_paths: str,
+    scanner_mode: str = "regex",
+) -> str:
+    """Incrementally sync specific changed files in the architecture graph.
+
+    Instead of re-scanning the entire project, only rescans the files listed
+    in *file_paths*.  Non-manual nodes and outgoing edges from each listed
+    file are removed and replaced with freshly scanned content.  Manual
+    annotations survive the sync.  Files that no longer exist are handled
+    as deletions (their nodes/edges are removed).
+
+    Parameters
+    ----------
+    project_path:
+        Absolute path to the project root (must already be initialized with
+        ``codegiraffe_init``).
+    file_paths:
+        Files to re-scan.  Accepts either a JSON array of absolute paths
+        (e.g. ``["path/a.py","path/b.py"]``) or a comma-separated string
+        (e.g. ``"path/a.py,path/b.py"``).
+    scanner_mode:
+        Scanner strategy — ``"regex"`` (default) or ``"ast"``.
+
+    Returns
+    -------
+    str
+        JSON string with keys ``added``, ``removed``, and ``preserved``,
+        each containing ``nodes`` and ``edges`` counts.
+    """
+    global _graph  # noqa: PLW0603
+
+    try:
+        from codegiraffe.scanner import sync_files
+
+        # Parse file_paths: accept JSON array or comma-separated string
+        if file_paths.strip().startswith("["):
+            paths = json.loads(file_paths)
+        else:
+            paths = [p.strip() for p in file_paths.split(",") if p.strip()]
+
+        graph = _ensure_graph(project_path)
+
+        summary = sync_files(
+            graph=graph,
+            project_path=project_path,
+            file_paths=paths,
+            scanner_mode=scanner_mode,
+        )
+
+        # Persist updated graph
+        _storage.save(project_path, graph.to_data())
+
+        return json.dumps(summary)
+
+    except Exception as exc:
+        return f"Error in incremental sync: {exc}"
 
 
 @mcp.tool()
@@ -1506,6 +1999,296 @@ def codegiraffe_cypher(project_path: str, query: str) -> str:
         return "Error: Neo4j driver not installed. Install with: pip install codegiraffe[neo4j]"
     except Exception as exc:
         return f"Error running Cypher query: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Convention Mining
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_patterns(
+    project_path: str,
+    node_type: str,
+    min_cluster: int = 3,
+) -> str:
+    """Mine naming conventions and detect anti-patterns from a cluster of same-type nodes.
+
+    Analyzes all nodes of the given *node_type* in the graph to surface:
+    - **Naming pattern**: common prefix/suffix in node IDs (e.g. ``service:*Service``)
+    - **Common attributes**: metadata keys present in >66% of nodes
+    - **Outliers**: node IDs that deviate from the majority convention
+    - **Exemplar**: the node most representative of the cluster
+
+    Requires at least *min_cluster* nodes of the given type (default 3).
+
+    Examples::
+
+        codegiraffe_patterns(project_path=".", node_type="service")
+        codegiraffe_patterns(project_path=".", node_type="endpoint", min_cluster=5)
+    """
+    try:
+        graph = _ensure_graph(project_path)
+        result = _extract_patterns(graph, node_type, min_cluster=min_cluster)
+    except Exception as exc:
+        return f"Error extracting patterns: {exc}"
+
+    return _format_pattern_report(result)
+
+
+def _format_pattern_report(result: dict) -> str:
+    """Format an extract_patterns result dict as a markdown report."""
+    node_type = result.get("node_type", "unknown")
+    sample_size = result.get("sample_size", 0)
+
+    lines = [f"## Convention Mining: `{node_type}`", ""]
+    lines.append(f"**Nodes analysed:** {sample_size}")
+    lines.append("")
+
+    if "message" in result:
+        lines.append(f"_{result['message']}_")
+        return "\n".join(lines)
+
+    naming_pattern = result.get("naming_pattern", "")
+    common_attributes = result.get("common_attributes", {})
+    outliers = result.get("outliers", [])
+    exemplar = result.get("exemplar", "")
+
+    # Naming pattern
+    lines.append(f"**Naming pattern:** `{naming_pattern}`")
+    lines.append("")
+
+    # Exemplar
+    if exemplar:
+        lines.append(f"**Exemplar node:** `{exemplar}`")
+        lines.append("")
+
+    # Common attributes
+    if common_attributes:
+        lines.append("**Common attributes** (present in >66% of nodes):")
+        for key, value in sorted(common_attributes.items()):
+            lines.append(f"- `{key}`: `{value}`")
+        lines.append("")
+    else:
+        lines.append("**Common attributes:** none detected")
+        lines.append("")
+
+    # Outliers
+    if outliers:
+        lines.append(f"**Outliers** ({len(outliers)} node(s) deviating from the pattern):")
+        for nid in outliers:
+            lines.append(f"- `{nid}`")
+        lines.append("")
+    else:
+        lines.append("**Outliers:** none — all nodes conform to the pattern")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# PR Diff tool (v0.11.0 -- Graph Intelligence)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_pr_diff(
+    project_path: str,
+    base_ref: str,
+    head_ref: str = "HEAD",
+    scanner_mode: str = "regex",
+) -> str:
+    """Compare the architectural graph between two git refs for PR review.
+
+    Builds a temporary git worktree for *base_ref* and *head_ref*, scans each
+    one, and computes the architectural diff between them.  Returns a markdown
+    report showing nodes added/removed/modified, edges added/removed, contracts
+    affected, and any new circular dependencies introduced by the PR.
+
+    Parameters
+    ----------
+    project_path:
+        Root of the git repository to analyse.
+    base_ref:
+        The base branch / commit SHA (e.g. ``"main"`` or ``"abc1234"``).
+    head_ref:
+        The head branch / commit SHA (default ``"HEAD"`` -- the current branch tip).
+    scanner_mode:
+        ``"regex"`` (default) or ``"ast"`` for tree-sitter scanning.
+    """
+    from codegiraffe.graph_diff import build_graph_at_ref, compute_graph_diff
+
+    try:
+        base_graph = build_graph_at_ref(project_path, base_ref, scanner_mode=scanner_mode)
+    except Exception as exc:
+        return f"Error building graph at base ref {base_ref!r}: {exc}"
+
+    try:
+        head_graph = build_graph_at_ref(project_path, head_ref, scanner_mode=scanner_mode)
+    except Exception as exc:
+        return f"Error building graph at head ref {head_ref!r}: {exc}"
+
+    try:
+        diff = compute_graph_diff(base_graph, head_graph)
+    except Exception as exc:
+        return f"Error computing graph diff: {exc}"
+
+    return _format_pr_diff_report(diff, base_ref, head_ref)
+
+
+def _format_pr_diff_report(diff: dict, base_ref: str, head_ref: str) -> str:
+    """Format a compute_graph_diff result as a markdown PR review report."""
+    lines = [
+        f"## PR Architectural Diff: `{base_ref}` -> `{head_ref}`",
+        "",
+        diff["summary"],
+        "",
+    ]
+
+    # Nodes
+    if diff["nodes_added"]:
+        lines.append(f"### Nodes Added ({len(diff['nodes_added'])})")
+        for nid in diff["nodes_added"]:
+            lines.append(f"- `{nid}`")
+        lines.append("")
+
+    if diff["nodes_removed"]:
+        lines.append(f"### Nodes Removed ({len(diff['nodes_removed'])})")
+        for nid in diff["nodes_removed"]:
+            lines.append(f"- `{nid}`")
+        lines.append("")
+
+    if diff["nodes_modified"]:
+        lines.append(f"### Nodes Modified ({len(diff['nodes_modified'])})")
+        for nid in diff["nodes_modified"]:
+            lines.append(f"- `{nid}`")
+        lines.append("")
+
+    # Edges
+    if diff["edges_added"]:
+        lines.append(f"### Edges Added ({len(diff['edges_added'])})")
+        for e in diff["edges_added"]:
+            lines.append(f"- `{e['source']}` --[{e['type']}]--> `{e['target']}`")
+        lines.append("")
+
+    if diff["edges_removed"]:
+        lines.append(f"### Edges Removed ({len(diff['edges_removed'])})")
+        for e in diff["edges_removed"]:
+            lines.append(f"- `{e['source']}` --[{e['type']}]--> `{e['target']}`")
+        lines.append("")
+
+    # Contracts
+    if diff["contracts_affected"]:
+        lines.append(f"### Contracts Affected ({len(diff['contracts_affected'])})")
+        for cid in diff["contracts_affected"]:
+            lines.append(f"- `{cid}`")
+        lines.append("")
+
+    # New cycles
+    if diff["new_cycles"]:
+        lines.append(f"### New Cycles Introduced ({len(diff['new_cycles'])})")
+        lines.append(
+            "> **Warning:** The following circular dependencies were introduced by this PR."
+        )
+        for i, cycle in enumerate(diff["new_cycles"], 1):
+            display = cycle + [cycle[0]]
+            lines.append(f"**Cycle {i}:** " + " -> ".join(f"`{n}`" for n in display))
+        lines.append("")
+    else:
+        lines.append("### Cycles")
+        lines.append("No new circular dependencies introduced.")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Migration planner tool (v0.11.0 -- Graph Intelligence)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_migration_plan(
+    project_path: str,
+    description: str,
+    target_nodes: str | None = None,
+) -> str:
+    """Generate an ordered migration plan for a refactor or architectural change.
+
+    Resolves affected nodes (from *target_nodes* or keyword-matched from
+    *description*), sorts them by dependency order (leaves first), identifies
+    safe rollback checkpoints, and surfaces any contract implications.
+
+    Parameters
+    ----------
+    project_path:
+        Root of the project whose graph to use.
+    description:
+        Human-readable description of the migration (e.g. "migrate auth
+        service to JWT tokens").  Used for keyword-matching when
+        *target_nodes* is not supplied.
+    target_nodes:
+        Optional JSON array of explicit node IDs to include in the plan
+        (e.g. ``'["auth.service", "auth.middleware"]'``).  When omitted,
+        affected nodes are inferred from *description*.
+    """
+    try:
+        graph = _ensure_graph(project_path)
+    except RuntimeError as exc:
+        return f"Error: {exc}"
+
+    parsed_targets: list[str] | None = None
+    if target_nodes is not None:
+        try:
+            parsed_targets = json.loads(target_nodes)
+        except (json.JSONDecodeError, TypeError) as exc:
+            return f"Error: target_nodes must be a valid JSON array — {exc}"
+
+    plan = generate_migration_plan(graph, description, parsed_targets)
+
+    if not plan["steps"]:
+        return (
+            f"No nodes matched for migration plan.\n"
+            f"Description: {description!r}\n"
+            f"Tip: pass target_nodes as a JSON array of node IDs, or use "
+            f"codegiraffe_query to discover relevant node IDs first."
+        )
+
+    lines: list[str] = [
+        f"## Migration Plan: {description}",
+        "",
+        f"**Steps:** {len(plan['steps'])}  |  "
+        f"**Files affected:** {plan['estimated_files']}  |  "
+        f"**Checkpoints:** {len(plan['checkpoints'])}",
+        "",
+    ]
+
+    if plan["cycles"]:
+        lines.append(
+            f"> **Warning:** {len(plan['cycles'])} cycle(s) detected among target "
+            f"nodes — dependency order may not be optimal."
+        )
+        for cycle in plan["cycles"]:
+            lines.append("  - " + " -> ".join(f"`{n}`" for n in cycle))
+        lines.append("")
+
+    lines.append("### Steps")
+    checkpoint_set = set(plan["checkpoints"])
+    for step in plan["steps"]:
+        marker = " ✓ checkpoint" if step["order"] in checkpoint_set else ""
+        file_hint = f" (`{step['file']}`)" if step["file"] else ""
+        lines.append(
+            f"{step['order']}. **{step['node_id']}**{file_hint} — {step['description']}{marker}"
+        )
+    lines.append("")
+
+    if plan["contract_implications"]:
+        lines.append(f"### Contract Implications ({len(plan['contract_implications'])})")
+        for ci in plan["contract_implications"]:
+            lines.append(f"- **{ci['contract']}**: {ci['impact']}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

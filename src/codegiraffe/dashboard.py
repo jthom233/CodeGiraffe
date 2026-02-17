@@ -279,12 +279,13 @@ body {
     service: '#4A90D9', endpoint: '#7B68EE', database_table: '#2ECC71',
     queue: '#E67E22', env_var: '#F39C12', config: '#D4AC0D',
     worker: '#E74C3C', frontend_component: '#9B59B6', event: '#1ABC9C',
-    external_api: '#95A5A6', module: '#D35400', contract: '#8E44AD'
+    external_api: '#95A5A6', module: '#D35400', contract: '#8E44AD',
+    decision: '#2196F3', domain: '#f0f0f0'
   };
   const TYPE_SHAPES = {
     endpoint: 'diamond', database_table: 'barrel', worker: 'hexagon',
     queue: 'rectangle', event: 'ellipse', module: 'round-rectangle',
-    contract: 'hexagon'
+    contract: 'hexagon', decision: 'tag'
   };
   const DEFAULT_COLOR = '#4A90D9';
   const DEFAULT_SHAPE = 'round-rectangle';
@@ -319,22 +320,51 @@ body {
 
   function d3ToCytoscape(d3Data) {
     const elements = [];
+    const domainNodes = new Set();
+    
+    // First pass: identify domain nodes
     (d3Data.nodes || []).forEach(n => {
+      if (n.type === 'domain') {
+        domainNodes.add(n.id);
+      }
+    });
+    
+    // Build a map of node -> parent domain via belongs_to edges
+    const nodeToParent = {};
+    (d3Data.links || []).forEach(e => {
+      if (e.type === 'belongs_to' && domainNodes.has(e.target)) {
+        nodeToParent[e.source] = e.target;
+      }
+    });
+    
+    // Second pass: add all nodes with parent relationships
+    (d3Data.nodes || []).forEach(n => {
+      const nodeData = {
+        id: n.id, label: n.label || n.id, type: n.type || 'unknown',
+        file_path: n.file_path || '', manual: n.manual || false,
+        metadata: n.metadata || {}
+      };
+      
+      // If this node belongs to a domain, set parent
+      if (nodeToParent[n.id]) {
+        nodeData.parent = nodeToParent[n.id];
+      }
+      
       elements.push({
         group: 'nodes',
-        data: {
-          id: n.id, label: n.label || n.id, type: n.type || 'unknown',
-          file_path: n.file_path || '', manual: n.manual || false,
-          metadata: n.metadata || {}
-        }
+        data: nodeData
       });
     });
+    
+    // Third pass: add edges
     (d3Data.links || []).forEach(e => {
+      const conf = (typeof e.confidence === 'number') ? e.confidence : 1.0;
       elements.push({
         group: 'edges',
         data: {
           id: e.source + '-' + e.target + '-' + e.type,
-          source: e.source, target: e.target, type: e.type || ''
+          source: e.source, target: e.target, type: e.type || '',
+          confidence: conf
         }
       });
     });
@@ -379,6 +409,19 @@ body {
           }
         },
         {
+          selector: 'node:parent',
+          style: {
+            'background-color': '#f0f0f0',
+            'border-color': '#888',
+            'border-width': 2,
+            'padding': '10px',
+            'text-valign': 'top',
+            'text-halign': 'center',
+            'font-weight': 'bold',
+            'color': '#333'
+          }
+        },
+        {
           selector: 'edge',
           style: {
             'width': 1.5,
@@ -390,7 +433,11 @@ body {
             'font-size': '8px',
             'color': '#556',
             'text-rotation': 'autorotate',
-            'text-margin-y': -8
+            'text-margin-y': -8,
+            'opacity': function(ele) {
+              const conf = ele.data('confidence');
+              return (typeof conf === 'number') ? Math.max(0.3, conf) : 1.0;
+            }
           }
         },
         {
@@ -477,6 +524,42 @@ body {
             'line-style': 'solid',
             'width': 2
           }
+        },
+        {
+          selector: 'edge[type="constrains"]',
+          style: {
+            'line-color': '#2196F3',
+            'target-arrow-color': '#2196F3',
+            'line-style': 'dotted',
+            'width': 1.5
+          }
+        },
+        {
+          selector: 'edge[type="supersedes"]',
+          style: {
+            'line-color': '#9E9E9E',
+            'target-arrow-color': '#9E9E9E',
+            'line-style': 'dashed',
+            'width': 1
+          }
+        },
+        {
+          selector: 'node[?metadata]',
+          style: {
+            'border-width': function(ele) {
+              const meta = ele.data('metadata') || {};
+              return meta.owner ? 3 : 2;
+            },
+            'border-color': function(ele) {
+              const meta = ele.data('metadata') || {};
+              if (!meta.owner) return '#0f3460';
+              const stability = meta.stability;
+              if (stability === 'deprecated') return '#E74C3C';
+              if (stability === 'experimental') return '#F39C12';
+              if (stability === 'legacy') return '#95A5A6';
+              return '#27AE60';
+            }
+          }
         }
       ],
       layout: { name: 'cose', animate: false, nodeDimensionsIncludeLabels: true }
@@ -493,7 +576,9 @@ body {
         produces: 'Produces',
         consumes_contract: 'Consumes Contract',
         validates: 'Validates',
-        violates: 'Violates'
+        violates: 'Violates',
+        constrains: 'Constrains',
+        supersedes: 'Supersedes'
     };
 
     cy.on('mouseover', 'edge', function(evt) {
@@ -702,6 +787,8 @@ body {
         consumes_contract: { color: '#9B59B6', style: 'dashed' },
         validates: { color: '#27AE60', style: 'dotted' },
         violates: { color: '#E74C3C', style: '' },
+        constrains: { color: '#2196F3', style: 'dotted' },
+        supersedes: { color: '#9E9E9E', style: 'dashed' },
         default: { color: '#2a3a5e', style: '' }
     };
     Object.keys(edgeStyles).forEach(t => {

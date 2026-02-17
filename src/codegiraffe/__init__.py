@@ -1,6 +1,6 @@
 """Code Giraffe - Architecture knowledge graph MCP server."""
 
-__version__ = "0.10.0"
+__version__ = "0.13.0"
 
 from codegiraffe.registry import RecognizerRegistry, get_default_registry, register_recognizer
 

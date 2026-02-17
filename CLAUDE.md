@@ -8,6 +8,8 @@
 - **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (979+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
+- Python 3.11+ + FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2 (011-graph-intelligence)
+- JSON + SQLite + Neo4j (all via StorageBackend protocol) (011-graph-intelligence)
 
 ## Project Structure
 
@@ -100,10 +102,6 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
+- 011-graph-intelligence: Added Python 3.11+ + FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - v0.10.0: Change impact validation -- `codegiraffe_validate_changes` (detect incomplete modifications from git diff), `codegiraffe_suggest_tests` (recommend test files for changes), `codegiraffe_file_coupling` (mine git co-change history); enhanced `codegiraffe_context_for` with `include_changes` parameter for change-aware scoring; new modules `diff_parser.py` and `git_utils.py`; 28 MCP tools total; 979+ tests
 - v0.9.0: Scanner depth -- call-graph edges (`calls`) for Go/Python/TypeScript via regex and tree-sitter AST; cross-file Go interface satisfaction (duck-type method set matching); demand-driven method nodes (`service:{Parent}.{Method}`); `CallInfo`/`InterfaceInfo`/`MethodSetEntry` data classes; `_infer_call_edges()` and `_infer_interface_satisfaction()` pipeline steps; improved TypeScript `implements` multi-interface and generic handling; 874+ tests
-- v0.8.0: Cross-system contracts -- `codegiraffe_contracts` (list/filter), `codegiraffe_validate_contracts` (integrity check), `codegiraffe_add_contract` (manual creation); contract inference for API, event, config, and data contracts; contract-aware blast radius with critical severity for contract consumers; dashboard contract styling (hexagonal purple nodes); 25 MCP tools total; 791+ tests
-- v0.7.0: Impact analysis tools -- `codegiraffe_blast_radius` (downstream impact by severity), `codegiraffe_risk_assessment` (composite risk scoring), `codegiraffe_cycles` (circular dependency detection); enhanced `codegiraffe_context_for` with `include_impact` parameter; enhanced `codegiraffe_hotspots` with `metrics` parameter; 22 MCP tools total; 754+ tests
-- v0.6.0 (006-language-agnostic-intelligence): Language-agnostic scanner intelligence -- universal module nodes, `contains` edges, import detection, and implementation/inheritance detection for all 9 languages; `ImportInfo` and `ImplementationInfo` data classes on `ScanResult` for structured recognizer output; Go `go.mod`-aware import parsing and interface implementation detection; test file exclusion extended to all languages; 698+ tests
-- v0.5.0: 4 new language recognizers (C#, C/C++, PHP, Ruby — now 9 languages); 3 new dashboard layouts (grid, concentric, breadthfirst); dashboard improvements (legend, stats, edge tooltips, refined colors); 566+ tests
-- v0.4.0 (005-scanner-intelligence): Scanner intelligence -- test file exclusion, import detection, inheritance detection, module nodes; new schema types (`module`, `imports`, `implements`, `contains`); `include_tests` parameter on `codegiraffe_init` and `codegiraffe_sync`; 505+ tests

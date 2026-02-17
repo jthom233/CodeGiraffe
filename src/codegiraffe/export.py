@@ -136,6 +136,7 @@ def to_d3_json(data: GraphData) -> str:
                 "target": edge.target,
                 "type": edge.type,
                 "manual": edge.manual,
+                "confidence": edge.confidence,
                 "metadata": edge.metadata,
             }
         )

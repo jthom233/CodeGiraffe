@@ -98,7 +98,7 @@ Add to your `claude_desktop_config.json`:
 
 ## MCP Tools
 
-Code Giraffe exposes **28 tools** that any MCP client can call:
+Code Giraffe exposes **36 tools** that any MCP client can call:
 
 ### `codegiraffe_init`
 
@@ -175,7 +175,7 @@ codegiraffe_add_relation(
 
 ### `codegiraffe_context_for`
 
-The killer tool. Given a natural-language task description, returns the minimal relevant subgraph ranked by impact -- so agents get exactly the context they need without wasting tokens on irrelevant code.
+The killer tool. Given a natural-language task description, returns the minimal relevant subgraph ranked by impact -- so agents get exactly the context they need without wasting tokens on irrelevant code. Automatically classifies task intent and adjusts retrieval strategy accordingly.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -185,18 +185,77 @@ The killer tool. Given a natural-language task description, returns the minimal 
 | `use_embeddings` | `bool` | `true` | Use embedding-based semantic scoring when available |
 | `include_impact` | `bool` | `false` | Augment nodes with `_blast_radius_count` and `_risk_score` metadata |
 | `include_changes` | `bool` | `false` | Boost nodes affected by uncommitted git changes (adds `_recently_changed` and `_in_change_blast_radius` metadata) |
+| `min_confidence` | `float` | `0.0` | Filter edges below this confidence threshold (0.0-1.0) |
+| `token_budget` | `int` | `0` | Maximum estimated tokens for response (0 = unlimited) |
+| `detail_level` | `str` | `"standard"` | Response detail level: `"summary"` (minimal tokens), `"standard"` (balanced), `"detailed"` (full context) |
+
+**Response enhancements (v0.11.0):**
+- `_token_estimate` -- Estimated token count for the response
+- `_retrieval_strategy` -- Strategy used: `keyword`, `embedding`, `impact`, `change_aware`, or `combined`
 
 When `sentence-transformers` is installed and `use_embeddings` is `true`, scoring uses embedding-based semantic similarity for significantly better relevance ranking. Otherwise, it falls back to keyword overlap scoring. See the [Embedding-Based Scoring](#embedding-based-scoring) section for details.
 
 When `include_changes` is `true`, nodes affected by uncommitted git changes receive a +0.3 score boost (directly changed) or +0.15 boost (in blast radius of changes), ensuring change-relevant context surfaces first.
 
+Intent-aware navigation automatically classifies the task:
+- **Feature addition** -- Prioritizes endpoints and services that define the new capability
+- **Bug fix** -- Prioritizes nodes in the blast radius of error traces or affected modules
+- **Performance** -- Prioritizes hotspots (high centrality) and tight couplings
+- **Refactoring** -- Prioritizes cohesive clusters and related modules
+- **Documentation** -- Prioritizes public interfaces and entry points
+
 **Example:**
 ```
 codegiraffe_context_for(
   project_path="/home/user/my-project",
-  task="add rate limiting to the payments endpoint"
+  task="add rate limiting to the payments endpoint",
+  token_budget=2000,
+  detail_level="detailed"
 )
 --> JSON subgraph with payments endpoint, its middleware, DB tables, env vars, ranked by relevance
+    _token_estimate: 1856
+    _retrieval_strategy: "combined" (embedding + impact)
+```
+
+---
+
+### `codegiraffe_patterns`
+
+Analyze clusters of same-type nodes to extract naming conventions, structural patterns, and detect anti-patterns. Useful for understanding architectural styles and identifying inconsistencies.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `node_type` | `str` | required | Node type to analyze (e.g., `"endpoint"`, `"service"`, `"database_table"`) |
+| `min_cluster` | `int` | `3` | Minimum cluster size to report |
+
+**Analysis includes:**
+- **Naming patterns** -- Extracts common prefixes, suffixes, and delimiters (e.g., `GET /api/*`, `POST /admin/*`)
+- **Structural patterns** -- Identifies common edge types, counts, and dependency depths
+- **Anti-patterns** -- Detects inconsistencies like orphaned nodes, naming violations, or unusually high/low coupling
+- **Cluster analysis** -- Groups similar nodes and reports their characteristics
+
+**Example:**
+```
+codegiraffe_patterns(project_path="/home/user/my-project", node_type="endpoint", min_cluster=3)
+--> ## Endpoint Patterns
+    **2 cluster(s) found**
+
+    ### API Cluster (8 endpoints)
+    - **Naming:** GET /api/*, POST /api/*, PUT /api/*
+    - **Common prefix:** /api/
+    - **Avg edges per node:** 2.1
+    - **Avg depth:** 1.7
+
+    ### Admin Cluster (3 endpoints)
+    - **Naming:** GET /admin/*, POST /admin/*, DELETE /admin/*
+    - **Common prefix:** /admin/
+    - **Avg edges per node:** 1.0
+    - **Avg depth:** 2.2
+
+    ### Anti-patterns detected
+    - 1 orphaned endpoint: /health (0 edges)
+    - 1 naming violation: get_user (uses snake_case, inconsistent with /api pattern)
 ```
 
 ---
@@ -504,7 +563,7 @@ codegiraffe_cypher(project_path="/home/user/my-project", query="MATCH (n:endpoin
 
 ### `codegiraffe_blast_radius`
 
-Analyze the blast radius of changing a specific node. Returns what breaks downstream, ranked by severity (direct, transitive, indirect), plus any circular dependencies and hotspots.
+Analyze the blast radius of changing a specific node. Returns what breaks downstream, ranked by severity (direct, transitive, indirect), plus any circular dependencies and hotspots. Edge confidence is weighted into the impact calculation.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -527,7 +586,7 @@ codegiraffe_blast_radius(
 
 ### `codegiraffe_risk_assessment`
 
-Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4) + (descendants/total * 0.2).
+Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4) + (descendants/total * 0.2). Incorporates test coverage data — uncovered nodes receive a 1.5x risk multiplier.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -537,7 +596,7 @@ Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4)
 **Example:**
 ```
 codegiraffe_risk_assessment(project_path="/home/user/my-project")
---> [{"node_id": "service:AuthService", "risk_score": 0.82, "degree": 12, "betweenness": 0.45, "descendants": 8}, ...]
+--> [{"node_id": "service:AuthService", "risk_score": 0.82, "degree": 12, "betweenness": 0.45, "descendants": 8, "coverage": "partial"}, ...]
 ```
 
 ---
@@ -663,7 +722,7 @@ codegiraffe_validate_changes(project_path="/home/user/my-project")
 
 ### `codegiraffe_suggest_tests`
 
-Suggest test files to run based on uncommitted (or arbitrary) changes. Uses graph relationships, naming conventions, and blast radius analysis to identify the most relevant tests.
+Suggest test files to run based on uncommitted (or arbitrary) changes. Uses graph relationships, naming conventions, and blast radius analysis to identify the most relevant tests. Now includes `coverage_status` field (covered/uncovered/unknown).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -684,13 +743,13 @@ codegiraffe_suggest_tests(project_path="/home/user/my-project")
     **3 test(s) suggested**
 
     ### High Relevance (score >= 0.7)
-    - tests/test_auth.py (0.90) — graph: imports changed module [graph]
+    - tests/test_auth.py (0.90) — graph: imports changed module [graph] (coverage: covered)
 
     ### Medium Relevance (0.3 <= score < 0.7)
-    - tests/test_users.py (0.60) — naming: matches changed file users.py [naming]
+    - tests/test_users.py (0.60) — naming: matches changed file users.py [naming] (coverage: uncovered)
 
     ### Low Relevance (score < 0.3)
-    - tests/test_api.py (0.30) — blast radius: transitive dependency [blast_radius]
+    - tests/test_api.py (0.30) — blast radius: transitive dependency [blast_radius] (coverage: unknown)
 ```
 
 ---
@@ -723,6 +782,243 @@ codegiraffe_file_coupling(project_path="/home/user/my-project", depth=50)
     ### Implicit Coupling (not in graph)
     - config.py ↔ settings.py: 50% coupling over 5 co-changes — consider adding a graph relationship
 ```
+
+---
+
+### `codegiraffe_annotate`
+
+Annotate nodes with metadata including owner, stability status, and custom notes. Annotations are marked as manual and survive re-scans.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `node_id` | `str` | required | Node ID to annotate |
+| `owner` | `str \| None` | `None` | Owner team/person for this node |
+| `stability` | `str \| None` | `None` | Stability status: `stable`, `experimental`, `deprecated`, `legacy` |
+| `notes` | `str \| None` | `None` | Free-form notes or documentation for this node |
+
+**Example:**
+```
+codegiraffe_annotate(
+  project_path="/home/user/my-project",
+  node_id="service:PaymentService",
+  owner="payments-team",
+  stability="stable",
+  notes="Stripe integration. Critical path. Do not break."
+)
+--> "Annotated service:PaymentService: owner=payments-team, stability=stable"
+```
+
+---
+
+### `codegiraffe_sync_files`
+
+Incrementally sync specific changed files without a full rescan. Faster than `codegiraffe_sync` for small changes.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `file_paths` | `list[str]` | required | Absolute or relative file paths to sync |
+| `scanner_mode` | `str` | `"regex"` | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
+
+**Example:**
+```
+codegiraffe_sync_files(
+  project_path="/home/user/my-project",
+  file_paths=["src/auth.py", "src/users.py"]
+)
+--> "Synced 2 files. Nodes: 47 -> 49 (delta +2). Edges: 63 -> 66 (delta +3)."
+```
+
+---
+
+### `codegiraffe_coverage`
+
+Map test coverage data from coverage.py, Istanbul, or LCOV files to graph nodes. Links covered/uncovered code regions to their corresponding nodes for risk assessment.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `coverage_path` | `str` | required | Path to coverage file (.coverage, coverage.json, or .lcov) |
+| `format` | `str` | required | Coverage format: `"coverage.py"`, `"istanbul"`, or `"lcov"` |
+
+**Example:**
+```
+codegiraffe_coverage(
+  project_path="/home/user/my-project",
+  coverage_path=".coverage",
+  format="coverage.py"
+)
+--> "Mapped coverage data: 127 nodes covered (78%), 36 nodes uncovered (22%)"
+```
+
+---
+
+### `codegiraffe_pr_diff`
+
+Compare graph architecture at two git refs to detect structural changes. Useful for PR review to understand what's being added/removed at the architecture level.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `base_ref` | `str` | required | Base git ref (branch, tag, or commit) |
+| `head_ref` | `str` | required | Head git ref to compare against |
+
+**Example:**
+```
+codegiraffe_pr_diff(
+  project_path="/home/user/my-project",
+  base_ref="main",
+  head_ref="feature/new-api"
+)
+--> {
+      "nodes_added": ["endpoint:/api/v2/users", "service:UserServiceV2"],
+      "nodes_removed": [],
+      "edges_added": [{"source": "endpoint:/api/v2/users", "target": "table:users", "type": "reads"}],
+      "structural_changes": 2
+    }
+```
+
+---
+
+### `codegiraffe_order_tasks`
+
+Order a list of tasks by dependency topology, grouping parallelizable tasks and identifying conflict zones.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `tasks` | `str` | required | JSON array of tasks with `id`, `description`, and optional `dependencies` fields |
+
+**Example:**
+```
+codegiraffe_order_tasks(
+  project_path="/home/user/my-project",
+  tasks='[
+    {"id": "task-1", "description": "Add auth endpoint", "dependencies": []},
+    {"id": "task-2", "description": "Add user table", "dependencies": []},
+    {"id": "task-3", "description": "Add user service", "dependencies": ["task-1", "task-2"]}
+  ]'
+)
+--> {
+      "ordered_groups": [
+        ["task-1", "task-2"],  # Can run in parallel
+        ["task-3"]              # Depends on both above
+      ],
+      "conflict_zones": []
+    }
+```
+
+---
+
+### `codegiraffe_domains`
+
+Infer or manage domain groupings from directory structure. Groups related services/modules into logical domains.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `action` | `str` | required | Action: `"infer"`, `"list"`, `"create"`, or `"update"` |
+| `name` | `str` | optional | Domain name (required for `create`/`update`) |
+| `node_ids` | `list[str]` | optional | Node IDs to assign to domain (for `create`/`update`) |
+
+**Example:**
+```
+codegiraffe_domains(
+  project_path="/home/user/my-project",
+  action="infer"
+)
+--> {
+      "domains": [
+        {
+          "name": "auth",
+          "nodes": ["endpoint:/api/login", "service:AuthService", "table:users"],
+          "inferred_from": "src/auth/*"
+        },
+        {
+          "name": "payments",
+          "nodes": ["endpoint:/api/payments", "service:PaymentService", "queue:payment-events"],
+          "inferred_from": "src/payments/*"
+        }
+      ]
+    }
+```
+
+---
+
+### `codegiraffe_migration_plan`
+
+Generate an ordered migration plan for large refactors, identifying safe stages and breaking large changes into phases.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_path` | `str` | required | Root directory of the project |
+| `description` | `str` | required | Description of the refactor (e.g., "migrate auth from Firebase to JWT") |
+| `target_nodes` | `list[str]` | optional | Specific nodes involved in the refactor |
+
+**Example:**
+```
+codegiraffe_migration_plan(
+  project_path="/home/user/my-project",
+  description="migrate auth from Firebase to JWT",
+  target_nodes=["service:AuthService", "endpoint:/api/login"]
+)
+--> {
+      "phases": [
+        {
+          "phase": 1,
+          "title": "Create JWT infrastructure",
+          "nodes": ["service:TokenService"],
+          "estimated_effort": "1-2 days"
+        },
+        {
+          "phase": 2,
+          "title": "Dual-mode endpoints (Firebase + JWT)",
+          "nodes": ["endpoint:/api/login"],
+          "estimated_effort": "2-3 days"
+        },
+        {
+          "phase": 3,
+          "title": "Migrate consumers to JWT",
+          "nodes": ["service:UserService", "component:Dashboard"],
+          "estimated_effort": "1-2 days"
+        }
+      ],
+      "total_estimated_effort": "4-7 days",
+      "breaking_points": []
+    }
+```
+
+---
+
+## Edge Confidence Scoring
+
+All edges in the architecture graph now carry a `confidence` value (0.0-1.0) that reflects the reliability of the detected relationship. Higher confidence means the edge is more likely to be accurate; lower confidence indicates the relationship was inferred with less certainty.
+
+**Confidence values by detection method:**
+
+| Detection Method | Confidence |
+|---|---|
+| AST-parsed edges (tree-sitter) | 1.0 |
+| Regex imports with exact matches | 0.9 |
+| Inheritance (extends/implements) | 0.8 |
+| Call-graph edges (high certainty) | 0.8 |
+| Call-graph edges (lower certainty) | 0.6 |
+| Interface satisfaction (Go) | 0.7 |
+| Contract inference | 0.5 |
+
+When querying with `codegiraffe_context_for`, use the `min_confidence` parameter to filter out lower-confidence edges and focus on well-established relationships:
+
+```
+codegiraffe_context_for(
+  project_path="/home/user/my-project",
+  task="add rate limiting to payments endpoint",
+  min_confidence=0.7
+)
+--> Only edges with confidence >= 0.7 are included in the subgraph
+```
+
+Blast radius analysis weights impact calculations by edge confidence, so high-confidence direct impacts are weighted more heavily than speculative transitive impacts.
 
 ---
 
@@ -1326,6 +1622,39 @@ The project follows a formal constitution at `.specify/memory/constitution.md` w
 - [x] Enhanced `codegiraffe_context_for` with `include_changes` parameter
 - [x] New modules: `diff_parser.py`, `git_utils.py`
 - [x] 979+ tests
+
+### v0.11.0 — Intelligent Context
+
+- [x] 1 new MCP tool: `codegiraffe_patterns` (29 tools total)
+- [x] Token-aware context budgets: `token_budget` and `detail_level` parameters on `codegiraffe_context_for`
+- [x] Intent-aware navigation: automatically classifies task intent (feature, bug fix, performance, refactoring, documentation)
+- [x] Enhanced `codegiraffe_context_for` response fields: `_token_estimate`, `_retrieval_strategy`
+- [x] Architectural decision record (ADR) detection: identifies and surfaces architectural decisions from patterns
+- [x] Convention mining: `codegiraffe_patterns` analyzes naming conventions, structural patterns, and detects anti-patterns
+- [x] 1087+ tests
+
+### v0.12.0 — Graph Enrichment
+
+- [x] 2 new MCP tools: `codegiraffe_annotate`, `codegiraffe_sync_files` (31 tools total)
+- [x] Edge confidence scoring: all edges carry confidence value (0.0-1.0) based on detection method
+- [x] Enhanced `codegiraffe_context_for` with `min_confidence` parameter to filter edges by confidence
+- [x] Ownership and annotation layer: nodes annotated with owner, stability status (stable/experimental/deprecated/legacy), and notes
+- [x] Incremental file sync: `codegiraffe_sync_files` for fast updates of changed files only
+- [x] Enhanced `codegiraffe_blast_radius` with `cross_team_impact` detection for ownership-aware analysis
+- [x] Confidence-weighted blast radius: impact calculations weighted by edge confidence
+- [x] 1154+ tests
+
+### v0.13.0 — Advanced Analysis
+
+- [x] 5 new MCP tools: `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan` (36 tools total)
+- [x] Test coverage mapping: map coverage.py/Istanbul/LCOV data to graph nodes for risk assessment
+- [x] Enhanced `codegiraffe_risk_assessment` with coverage data: uncovered nodes receive 1.5x risk multiplier
+- [x] Enhanced `codegiraffe_suggest_tests` with `coverage_status` field (covered/uncovered/unknown)
+- [x] PR diffing: compare architecture at two git refs to detect structural changes
+- [x] Dependency-aware task ordering: topological sort with parallel groups and conflict zone detection
+- [x] Domain model abstraction: infer or manage logical domain groupings from directory structure
+- [x] CI/CD integration workflow: migration planning for large refactors with phased rollout
+- [x] 1318+ tests
 
 ### Future
 
