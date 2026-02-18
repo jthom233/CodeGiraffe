@@ -1,0 +1,22 @@
+# Specification
+
+## Requirements
+
+Performance Guards for Large Codebases (v0.14.0)
+
+A user running CodeGiraffe on a 33,875-node C++ codebase experienced a 4+ hour hang on detect_drift and 1.9GB memory usage, eventually crashing the Claude Code runtime. The root causes are algorithmic: O(N^2) similarity matching in drift detection, O(N) linear scans in the scanner, and no caching on hot serialization paths.
+
+5 changes addressing the highest-impact bottlenecks:
+
+1. Guard detect_drift similarity loop (CRITICAL) - Add _SIMILARITY_MATCH_LIMIT=500 constant. When either missing_in_code or missing_in_graph exceeds the limit, skip similarity matching entirely and emit a similarity_skipped drift record.
+
+2. Build name lookup dict for scanner (CRITICAL) - Add _build_name_lookup(result: ScanResult) -> dict[str,str] that builds a name->node_id dict in one O(N) pass, replacing O(N) linear scans in _infer_interface_satisfaction.
+
+3. Cache to_data() with dirty flag (HIGH) - Add _cached_data field to ArchGraph. Return cached data if not None, invalidate on add_node/add_edge/remove_node/merge_manual_annotations.
+
+4. Dashboard graph pagination (MEDIUM) - Add max_nodes=500 parameter to get_graph_json(). When node count exceeds max_nodes, select top nodes via hotspots, filter edges to kept nodes, add truncation metadata.
+
+5. Drift response size cap (MEDIUM) - Add _MAX_DRIFT_RECORDS=200 constant. Truncate results and append summary record with per-type counts.
+
+Files modified: query.py, scanner.py, graph.py, dashboard.py, dashboard_server.py
+New file: tests/test_performance_guards.py (~20 tests across 5 classes)

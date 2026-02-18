@@ -29,6 +29,18 @@ from codegiraffe import embeddings as _embeddings_mod
 
 
 # ---------------------------------------------------------------------------
+# Performance guard constants
+# ---------------------------------------------------------------------------
+
+# Maximum number of nodes in either side of the similarity-matching loop
+# before skipping the O(n^2) rename detection entirely.
+_SIMILARITY_MATCH_LIMIT = 500
+
+# Maximum number of drift records returned before truncating the response.
+_MAX_DRIFT_RECORDS = 200
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -1778,33 +1790,47 @@ def detect_drift(
     # ------------------------------------------------------------------
     # Similarity-based rename detection (enhanced)
     # ------------------------------------------------------------------
-    rename_threshold = 0.5
-    matched_code: set[str] = set()
-    matched_graph: set[str] = set()
+    if (
+        len(missing_in_code) > _SIMILARITY_MATCH_LIMIT
+        or len(missing_in_graph) > _SIMILARITY_MATCH_LIMIT
+    ):
+        drifts.append({
+            "type": "similarity_skipped",
+            "details": (
+                f"Similarity matching skipped: {len(missing_in_code)} missing in code, "
+                f"{len(missing_in_graph)} missing in graph (limit: {_SIMILARITY_MATCH_LIMIT})"
+            ),
+        })
+        matched_code: set[str] = set()
+        matched_graph: set[str] = set()
+    else:
+        rename_threshold = 0.5
+        matched_code = set()
+        matched_graph = set()
 
-    for old_id in sorted(missing_in_code):
-        best_match: str | None = None
-        best_score: float = 0.0
-        old_node = graph_node_map.get(old_id)
-        for new_id in sorted(missing_in_graph):
-            if new_id in matched_code:
-                continue
-            new_node = scanned_node_map.get(new_id)
-            sim = _enhanced_similarity(old_id, new_id, old_node, new_node)
-            if sim > best_score:
-                best_score = sim
-                best_match = new_id
-        if best_match is not None and best_score >= rename_threshold:
-            drifts.append({
-                "type": "potential_rename",
-                "node_id": old_id,
-                "details": (
-                    f"Node '{old_id}' was not found in code but '{best_match}' "
-                    f"is new (similarity {best_score:.0%}). Possible rename."
-                ),
-            })
-            matched_code.add(best_match)
-            matched_graph.add(old_id)
+        for old_id in sorted(missing_in_code):
+            best_match: str | None = None
+            best_score: float = 0.0
+            old_node = graph_node_map.get(old_id)
+            for new_id in sorted(missing_in_graph):
+                if new_id in matched_code:
+                    continue
+                new_node = scanned_node_map.get(new_id)
+                sim = _enhanced_similarity(old_id, new_id, old_node, new_node)
+                if sim > best_score:
+                    best_score = sim
+                    best_match = new_id
+            if best_match is not None and best_score >= rename_threshold:
+                drifts.append({
+                    "type": "potential_rename",
+                    "node_id": old_id,
+                    "details": (
+                        f"Node '{old_id}' was not found in code but '{best_match}' "
+                        f"is new (similarity {best_score:.0%}). Possible rename."
+                    ),
+                })
+                matched_code.add(best_match)
+                matched_graph.add(old_id)
 
     # Remaining unmatched nodes
     for nid in sorted(missing_in_code - matched_graph):
@@ -1832,6 +1858,27 @@ def detect_drift(
     # ------------------------------------------------------------------
     graph_edges_auto = [e for e in graph_data.edges]
     drifts.extend(_detect_edge_drift(graph_edges_auto, scanned_result.edges))
+
+    # ------------------------------------------------------------------
+    # Response size cap
+    # ------------------------------------------------------------------
+    if len(drifts) > _MAX_DRIFT_RECORDS:
+        total = len(drifts)
+        type_counts = {
+            t: sum(1 for d in drifts if d.get("type") == t)
+            for t in {d.get("type") for d in drifts}
+        }
+        drifts = drifts[:_MAX_DRIFT_RECORDS]
+        drifts.append({
+            "type": "truncated",
+            "total": str(total),
+            "detail": (
+                f"Response truncated: {total} drift records found, "
+                f"showing first {_MAX_DRIFT_RECORDS}. "
+                f"Breakdown by type: "
+                + ", ".join(f"{t}={c}" for t, c in sorted(type_counts.items()))
+            ),
+        })
 
     return drifts
 
