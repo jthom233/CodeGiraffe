@@ -246,6 +246,48 @@ class TestGetGraphJson:
         with pytest.raises(RuntimeError, match="No architecture graph"):
             get_graph_json(_make_failing_ensure_fn(), "/nonexistent")
 
+    def test_no_truncation_flag_when_under_limit(self, arch_graph):
+        """truncated=False is present when node count is within max_nodes."""
+        result = get_graph_json(_make_ensure_fn(arch_graph), "/tmp/test-project", max_nodes=500)
+        assert result["truncated"] is False
+
+    def test_truncation_reduces_node_count(self, arch_graph):
+        """When max_nodes < total nodes, only max_nodes nodes are returned."""
+        result = get_graph_json(_make_ensure_fn(arch_graph), "/tmp/test-project", max_nodes=2)
+        assert len(result["nodes"]) <= 2
+
+    def test_truncation_flag_set_true(self, arch_graph):
+        """truncated=True is present when graph is truncated."""
+        result = get_graph_json(_make_ensure_fn(arch_graph), "/tmp/test-project", max_nodes=2)
+        assert result["truncated"] is True
+
+    def test_truncation_preserves_total_counts(self, arch_graph):
+        """total_nodes and total_edges reflect the original untruncated graph."""
+        result = get_graph_json(_make_ensure_fn(arch_graph), "/tmp/test-project", max_nodes=2)
+        assert result["total_nodes"] == 5
+        assert result["total_edges"] == 5
+
+    def test_truncation_drops_dangling_edges(self, arch_graph):
+        """Edges referencing dropped nodes are removed."""
+        result = get_graph_json(_make_ensure_fn(arch_graph), "/tmp/test-project", max_nodes=2)
+        kept_ids = {n["id"] for n in result["nodes"]}
+        for link in result["links"]:
+            assert link["source"] in kept_ids
+            assert link["target"] in kept_ids
+
+    def test_max_nodes_zero_disables_truncation(self, arch_graph):
+        """max_nodes=0 disables truncation regardless of graph size."""
+        result = get_graph_json(_make_ensure_fn(arch_graph), "/tmp/test-project", max_nodes=0)
+        assert result["truncated"] is False
+        assert len(result["nodes"]) == 5
+        assert len(result["links"]) == 5
+
+    def test_no_truncation_when_exactly_at_limit(self, arch_graph):
+        """max_nodes equal to node count causes no truncation."""
+        result = get_graph_json(_make_ensure_fn(arch_graph), "/tmp/test-project", max_nodes=5)
+        assert result["truncated"] is False
+        assert len(result["nodes"]) == 5
+
 
 # ---------------------------------------------------------------------------
 # get_node_detail tests

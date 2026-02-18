@@ -1485,6 +1485,25 @@ def _infer_data_contracts(result: ScanResult) -> None:
                 existing_edges.add(edge_key)
 
 
+def _build_name_lookup(result: ScanResult) -> dict[str, str]:
+    """Build a name -> node_id lookup dict in one O(N) pass over result.nodes.
+
+    Keys are: label (first priority), then struct_name from metadata, then
+    class_name from metadata. dict.setdefault ensures the first match wins,
+    matching the precedence of _find_node_id_for_name.
+    """
+    lookup: dict[str, str] = {}
+    for node in result.nodes:
+        lookup.setdefault(node.label, node.id)
+        struct_name = node.metadata.get("struct_name")
+        if struct_name:
+            lookup.setdefault(struct_name, node.id)
+        class_name = node.metadata.get("class_name")
+        if class_name:
+            lookup.setdefault(class_name, node.id)
+    return lookup
+
+
 def _find_node_id_for_name(result: ScanResult, name: str) -> str | None:
     """Find the node ID for a given class/struct/interface name."""
     for node in result.nodes:
@@ -1517,6 +1536,9 @@ def _infer_interface_satisfaction(result: ScanResult) -> None:
         if entry.file_path:
             struct_files[entry.struct_name] = entry.file_path
 
+    # Build a single name -> node_id lookup to avoid O(N) scans inside the loop
+    name_lookup = _build_name_lookup(result)
+
     # For each interface, find structs that satisfy it
     for iface in result.interfaces:
         if not iface.methods:
@@ -1526,8 +1548,8 @@ def _infer_interface_satisfaction(result: ScanResult) -> None:
         for struct_name, methods in struct_methods.items():
             if iface_method_set.issubset(methods):
                 # Find the struct's node ID and interface's node ID
-                struct_node_id = _find_node_id_for_name(result, struct_name)
-                iface_node_id = _find_node_id_for_name(result, iface.name)
+                struct_node_id = name_lookup.get(struct_name)
+                iface_node_id = name_lookup.get(iface.name)
 
                 if struct_node_id and iface_node_id:
                     edge_key = (struct_node_id, iface_node_id, EdgeType.IMPLEMENTS.value)
@@ -2206,6 +2228,12 @@ def sync_files(
                 graph.graph.remove_node(nid)
                 removed_nodes += 1
 
+    # Invalidate the to_data() cache after direct graph mutations above.
+    # graph.graph.remove_edge/remove_node bypass ArchGraph.remove_node()
+    # which is the only method that sets _cached_data = None, so we must
+    # do it explicitly here to avoid stale cache reads downstream.
+    graph._cached_data = None
+
     # ------------------------------------------------------------------
     # Step 3: Re-scan existing files and collect new nodes/edges
     # ------------------------------------------------------------------
@@ -2305,7 +2333,7 @@ def sync_files(
             added_nodes += 1
         else:
             # Refresh metadata on an already-existing node (e.g. after edit)
-            graph.graph.nodes[node.id]["node"] = node
+            graph.add_node(node)
 
     # Existing edge set for deduplication
     existing_edge_keys: set[tuple[str, str, str]] = set()

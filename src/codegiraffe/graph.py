@@ -59,6 +59,7 @@ class ArchGraph:
     def __init__(self, data: GraphData | None = None) -> None:
         self._graph = nx.DiGraph()
         self._data = data or GraphData()
+        self._cached_data: GraphData | None = None
 
         if data:
             for node in data.nodes.values():
@@ -79,6 +80,7 @@ class ArchGraph:
     def add_node(self, node: Node) -> None:
         """Add a node to the graph, replacing any existing node with the same id."""
         self._graph.add_node(node.id, node=node)
+        self._cached_data = None
 
     def add_edge(self, edge: Edge) -> None:
         """Add an edge to the graph.
@@ -101,11 +103,13 @@ class ArchGraph:
                 key=edge.type,
                 edge=edge,
             )
+        self._cached_data = None
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node and all its incident edges from the graph."""
         if node_id in self._graph:
             self._graph.remove_node(node_id)
+        self._cached_data = None
 
     def get_subgraph(self, node_id: str, depth: int = 2) -> GraphData:
         """Extract a subgraph via BFS from node_id up to the given depth.
@@ -224,6 +228,9 @@ class ArchGraph:
 
     def to_data(self) -> GraphData:
         """Serialize the current graph state back to a GraphData model."""
+        if self._cached_data is not None:
+            return self._cached_data
+
         nodes: dict[str, Node] = {}
         for nid, attrs in self._graph.nodes(data=True):
             node: Node | None = attrs.get("node")
@@ -236,13 +243,14 @@ class ArchGraph:
             if edge_obj is not None:
                 edges.append(edge_obj)
 
-        return GraphData(
+        self._cached_data = GraphData(
             nodes=nodes,
             edges=edges,
             project_path=self._data.project_path,
             last_scan=self._data.last_scan,
             schema_version=self._data.schema_version,
         )
+        return self._cached_data
 
     def merge_manual_annotations(self, old_data: GraphData) -> None:
         """Preserve manually annotated nodes and edges from previous graph data.
@@ -262,3 +270,4 @@ class ArchGraph:
             existing = self._graph.get_edge_data(edge.source, edge.target)
             if existing is None or existing.get("key") != edge.type:
                 self.add_edge(edge)
+        self._cached_data = None

@@ -26,14 +26,50 @@ from codegiraffe.graph import ArchGraph, GraphData
 # ---------------------------------------------------------------------------
 
 
-def get_graph_json(ensure_graph_fn: Callable[[str], ArchGraph], project_path: str) -> dict:
+def get_graph_json(
+    ensure_graph_fn: Callable[[str], ArchGraph],
+    project_path: str,
+    max_nodes: int = 500,
+) -> dict:
     """Return graph data as a D3-style JSON dict.
+
+    Parameters
+    ----------
+    ensure_graph_fn:
+        Callable that loads/returns an ``ArchGraph`` for the given project path.
+    project_path:
+        Filesystem path to the project root.
+    max_nodes:
+        Maximum number of nodes to include in the response.  When the graph
+        exceeds this limit the top nodes by degree centrality (hotspots) are
+        kept and the remainder are dropped, along with any edges that reference
+        a dropped node.  Pass ``0`` to disable truncation entirely.
 
     Raises ``RuntimeError`` when the project has not been initialized.
     """
     graph = ensure_graph_fn(project_path)
     data = graph.to_data()
-    return json.loads(to_d3_json(data))
+    result = json.loads(to_d3_json(data))
+
+    nodes: list[dict] = result.get("nodes", [])
+    links: list[dict] = result.get("links", [])
+    total_nodes = len(nodes)
+    total_edges = len(links)
+
+    if max_nodes > 0 and total_nodes > max_nodes:
+        hotspots = graph.get_hotspots(top_n=max_nodes)
+        kept_ids: set[str] = {node.id for node, _score in hotspots}
+        nodes = [n for n in nodes if n["id"] in kept_ids]
+        links = [e for e in links if e["source"] in kept_ids and e["target"] in kept_ids]
+        result["nodes"] = nodes
+        result["links"] = links
+        result["truncated"] = True
+        result["total_nodes"] = total_nodes
+        result["total_edges"] = total_edges
+    else:
+        result["truncated"] = False
+
+    return result
 
 
 def get_node_detail(
@@ -970,7 +1006,11 @@ def register_dashboard_routes(
         if not project_path:
             return JSONResponse({"error": "project_path query parameter required"}, status_code=400)
         try:
-            result = get_graph_json(ensure_graph_fn, project_path)
+            max_nodes = int(request.query_params.get("max_nodes", "500"))
+        except ValueError:
+            max_nodes = 500
+        try:
+            result = get_graph_json(ensure_graph_fn, project_path, max_nodes=max_nodes)
             return JSONResponse(result)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)

@@ -249,7 +249,11 @@ class DashboardServer:
                     {"error": "project_path query parameter required"}, status_code=400
                 )
             try:
-                result = get_graph_json(ensure_graph_fn, project_path)
+                max_nodes = int(request.query_params.get("max_nodes", "500"))
+            except ValueError:
+                max_nodes = 500
+            try:
+                result = get_graph_json(ensure_graph_fn, project_path, max_nodes=max_nodes)
                 return JSONResponse(result)
             except RuntimeError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=404)
