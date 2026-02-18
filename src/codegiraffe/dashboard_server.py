@@ -194,11 +194,12 @@ class DashboardServer:
         """Build and return a Starlette ASGI application with dashboard routes."""
         from starlette.applications import Starlette
         from starlette.requests import Request
-        from starlette.responses import HTMLResponse, JSONResponse
+        from starlette.responses import HTMLResponse, JSONResponse, Response
         from starlette.routing import Route
 
         from codegiraffe.dashboard import (
             DASHBOARD_HTML,
+            _load_logo_bytes,
             get_graph_json,
             get_node_detail,
             get_subgraph_json,
@@ -312,25 +313,23 @@ class DashboardServer:
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
 
-        async def logo(request: Request) -> "Response":
-            from pathlib import Path as _Path
-            from starlette.responses import Response
-
-            logo_path = _Path(__file__).parent / "assets" / "logo.png"
-            if logo_path.exists():
-                return Response(
-                    content=logo_path.read_bytes(),
-                    media_type="image/png",
-                )
-            return Response(status_code=404)
+        async def logo_image(request: Request) -> Response:
+            data = _load_logo_bytes()
+            if data is None:
+                return Response(content=b"Not Found", status_code=404)
+            return Response(
+                content=data,
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
 
         routes = [
             Route("/dashboard", endpoint=dashboard_page, methods=["GET"]),
+            Route("/api/logo", endpoint=logo_image, methods=["GET"]),
             Route("/api/init", endpoint=init_graph, methods=["POST"]),
             Route("/api/graph", endpoint=graph_data, methods=["GET"]),
             Route("/api/node", endpoint=node_detail, methods=["GET"]),
             Route("/api/subgraph", endpoint=subgraph_data, methods=["GET"]),
-            Route("/api/logo", endpoint=logo, methods=["GET"]),
         ]
 
         return Starlette(routes=routes)

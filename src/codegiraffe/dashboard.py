@@ -13,13 +13,33 @@ Usage::
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Callable
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from codegiraffe.export import to_d3_json
 from codegiraffe.graph import ArchGraph, GraphData
+
+# ---------------------------------------------------------------------------
+# Logo helpers
+# ---------------------------------------------------------------------------
+
+_logo_cache: bytes | None = None
+_logo_cache_loaded: bool = False
+
+
+def _load_logo_bytes() -> bytes | None:
+    global _logo_cache, _logo_cache_loaded
+    if _logo_cache_loaded:
+        return _logo_cache
+    logo_path = Path(__file__).parent / "assets" / "logo.png"
+    if logo_path.exists():
+        _logo_cache = logo_path.read_bytes()
+    _logo_cache_loaded = True
+    return _logo_cache
+
 
 # ---------------------------------------------------------------------------
 # Pure data-fetching functions (testable without HTTP)
@@ -189,6 +209,7 @@ DASHBOARD_HTML = """\
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Code Giraffe - Architecture Dashboard</title>
+<link rel="icon" type="image/png" href="/api/logo">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -320,14 +341,18 @@ body {
 
 /* ---- Highlighted edge style ---- */
 .highlighted-edge { stroke: #F1C40F !important; stroke-width: 3px !important; }
+
+/* ---- Logo ---- */
+#sidebar-logo { border-radius: 4px; opacity: 0.95; }
+#sidebar-logo:hover { opacity: 1; }
 </style>
 </head>
 <body>
 <div id="app">
   <button id="toggle-sidebar" title="Toggle sidebar">&#9776;</button>
   <div id="sidebar">
-    <div style="text-align:center;padding:12px 0 4px 0;">
-      <img src="/api/logo" alt="Code Giraffe" style="max-width:160px;height:auto;border-radius:8px;" onerror="this.style.display='none'" />
+    <div class="sidebar-section" style="text-align:center; padding:16px 16px 8px;">
+      <img src="/api/logo" alt="Code Giraffe" style="max-width:160px; height:auto;" id="sidebar-logo" />
     </div>
     <div class="sidebar-section">
       <h3>Project</h3>
@@ -1179,6 +1204,18 @@ def register_dashboard_routes(
     async def dashboard_page(request: Request) -> HTMLResponse:
         """Serve the main dashboard HTML page."""
         return HTMLResponse(DASHBOARD_HTML)
+
+    @mcp.custom_route("/api/logo", methods=["GET"])
+    async def logo_image(request: Request) -> Response:
+        """Serve the Code Giraffe logo PNG, or 404 if the file is absent."""
+        data = _load_logo_bytes()
+        if data is None:
+            return Response(content=b"Not Found", status_code=404)
+        return Response(
+            content=data,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     @mcp.custom_route("/api/init", methods=["POST"])
     async def init_graph(request: Request) -> JSONResponse:

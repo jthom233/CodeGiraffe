@@ -227,6 +227,15 @@ class TestDashboardHTML:
     def test_api_url_includes_path_prefix(self):
         assert "path_prefix" in DASHBOARD_HTML
 
+    def test_contains_favicon(self):
+        """Dashboard HTML should declare the logo PNG as a favicon."""
+        assert '<link rel="icon" type="image/png" href="/api/logo">' in DASHBOARD_HTML
+
+    def test_contains_sidebar_logo(self):
+        """Dashboard HTML should include a sidebar logo img with the correct src and id."""
+        assert 'src="/api/logo"' in DASHBOARD_HTML
+        assert 'id="sidebar-logo"' in DASHBOARD_HTML
+
 
 # ---------------------------------------------------------------------------
 # get_graph_json tests
@@ -566,6 +575,14 @@ class TestRegisterRoutes:
         assert "/api/node" in route_paths
         assert "/api/subgraph" in route_paths
 
+    def test_logo_route_registered(self):
+        """The /api/logo route should be registered alongside the other dashboard routes."""
+        from mcp.server.fastmcp import FastMCP
+        test_mcp = FastMCP("test-dashboard-logo-route")
+        register_dashboard_routes(test_mcp, _make_failing_ensure_fn(), None)
+        route_paths = [r.path for r in test_mcp._custom_starlette_routes]
+        assert "/api/logo" in route_paths
+
 
 # ---------------------------------------------------------------------------
 # Sigma.js dashboard HTML assertions (TDD RED phase — T013)
@@ -654,3 +671,49 @@ class TestSigmaDashboardHTML:
     def test_png_export_api_present(self):
         """PNG export must use toDataURL or getCanvas from the Sigma renderer."""
         assert "toDataURL" in DASHBOARD_HTML or "getCanvas" in DASHBOARD_HTML
+
+
+# ---------------------------------------------------------------------------
+# Logo loading tests
+# ---------------------------------------------------------------------------
+
+
+class TestLogoLoading:
+    """Verify the logo asset loading helper behaves correctly."""
+
+    def test_load_logo_returns_bytes(self):
+        """_load_logo_bytes returns bytes for the bundled logo."""
+        from codegiraffe.dashboard import _load_logo_bytes
+        import codegiraffe.dashboard as dash
+        dash._logo_cache = None
+        dash._logo_cache_loaded = False
+        result = _load_logo_bytes()
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+        # Reset cache state for other tests
+        dash._logo_cache = None
+        dash._logo_cache_loaded = False
+
+    def test_logo_is_png(self):
+        """Logo bytes have the PNG magic header."""
+        from codegiraffe.dashboard import _load_logo_bytes
+        import codegiraffe.dashboard as dash
+        dash._logo_cache = None
+        dash._logo_cache_loaded = False
+        data = _load_logo_bytes()
+        assert data is not None
+        assert data[:8] == b'\x89PNG\r\n\x1a\n'
+        dash._logo_cache = None
+        dash._logo_cache_loaded = False
+
+    def test_logo_is_reasonable_size(self):
+        """Logo should be between 10KB and 5MB."""
+        from codegiraffe.dashboard import _load_logo_bytes
+        import codegiraffe.dashboard as dash
+        dash._logo_cache = None
+        dash._logo_cache_loaded = False
+        data = _load_logo_bytes()
+        assert data is not None
+        assert 10_000 < len(data) < 5_000_000
+        dash._logo_cache = None
+        dash._logo_cache_loaded = False
