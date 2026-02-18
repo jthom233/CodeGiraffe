@@ -654,3 +654,35 @@ class TestGetBetweennessCentrality:
         assert result["C"] >= result["A"]
         assert result["B"] >= result["D"]
         assert result["C"] >= result["D"]
+
+
+class TestGraphDataLayoutField:
+    """Tests for the GraphData.layout field (TDD RED phase — field does not exist yet)."""
+
+    def test_layout_defaults_to_empty_dict(self):
+        """GraphData constructed with minimal args should expose layout == {}."""
+        data = GraphData(nodes={}, edges=[], project_path="test")
+        assert data.layout == {}
+
+    def test_layout_round_trips_through_json_serialization(self):
+        """layout values survive model_dump / model_validate round-trip."""
+        original = GraphData(
+            nodes={},
+            edges=[],
+            project_path="test",
+            layout={"node1": [0.5, -0.3]},
+        )
+        raw = original.model_dump()
+        restored = GraphData.model_validate(raw)
+        assert restored.layout == {"node1": [0.5, -0.3]}
+
+    def test_layout_backward_compat_missing_key_loads_as_empty_dict(self):
+        """Existing stored JSON without a 'layout' key loads without error
+        and yields layout == {} (backward compatibility)."""
+        stored = {
+            "nodes": {},
+            "edges": [],
+            "project_path": "legacy_project",
+        }
+        data = GraphData.model_validate(stored)
+        assert data.layout == {}

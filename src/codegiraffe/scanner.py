@@ -746,7 +746,7 @@ class PythonRecognizer:
         """Scan *content* of a Python file and return discovered nodes/edges."""
         nodes: list[Node] = []
         edges: list[Edge] = []
-        rel_path = str(file_path)
+        rel_path = file_path.as_posix()
 
         # Strip docstrings and comments to prevent false-positive matches.
         # We preserve single/double-quoted strings because many patterns
@@ -883,7 +883,7 @@ class PythonRecognizer:
         # --- Call detection (v0.9.0) ---
         calls: list[CallInfo] = []
         enclosing_ctx = _find_py_enclosing_context(content)
-        rel_path_str = str(file_path)
+        rel_path_str = file_path.as_posix()
 
         for match in _PY_FUNC_CALL_RE.finditer(cleaned):
             receiver = match.group(1) or ""
@@ -1081,7 +1081,8 @@ def _infer_import_edges_universal(
     existing_edges = {(e.source, e.target, e.type) for e in result.edges}
 
     for rel_path, file_result in per_file_results.items():
-        source_mod_id = file_to_mod_id.get(str(rel_path))
+        rel_path_str = rel_path.as_posix() if hasattr(rel_path, "as_posix") else str(rel_path)
+        source_mod_id = file_to_mod_id.get(rel_path_str)
         if not source_mod_id or not file_result.imports:
             continue
 
@@ -1871,7 +1872,7 @@ def _infer_decision_marker_edges(
     """
     all_markers: list[dict] = []
     for rel_path, content in per_file_contents.items():
-        file_path_str = str(rel_path)
+        file_path_str = rel_path.as_posix() if hasattr(rel_path, "as_posix") else str(rel_path)
         markers = _detect_decision_markers(file_path_str, content)
         all_markers.extend(markers)
 
@@ -2004,13 +2005,13 @@ def scan_project(
         # Create module node for ALL scanned languages (universal)
         module_path = _file_to_module_path_universal(source_file, project_path, suffix)
         module_id = f"mod:{module_path}"
-        module_label = module_path.rsplit(".", 1)[-1] if "." in module_path else module_path
+        module_label = Path(source_file).stem
 
         module_node = Node(
             id=module_id,
             type=NodeType.MODULE.value,
             label=module_label,
-            file_path=str(rel_path),
+            file_path=rel_path.as_posix(),
             metadata={
                 "package": module_path.rsplit(".", 1)[0] if "." in module_path else "",
                 "source": "test" if is_test else "production",
@@ -2279,9 +2280,7 @@ def sync_files(
         # Create module node (mirrors scan_project logic)
         module_path = _file_to_module_path_universal(abs_path, project_path, suffix)
         module_id = f"mod:{module_path}"
-        module_label = (
-            module_path.rsplit(".", 1)[-1] if "." in module_path else module_path
-        )
+        module_label = Path(abs_path).stem
 
         module_node = Node(
             id=module_id,

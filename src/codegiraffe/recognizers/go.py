@@ -255,7 +255,7 @@ class GoRecognizer:
         """Scan *content* of a Go file and return discovered nodes/edges."""
         nodes: list[Node] = []
         edges: list[Edge] = []
-        rel_path = str(file_path)
+        rel_path = file_path.as_posix()
 
         endpoint_ids: list[str] = []
         table_ids: list[str] = []
@@ -594,7 +594,7 @@ class GoRecognizer:
         # --- Call detection (v0.9.0) ---
         calls: list[CallInfo] = []
         enclosing = _find_enclosing_func(content)
-        rel_path_str = str(rel_path)
+        rel_path_str = rel_path
 
         for match in _GO_FUNC_CALL_RE.finditer(content):
             receiver = match.group(1) or ""

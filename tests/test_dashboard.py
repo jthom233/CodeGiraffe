@@ -99,10 +99,10 @@ class TestDashboardHTML:
         assert "<!DOCTYPE html>" in DASHBOARD_HTML
 
     def test_contains_cytoscape_cdn(self):
-        assert "cytoscape/3.30.4/cytoscape.min.js" in DASHBOARD_HTML
+        assert "cdn.jsdelivr.net/npm/sigma@3.0.2" in DASHBOARD_HTML
 
-    def test_uses_cose_layout(self):
-        assert "'cose'" in DASHBOARD_HTML or '"cose"' in DASHBOARD_HTML
+    def test_uses_sigma_layouts(self):
+        assert "'original'" in DASHBOARD_HTML or '"original"' in DASHBOARD_HTML
 
     def test_contains_sidebar(self):
         assert 'id="sidebar"' in DASHBOARD_HTML
@@ -128,7 +128,7 @@ class TestDashboardHTML:
         assert "#1a1a2e" in DASHBOARD_HTML
 
     def test_contains_d3_to_cytoscape_converter(self):
-        assert "d3ToCytoscape" in DASHBOARD_HTML
+        assert "d3ToGraphology" in DASHBOARD_HTML
 
     def test_no_external_css(self):
         """All styles should be inline -- no <link rel='stylesheet'> tags."""
@@ -136,9 +136,9 @@ class TestDashboardHTML:
         assert "<link rel='stylesheet'" not in DASHBOARD_HTML
 
     # --- New layout tests ---
-    def test_contains_five_layouts(self):
-        """Dashboard should support 5 layout names."""
-        for layout in ['cose', 'circle', 'grid', 'concentric', 'breadthfirst']:
+    def test_contains_seven_sigma_layouts(self):
+        """Dashboard should support 7 Sigma-compatible layout names."""
+        for layout in ['original', 'force', 'circular', 'grid', 'concentric', 'breadthfirst', 'random']:
             assert f"'{layout}'" in DASHBOARD_HTML or f'"{layout}"' in DASHBOARD_HTML, f"Missing layout: {layout}"
 
     def test_contains_layouts_array(self):
@@ -146,9 +146,15 @@ class TestDashboardHTML:
         assert "LAYOUTS" in DASHBOARD_HTML
 
     def test_layout_cycle_handler(self):
-        """Layout button should cycle through layouts, not just toggle."""
-        assert "LAYOUTS.indexOf" in DASHBOARD_HTML
+        """Layout button should cycle through layouts and call Sigma layout functions."""
         assert "LAYOUTS.length" in DASHBOARD_HTML
+        assert "applyForceLayout" in DASHBOARD_HTML
+        assert "applyCircularLayout" in DASHBOARD_HTML
+        assert "applyGridLayout" in DASHBOARD_HTML
+        assert "applyConcentricLayout" in DASHBOARD_HTML
+        assert "applyBreadthfirstLayout" in DASHBOARD_HTML
+        assert "applyRandomLayout" in DASHBOARD_HTML
+        assert "applyOriginalLayout" in DASHBOARD_HTML
 
     # --- Edge tooltip tests ---
     def test_contains_edge_tooltip(self):
@@ -199,6 +205,27 @@ class TestDashboardHTML:
     def test_config_color_differentiated(self):
         """Config color should be #D4AC0D (differentiated from env_var)."""
         assert "#D4AC0D" in DASHBOARD_HTML
+
+    def test_contains_server_filters_section(self):
+        assert 'id="path-prefix-input"' in DASHBOARD_HTML
+
+    def test_contains_path_prefix_input(self):
+        assert 'id="path-prefix-input"' in DASHBOARD_HTML
+
+    def test_contains_max_nodes_input(self):
+        assert 'id="max-nodes-input"' in DASHBOARD_HTML
+
+    def test_contains_apply_server_filters_button(self):
+        assert 'id="apply-server-filters"' in DASHBOARD_HTML
+
+    def test_contains_truncation_banner(self):
+        assert 'id="truncation-banner"' in DASHBOARD_HTML
+
+    def test_api_url_includes_max_nodes(self):
+        assert "max_nodes" in DASHBOARD_HTML
+
+    def test_api_url_includes_path_prefix(self):
+        assert "path_prefix" in DASHBOARD_HTML
 
     def test_contains_favicon(self):
         """Dashboard HTML should declare the logo PNG as a favicon."""
@@ -296,6 +323,120 @@ class TestGetGraphJson:
         result = get_graph_json(_make_ensure_fn(arch_graph), "/tmp/test-project", max_nodes=5)
         assert result["truncated"] is False
         assert len(result["nodes"]) == 5
+
+
+# ---------------------------------------------------------------------------
+# get_graph_json filtering tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetGraphJsonFiltering:
+    """Test path_prefix and node_types filtering in get_graph_json."""
+
+    def _make_ensure_fn(self, graph):
+        def ensure(path):
+            return graph
+        return ensure
+
+    def _make_graph(self):
+        """Build a small test graph with nodes across different paths and types."""
+        from codegiraffe.graph import ArchGraph, GraphData, Node, Edge
+        nodes = {
+            "svc:auth": Node(id="svc:auth", type="service", label="AuthService", file_path="auth/service.py"),
+            "ep:login": Node(id="ep:login", type="endpoint", label="/login", file_path="auth/routes.py"),
+            "db:users": Node(id="db:users", type="database_table", label="users", file_path="auth/models.py"),
+            "svc:billing": Node(id="svc:billing", type="service", label="BillingService", file_path="billing/service.py"),
+            "q:emails": Node(id="q:emails", type="queue", label="emails", file_path=None),
+        }
+        edges = [
+            Edge(source="ep:login", target="svc:auth", type="calls"),
+            Edge(source="svc:auth", target="db:users", type="calls"),
+            Edge(source="svc:billing", target="q:emails", type="calls"),
+        ]
+        data = GraphData(nodes=nodes, edges=edges, project_path="/tmp/test-project")
+        return ArchGraph(data)
+
+    def test_path_prefix_filters_nodes(self):
+        graph = self._make_graph()
+        result = get_graph_json(self._make_ensure_fn(graph), "/tmp/test-project", path_prefix="auth/")
+        for node in result["nodes"]:
+            assert node["file_path"] is not None
+            assert node["file_path"].startswith("auth/")
+
+    def test_path_prefix_excludes_none_file_path(self):
+        graph = self._make_graph()
+        result = get_graph_json(self._make_ensure_fn(graph), "/tmp/test-project", path_prefix="auth/")
+        node_ids = {n["id"] for n in result["nodes"]}
+        assert "q:emails" not in node_ids
+
+    def test_path_prefix_drops_dangling_edges(self):
+        graph = self._make_graph()
+        result = get_graph_json(self._make_ensure_fn(graph), "/tmp/test-project", path_prefix="auth/")
+        kept_ids = {n["id"] for n in result["nodes"]}
+        for link in result["links"]:
+            assert link["source"] in kept_ids
+            assert link["target"] in kept_ids
+
+    def test_node_types_filter(self):
+        graph = self._make_graph()
+        result = get_graph_json(self._make_ensure_fn(graph), "/tmp/test-project", node_types=["service", "endpoint"])
+        for node in result["nodes"]:
+            assert node["type"] in {"service", "endpoint"}
+
+    def test_node_types_empty_list_no_filter(self):
+        graph = self._make_graph()
+        result = get_graph_json(self._make_ensure_fn(graph), "/tmp/test-project", node_types=[])
+        assert len(result["nodes"]) == 5
+
+    def test_node_types_none_no_filter(self):
+        graph = self._make_graph()
+        result = get_graph_json(self._make_ensure_fn(graph), "/tmp/test-project", node_types=None)
+        assert len(result["nodes"]) == 5
+
+    def test_combined_path_prefix_and_node_types(self):
+        graph = self._make_graph()
+        result = get_graph_json(
+            self._make_ensure_fn(graph), "/tmp/test-project",
+            path_prefix="auth/", node_types=["endpoint"]
+        )
+        for node in result["nodes"]:
+            assert node["file_path"] is not None
+            assert node["file_path"].startswith("auth/")
+            assert node["type"] == "endpoint"
+
+    def test_filter_then_truncation(self):
+        graph = self._make_graph()
+        # auth/ has 3 nodes; cap at 2
+        result = get_graph_json(
+            self._make_ensure_fn(graph), "/tmp/test-project",
+            path_prefix="auth/", max_nodes=2
+        )
+        assert len(result["nodes"]) <= 2
+        assert result["truncated"] is True
+
+    def test_unfiltered_total_always_present(self):
+        graph = self._make_graph()
+        result = get_graph_json(self._make_ensure_fn(graph), "/tmp/test-project")
+        assert "unfiltered_total_nodes" in result
+        assert result["unfiltered_total_nodes"] == 5
+
+    def test_unfiltered_total_reflects_full_graph(self):
+        graph = self._make_graph()
+        result = get_graph_json(
+            self._make_ensure_fn(graph), "/tmp/test-project", path_prefix="auth/"
+        )
+        assert result["unfiltered_total_nodes"] == 5
+        assert len(result["nodes"]) < 5
+
+    def test_no_match_returns_empty(self):
+        graph = self._make_graph()
+        result = get_graph_json(
+            self._make_ensure_fn(graph), "/tmp/test-project",
+            path_prefix="nonexistent/path/"
+        )
+        assert len(result["nodes"]) == 0
+        assert len(result["links"]) == 0
+        assert result["truncated"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +582,95 @@ class TestRegisterRoutes:
         register_dashboard_routes(test_mcp, _make_failing_ensure_fn(), None)
         route_paths = [r.path for r in test_mcp._custom_starlette_routes]
         assert "/api/logo" in route_paths
+
+
+# ---------------------------------------------------------------------------
+# Sigma.js dashboard HTML assertions (TDD RED phase — T013)
+# These tests define the EXPECTED Sigma.js implementation. They will FAIL
+# until T014 replaces the Cytoscape.js template with Sigma.js.
+# ---------------------------------------------------------------------------
+
+
+class TestSigmaDashboardHTML:
+    """Assert that DASHBOARD_HTML uses Sigma.js instead of Cytoscape.js."""
+
+    # --- CDN presence / absence ---
+
+    def test_sigma_cdn_present(self):
+        """Sigma v3.0.2 CDN script tag must be included."""
+        assert "cdn.jsdelivr.net/npm/sigma@3.0.2" in DASHBOARD_HTML
+
+    def test_graphology_cdn_present(self):
+        """graphology v0.26.0 CDN script tag must be included."""
+        assert "cdn.jsdelivr.net/npm/graphology@0.26.0" in DASHBOARD_HTML
+
+    def test_cytoscape_cdn_absent(self):
+        """Cytoscape CDN must be removed when migrating to Sigma.js."""
+        assert "cytoscape" not in DASHBOARD_HTML.lower()
+
+    # --- Sigma.js API usage ---
+
+    def test_sigma_instantiation_present(self):
+        """Dashboard must instantiate a Sigma renderer with `new Sigma(`."""
+        assert "new Sigma(" in DASHBOARD_HTML
+
+    def test_graphology_graph_instantiation_present(self):
+        """Dashboard must create a graphology graph with `new graphology.Graph(`."""
+        assert "new graphology.Graph(" in DASHBOARD_HTML
+
+    def test_node_reducer_present(self):
+        """Sigma nodeReducer must be configured for node styling."""
+        assert "nodeReducer" in DASHBOARD_HTML
+
+    def test_edge_reducer_present(self):
+        """Sigma edgeReducer must be configured for edge styling."""
+        assert "edgeReducer" in DASHBOARD_HTML
+
+    # --- Event handlers ---
+
+    def test_click_node_event_present(self):
+        """clickNode event handler must be registered on the Sigma instance."""
+        assert "clickNode" in DASHBOARD_HTML
+
+    def test_enter_edge_event_present(self):
+        """enterEdge event handler must be registered for edge tooltips."""
+        assert "enterEdge" in DASHBOARD_HTML
+
+    # --- URL / auto-load ---
+
+    def test_url_search_params_present(self):
+        """URLSearchParams usage must be present for auto-loading from URL."""
+        assert "URLSearchParams" in DASHBOARD_HTML
+
+    # --- UI elements ---
+
+    def test_search_box_present(self):
+        """Search box element must exist in the HTML."""
+        assert 'id="search-box"' in DASHBOARD_HTML
+
+    def test_path_prefix_input_present(self):
+        """Path prefix input element must exist in the HTML."""
+        assert 'id="path-prefix-input"' in DASHBOARD_HTML
+
+    def test_detail_panel_present(self):
+        """Detail panel element must exist in the HTML."""
+        assert 'id="detail-panel"' in DASHBOARD_HTML
+
+    def test_apply_server_filters_button_present(self):
+        """Apply server filters button must exist in the HTML."""
+        assert 'id="apply-server-filters"' in DASHBOARD_HTML
+
+    def test_escape_html_function_present(self):
+        """escapeHtml function must be present for XSS protection."""
+        assert "escapeHtml" in DASHBOARD_HTML
+
+    def test_export_button_present(self):
+        """Export button must exist in the HTML."""
+        assert 'id="btn-export"' in DASHBOARD_HTML
+
+    def test_png_export_api_present(self):
+        """PNG export must use toDataURL or getCanvas from the Sigma renderer."""
+        assert "toDataURL" in DASHBOARD_HTML or "getCanvas" in DASHBOARD_HTML
 
 
 # ---------------------------------------------------------------------------

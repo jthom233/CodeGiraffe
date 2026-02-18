@@ -112,7 +112,7 @@ class RubyRecognizer:
         """Scan *content* of a Ruby file and return discovered nodes/edges."""
         nodes: list[Node] = []
         edges: list[Edge] = []
-        rel_path = str(file_path)
+        rel_path = file_path.as_posix()
 
         endpoint_ids: list[str] = []
         table_ids: list[str] = []
@@ -265,6 +265,6 @@ class RubyRecognizer:
         for match in _RB_CLASS_INHERIT_RE.finditer(content):
             child, parent = match.group(1), match.group(2)
             if parent not in _RB_EXTERNAL_BASES:
-                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
+                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=file_path.as_posix()))
 
         return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

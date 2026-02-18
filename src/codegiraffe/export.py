@@ -116,17 +116,20 @@ def to_d3_json(data: GraphData) -> str:
     """
     nodes = []
     for node in sorted(data.nodes.values(), key=lambda n: n.id):
-        nodes.append(
-            {
-                "id": node.id,
-                "type": node.type,
-                "label": node.label or node.id,
-                "group": node.type,  # D3 uses "group" for coloring
-                "file_path": node.file_path,
-                "manual": node.manual,
-                "metadata": node.metadata,
-            }
-        )
+        node_dict = {
+            "id": node.id,
+            "type": node.type,
+            "label": node.label or node.id,
+            "group": node.type,  # D3 uses "group" for coloring
+            "file_path": node.file_path,
+            "manual": node.manual,
+            "metadata": node.metadata,
+        }
+        coords = data.layout.get(node.id)
+        if coords is not None:
+            node_dict["x"] = coords[0]
+            node_dict["y"] = coords[1]
+        nodes.append(node_dict)
 
     links = []
     for edge in data.edges:

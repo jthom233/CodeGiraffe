@@ -1,7 +1,7 @@
 # Code Giraffe Development Guidelines
 
 ## Active Technologies
-- **Version**: 0.13.0
+- **Version**: 0.14.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - **Storage**: JSON files + SQLite + Neo4j (optional, all via StorageBackend protocol)
@@ -106,6 +106,7 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
+- v0.14.0: Sigma.js v3 dashboard — WebGL renderer, server-side ForceAtlas2 layout, 33k-node interactive visualization
 - v0.13.0: Advanced Analysis -- `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan`; `codegiraffe_dashboard` tool for one-click web dashboard launch; 37 MCP tools total; 1339+ tests
 - v0.12.0: Graph Enrichment -- `codegiraffe_annotate`, `codegiraffe_sync_files`; edge confidence scoring (0.0-1.0); `min_confidence` parameter on `context_for`; ownership annotations
 - v0.11.0: Intelligent Context -- `codegiraffe_patterns`; token budgets; intent-aware navigation; retrieval strategy metadata
