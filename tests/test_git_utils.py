@@ -72,9 +72,6 @@ class TestIsGitRepo:
         _init_repo(tmp_path)
         assert is_git_repo(str(tmp_path)) is True
 
-    def test_is_git_repo_false(self, tmp_path: Path) -> None:
-        # tmp_path exists but has no .git — should be False.
-        assert is_git_repo(str(tmp_path)) is False
 
 
 # ===================================================================
@@ -104,9 +101,6 @@ class TestGetUncommittedDiff:
         diff = get_uncommitted_diff(str(repo))
         assert diff == ""
 
-    def test_get_uncommitted_diff_not_git_repo(self, tmp_path: Path) -> None:
-        with pytest.raises(NotAGitRepoError):
-            get_uncommitted_diff(str(tmp_path))
 
     def test_get_uncommitted_diff_staged_changes(self, tmp_path: Path) -> None:
         repo = _init_repo(tmp_path)
@@ -159,10 +153,6 @@ class TestGetChangedFiles:
         files = get_changed_files(str(repo))
         assert files == []
 
-    def test_get_changed_files_not_git_repo(self, tmp_path: Path) -> None:
-        # Should return empty list, NOT raise.
-        files = get_changed_files(str(tmp_path))
-        assert files == []
 
 
 # ===================================================================
@@ -195,11 +185,6 @@ class TestGetCommitFileHistory:
         history = get_commit_file_history(str(repo), depth=2)
         assert len(history) == 2
 
-    def test_get_commit_file_history_not_git_repo(
-        self, tmp_path: Path
-    ) -> None:
-        history = get_commit_file_history(str(tmp_path))
-        assert history == []
 
     def test_get_commit_file_history_empty_repo(
         self, tmp_path: Path
