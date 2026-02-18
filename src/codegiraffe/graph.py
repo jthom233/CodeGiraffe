@@ -47,6 +47,7 @@ class GraphData(BaseModel):
     schema_version: str = "1.0"
     token_estimate: int = Field(default=0, alias="_token_estimate")
     retrieval_strategy: str = Field(default="", alias="_retrieval_strategy")
+    layout: dict[str, list[float]] = Field(default_factory=dict)
 
 
 class ArchGraph:

@@ -118,7 +118,7 @@ class CSharpRecognizer:
         """Scan *content* of a C# file and return discovered nodes/edges."""
         nodes: list[Node] = []
         edges: list[Edge] = []
-        rel_path = str(file_path)
+        rel_path = file_path.as_posix()
 
         endpoint_ids: list[str] = []
         table_ids: list[str] = []
@@ -317,6 +317,6 @@ class CSharpRecognizer:
             child = match.group(1)
             for base in [b.strip().split("<")[0].strip() for b in match.group(2).split(",") if b.strip()]:
                 if base and base[0].isupper():
-                    implementations.append(ImplementationInfo(child_class=child, parent_class=base, file_path=str(file_path)))
+                    implementations.append(ImplementationInfo(child_class=child, parent_class=base, file_path=file_path.as_posix()))
 
         return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

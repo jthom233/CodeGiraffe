@@ -168,8 +168,16 @@ def codegiraffe_init(
         if rescan and old_data is not None:
             graph.merge_manual_annotations(old_data)
 
+        # Compute and attach layout before persisting
+        data = graph.to_data()
+        try:
+            from codegiraffe.layout import compute_layout
+            data.layout = compute_layout(data)
+        except Exception:
+            pass  # never fail init if layout computation errors
+
         # Persist and cache
-        _storage.save(project_path, graph.to_data())
+        _storage.save(project_path, data)
         _graph = graph
 
         # Auto-version after init/rescan
@@ -1607,8 +1615,16 @@ def codegiraffe_sync(project_path: str, include_tests: bool = False) -> str:
         # Merge back manual annotations from the old graph
         new_graph.merge_manual_annotations(old_data)
 
+        # Compute and attach layout before persisting
+        data = new_graph.to_data()
+        try:
+            from codegiraffe.layout import compute_layout
+            data.layout = compute_layout(data)
+        except Exception:
+            pass  # never fail sync if layout computation errors
+
         # Persist and cache
-        _storage.save(project_path, new_graph.to_data())
+        _storage.save(project_path, data)
         _graph = new_graph
 
         # Auto-version after sync

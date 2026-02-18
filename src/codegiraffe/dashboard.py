@@ -1,6 +1,6 @@
 """Web dashboard for Code Giraffe architecture graphs.
 
-Serves a single-page Cytoscape.js-based visualization of the architecture
+Serves a single-page Sigma.js v3-based visualization of the architecture
 knowledge graph.  All HTML, CSS, and JavaScript are embedded in this module
 --- no external files are needed.
 
@@ -30,6 +30,8 @@ def get_graph_json(
     ensure_graph_fn: Callable[[str], ArchGraph],
     project_path: str,
     max_nodes: int = 500,
+    path_prefix: str = "",
+    node_types: list[str] | None = None,
 ) -> dict:
     """Return graph data as a D3-style JSON dict.
 
@@ -40,34 +42,83 @@ def get_graph_json(
     project_path:
         Filesystem path to the project root.
     max_nodes:
-        Maximum number of nodes to include in the response.  When the graph
-        exceeds this limit the top nodes by degree centrality (hotspots) are
-        kept and the remainder are dropped, along with any edges that reference
-        a dropped node.  Pass ``0`` to disable truncation entirely.
+        Maximum number of nodes to include in the response. When the filtered
+        graph exceeds this limit the top nodes by degree centrality (hotspots)
+        are kept. Pass ``0`` to disable truncation entirely.
+    path_prefix:
+        When non-empty, only nodes whose ``file_path`` starts with this string
+        are included. Nodes with no ``file_path`` are excluded when a prefix is
+        specified.
+    node_types:
+        When non-None and non-empty, only nodes whose ``type`` is in this list
+        are included. ``None`` or ``[]`` means no type filtering.
 
     Raises ``RuntimeError`` when the project has not been initialized.
     """
     graph = ensure_graph_fn(project_path)
     data = graph.to_data()
+    total_nodes = len(data.nodes)
+    total_edges = len(data.edges)
+    truncated = False
+
+    # --- Step 1: Apply server-side filters ---
+    filtered = False
+    filtered_nodes = dict(data.nodes)
+
+    if path_prefix:
+        filtered_nodes = {
+            nid: node
+            for nid, node in filtered_nodes.items()
+            if node.file_path and node.file_path.startswith(path_prefix)
+        }
+        filtered = True
+
+    if node_types:
+        type_set = set(node_types)
+        filtered_nodes = {
+            nid: node
+            for nid, node in filtered_nodes.items()
+            if node.type in type_set
+        }
+        filtered = True
+
+    if filtered:
+        kept_ids: set[str] = set(filtered_nodes)
+        filtered_edges = [
+            e for e in data.edges
+            if e.source in kept_ids and e.target in kept_ids
+        ]
+        data = GraphData(
+            nodes=filtered_nodes,
+            edges=filtered_edges,
+            project_path=data.project_path,
+            last_scan=data.last_scan,
+            schema_version=data.schema_version,
+        )
+
+    # --- Step 2: Apply max_nodes truncation on the (already-filtered) data ---
+    if max_nodes > 0 and len(data.nodes) > max_nodes:
+        temp_graph = ArchGraph(data)
+        hotspots = temp_graph.get_hotspots(top_n=max_nodes)
+        kept_ids = {node.id for node, _score in hotspots}
+        trunc_nodes = {nid: node for nid, node in data.nodes.items() if nid in kept_ids}
+        trunc_edges = [e for e in data.edges if e.source in kept_ids and e.target in kept_ids]
+        data = GraphData(
+            nodes=trunc_nodes,
+            edges=trunc_edges,
+            project_path=data.project_path,
+            last_scan=data.last_scan,
+            schema_version=data.schema_version,
+        )
+        truncated = True
+
     result = json.loads(to_d3_json(data))
-
-    nodes: list[dict] = result.get("nodes", [])
-    links: list[dict] = result.get("links", [])
-    total_nodes = len(nodes)
-    total_edges = len(links)
-
-    if max_nodes > 0 and total_nodes > max_nodes:
-        hotspots = graph.get_hotspots(top_n=max_nodes)
-        kept_ids: set[str] = {node.id for node, _score in hotspots}
-        nodes = [n for n in nodes if n["id"] in kept_ids]
-        links = [e for e in links if e["source"] in kept_ids and e["target"] in kept_ids]
-        result["nodes"] = nodes
-        result["links"] = links
-        result["truncated"] = True
+    result["truncated"] = truncated
+    if truncated:
         result["total_nodes"] = total_nodes
         result["total_edges"] = total_edges
-    else:
-        result["truncated"] = False
+    result["unfiltered_total_nodes"] = total_nodes
+    result["unfiltered_total_edges"] = total_edges
 
     return result
 
@@ -160,7 +211,7 @@ body {
 }
 #toggle-sidebar:hover { background: #1a4a7a; }
 #cy-container { flex: 1; position: relative; }
-#cy { width: 100%; height: 100%; }
+#cy { width: 100%; height: 100%; background: #12122a; }
 
 /* ---- Sidebar sections ---- */
 .sidebar-section { padding: 14px 16px; border-bottom: 1px solid #0f3460; }
@@ -251,17 +302,51 @@ body {
 .dist-bar { height: 8px; border-radius: 2px; min-width: 2px; }
 .dist-label { width: 90px; text-align: right; color: #7f8c9b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dist-count { color: #7f8c9b; min-width: 20px; }
+
+/* ---- Server filter controls ---- */
+.filter-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.filter-row label { font-size: 12px; color: #7f8c9b; white-space: nowrap; min-width: 70px; }
+.filter-row input[type="number"] {
+  flex: 1; padding: 7px 10px; background: #0d1b36; border: 1px solid #0f3460;
+  border-radius: 4px; color: #e0e0e0; font-size: 13px; outline: none;
+}
+.filter-row input[type="number"]:focus { border-color: #4A90D9; }
+#apply-server-filters {
+  width: 100%; padding: 7px; background: #0f3460; color: #e0e0e0;
+  border: none; border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+#apply-server-filters:hover { background: #1a4a7a; }
+#truncation-banner { font-size: 11px; color: #F39C12; margin-top: 6px; display: none; }
+
+/* ---- Highlighted edge style ---- */
+.highlighted-edge { stroke: #F1C40F !important; stroke-width: 3px !important; }
 </style>
 </head>
 <body>
 <div id="app">
   <button id="toggle-sidebar" title="Toggle sidebar">&#9776;</button>
   <div id="sidebar">
+    <div style="text-align:center;padding:12px 0 4px 0;">
+      <img src="/api/logo" alt="Code Giraffe" style="max-width:160px;height:auto;border-radius:8px;" onerror="this.style.display='none'" />
+    </div>
     <div class="sidebar-section">
       <h3>Project</h3>
       <input type="text" id="project-path" placeholder="/path/to/project" />
       <button id="load-btn">Load Graph</button>
       <div id="error-msg"></div>
+    </div>
+    <div class="sidebar-section">
+      <h3>Filters</h3>
+      <div class="filter-row">
+        <label for="path-prefix-input">Path prefix</label>
+        <input type="text" id="path-prefix-input" placeholder="src/auth/" style="flex:1;padding:7px 10px;background:#0d1b36;border:1px solid #0f3460;border-radius:4px;color:#e0e0e0;font-size:13px;outline:none;" />
+      </div>
+      <div class="filter-row">
+        <label for="max-nodes-input">Max nodes</label>
+        <input type="number" id="max-nodes-input" value="500" min="0" step="100" title="0 = no limit (may be slow)" />
+      </div>
+      <button id="apply-server-filters">Apply &amp; Reload</button>
+      <div id="truncation-banner"></div>
     </div>
     <div class="sidebar-section">
       <h3>Search</h3>
@@ -291,7 +376,7 @@ body {
     <div id="loading">Loading graph...</div>
     <div id="toolbar">
       <button id="btn-fit" title="Fit all nodes">Fit</button>
-      <button id="btn-layout" title="Toggle layout">Layout</button>
+      <button id="btn-layout" title="Cycle layout">Layout</button>
       <button id="btn-export" title="Export as PNG">PNG</button>
     </div>
   </div>
@@ -305,416 +390,411 @@ body {
   <div id="detail-body"></div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.4/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/graphology@0.26.0/dist/graphology.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sigma@3.0.2/dist/sigma.min.js"></script>
 <script>
 (function() {
-  "use strict";
+  'use strict';
 
-  // ---- Color / shape palettes ----
+  // ---- State ----
+  let sigmaInstance = null;
+  let graphologyGraph = null;
+  let allNodeData = new Map();
+  let currentProjectPath = '';
+  let hasPrecomputedLayout = false;
+  let activeTypes = new Set();
+  let currentLayoutIdx = 0;
+
+  // ---- Layout names (kept for UI cycling) ----
+  const LAYOUTS = ['original', 'force', 'circular', 'grid', 'concentric', 'breadthfirst', 'random'];
+
+  // ---- Color palettes ----
   const TYPE_COLORS = {
     service: '#4A90D9', endpoint: '#7B68EE', database_table: '#2ECC71',
     queue: '#E67E22', env_var: '#F39C12', config: '#D4AC0D',
     worker: '#E74C3C', frontend_component: '#9B59B6', event: '#1ABC9C',
     external_api: '#95A5A6', module: '#D35400', contract: '#8E44AD',
-    decision: '#2196F3', domain: '#f0f0f0'
+    decision: '#2196F3', domain: '#f0f0f0', default: '#4A90D9'
   };
-  const TYPE_SHAPES = {
-    endpoint: 'diamond', database_table: 'barrel', worker: 'hexagon',
-    queue: 'rectangle', event: 'ellipse', module: 'round-rectangle',
-    contract: 'hexagon', decision: 'tag'
-  };
-  const DEFAULT_COLOR = '#4A90D9';
-  const DEFAULT_SHAPE = 'round-rectangle';
 
-  // ---- State ----
-  let cy = null;
-  let currentLayout = 'cose';
-  let allElements = [];
-  let activeTypes = new Set();
+  const EDGE_COLORS = {
+    calls: '#3498DB', imports: '#E67E22', contains: '#2ECC71',
+    implements: '#9B59B6', produces: '#8E44AD', consumes_contract: '#9B59B6',
+    validates: '#27AE60', violates: '#E74C3C', depends_on: '#7af74e',
+    uses: '#4ef7f7', belongs_to: '#f76a4e', constrains: '#2196F3',
+    supersedes: '#9E9E9E', default: '#2a3a5e'
+  };
+
+  const DEFAULT_COLOR = '#4A90D9';
 
   // ---- DOM refs ----
   const $path = document.getElementById('project-path');
   const $loadBtn = document.getElementById('load-btn');
   const $search = document.getElementById('search-box');
   const $filters = document.getElementById('filters');
-  const $statNodes = document.getElementById('stat-nodes');
-  const $statEdges = document.getElementById('stat-edges');
-  const $statVisible = document.getElementById('stat-visible');
   const $errorMsg = document.getElementById('error-msg');
   const $loading = document.getElementById('loading');
+  const $pathPrefix = document.getElementById('path-prefix-input');
+  const $maxNodes = document.getElementById('max-nodes-input');
+  const $truncationBanner = document.getElementById('truncation-banner');
   const $detailPanel = document.getElementById('detail-panel');
   const $detailTitle = document.getElementById('detail-title');
   const $detailBody = document.getElementById('detail-body');
 
   // ---- Helpers ----
-  function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + '...' : s; }
+  function escapeHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function truncateStr(s, n) { return s && s.length > n ? s.slice(0, n) + '...' : s; }
 
   function showError(msg) {
     $errorMsg.textContent = msg; $errorMsg.style.display = 'block';
-    setTimeout(() => { $errorMsg.style.display = 'none'; }, 5000);
+    setTimeout(function() { $errorMsg.style.display = 'none'; }, 5000);
   }
 
-  function d3ToCytoscape(d3Data) {
-    const elements = [];
-    const domainNodes = new Set();
-    
-    // First pass: identify domain nodes
-    (d3Data.nodes || []).forEach(n => {
-      if (n.type === 'domain') {
-        domainNodes.add(n.id);
-      }
-    });
-    
-    // Build a map of node -> parent domain via belongs_to edges
-    const nodeToParent = {};
-    (d3Data.links || []).forEach(e => {
-      if (e.type === 'belongs_to' && domainNodes.has(e.target)) {
-        nodeToParent[e.source] = e.target;
-      }
-    });
-    
-    // Second pass: add all nodes with parent relationships
-    (d3Data.nodes || []).forEach(n => {
-      const nodeData = {
-        id: n.id, label: n.label || n.id, type: n.type || 'unknown',
-        file_path: n.file_path || '', manual: n.manual || false,
-        metadata: n.metadata || {}
+  // ---- Node/edge reducers for Sigma ----
+  const nodeReducer = function(node, data) {
+    var res = Object.assign({}, data);
+    res.color = TYPE_COLORS[data.nodeType] || TYPE_COLORS.default;
+    if (data.hidden) { res.hidden = true; }
+    return res;
+  };
+
+  const edgeReducer = function(edge, data) {
+    var res = Object.assign({}, data);
+    res.color = EDGE_COLORS[data.edgeType] || EDGE_COLORS.default;
+    res.size = 1.5;
+    if (data.highlighted) { res.color = '#F1C40F'; res.size = 3; }
+    if (data.hidden) { res.hidden = true; }
+    return res;
+  };
+
+  // ---- Convert D3/API response to graphology graph ----
+  function d3ToGraphology(apiResponse) {
+    var g = new graphology.Graph({ multi: false, allowSelfLoops: true, type: 'directed' });
+    hasPrecomputedLayout = (apiResponse.nodes || []).some(function(n) { return n.x !== undefined; });
+    allNodeData = new Map();
+
+    (apiResponse.nodes || []).forEach(function(node) {
+      var attrs = {
+        label: node.label || node.id,
+        nodeType: node.type,
+        group: node.group,
+        file_path: node.file_path,
+        manual: node.manual,
+        metadata: node.metadata,
+        x: node.x !== undefined ? node.x : (Math.random() * 2 - 1),
+        y: node.y !== undefined ? node.y : (Math.random() * 2 - 1),
+        size: 5,
+        hidden: false
       };
-      
-      // If this node belongs to a domain, set parent
-      if (nodeToParent[n.id]) {
-        nodeData.parent = nodeToParent[n.id];
-      }
-      
-      elements.push({
-        group: 'nodes',
-        data: nodeData
-      });
+      g.addNode(node.id, attrs);
+      allNodeData.set(node.id, Object.assign({ id: node.id }, attrs));
     });
-    
-    // Third pass: add edges
-    (d3Data.links || []).forEach(e => {
-      const conf = (typeof e.confidence === 'number') ? e.confidence : 1.0;
-      elements.push({
-        group: 'edges',
-        data: {
-          id: e.source + '-' + e.target + '-' + e.type,
-          source: e.source, target: e.target, type: e.type || '',
-          confidence: conf
-        }
-      });
+
+    (apiResponse.links || []).forEach(function(link) {
+      if (!g.hasNode(link.source) || !g.hasNode(link.target)) { return; }
+      try {
+        g.addEdge(link.source, link.target, {
+          edgeType: link.type,
+          manual: link.manual,
+          confidence: link.confidence !== undefined ? link.confidence : 1.0,
+          metadata: link.metadata,
+          hidden: false,
+          highlighted: false
+        });
+      } catch(e) { /* skip duplicate edges */ }
     });
-    return elements;
+
+    return g;
   }
 
-  // ---- Cytoscape init ----
-  function initCy(elements) {
-    if (cy) cy.destroy();
-    cy = cytoscape({
-      container: document.getElementById('cy'),
-      elements: elements,
-      minZoom: 0.2,
-      maxZoom: 3,
-      style: [
-        {
-          selector: 'node',
-          style: {
-            'label': function(ele) { return truncate(ele.data('label'), 25); },
-            'text-valign': 'bottom',
-            'text-halign': 'center',
-            'font-size': '10px',
-            'color': '#c0c0c0',
-            'text-margin-y': 4,
-            'width': 32,
-            'height': 32,
-            'border-width': 2,
-            'border-color': '#0f3460',
-            'background-color': function(ele) {
-              return TYPE_COLORS[ele.data('type')] || DEFAULT_COLOR;
-            },
-            'shape': function(ele) {
-              return TYPE_SHAPES[ele.data('type')] || DEFAULT_SHAPE;
-            }
-          }
-        },
-        {
-          selector: 'node:selected',
-          style: {
-            'border-color': '#fff',
-            'border-width': 3
-          }
-        },
-        {
-          selector: 'node:parent',
-          style: {
-            'background-color': '#f0f0f0',
-            'border-color': '#888',
-            'border-width': 2,
-            'padding': '10px',
-            'text-valign': 'top',
-            'text-halign': 'center',
-            'font-weight': 'bold',
-            'color': '#333'
-          }
-        },
-        {
-          selector: 'edge',
-          style: {
-            'width': 1.5,
-            'line-color': '#2a3a5e',
-            'target-arrow-color': '#4A90D9',
-            'target-arrow-shape': 'triangle',
-            'curve-style': 'bezier',
-            'label': function(ele) { return ele.data('type') || ''; },
-            'font-size': '8px',
-            'color': '#556',
-            'text-rotation': 'autorotate',
-            'text-margin-y': -8,
-            'opacity': function(ele) {
-              const conf = ele.data('confidence');
-              return (typeof conf === 'number') ? Math.max(0.3, conf) : 1.0;
-            }
-          }
-        },
-        {
-          selector: 'edge:selected',
-          style: {
-            'line-color': '#4A90D9',
-            'width': 2.5
-          }
-        },
-        {
-          selector: 'edge.highlighted',
-          style: {
-            'line-color': '#F1C40F',
-            'target-arrow-color': '#F1C40F',
-            'width': 2.5,
-            'z-index': 10
-          }
-        },
-        {
-          selector: 'edge[type="imports"]',
-          style: {
-            'line-color': '#E67E22',
-            'target-arrow-color': '#E67E22',
-            'line-style': 'dashed'
-          }
-        },
-        {
-          selector: 'edge[type="implements"]',
-          style: {
-            'line-color': '#9B59B6',
-            'target-arrow-color': '#9B59B6',
-            'line-style': 'solid'
-          }
-        },
-        {
-          selector: 'edge[type="contains"]',
-          style: {
-            'line-color': '#2ECC71',
-            'target-arrow-color': '#2ECC71',
-            'line-style': 'dotted'
-          }
-        },
-        {
-          selector: 'edge[type="produces"]',
-          style: {
-            'line-style': 'solid',
-            'width': 3,
-            'line-color': '#8E44AD',
-            'target-arrow-color': '#8E44AD'
-          }
-        },
-        {
-          selector: 'edge[type="consumes_contract"]',
-          style: {
-            'line-style': 'dashed',
-            'width': 2,
-            'line-color': '#9B59B6',
-            'target-arrow-color': '#9B59B6'
-          }
-        },
-        {
-          selector: 'edge[type="validates"]',
-          style: {
-            'line-style': 'dotted',
-            'width': 2,
-            'line-color': '#27AE60',
-            'target-arrow-color': '#27AE60'
-          }
-        },
-        {
-          selector: 'edge[type="violates"]',
-          style: {
-            'line-style': 'solid',
-            'width': 3,
-            'line-color': '#E74C3C',
-            'target-arrow-color': '#E74C3C'
-          }
-        },
-        {
-          selector: 'edge[type="calls"]',
-          style: {
-            'line-color': '#3498DB',
-            'target-arrow-color': '#3498DB',
-            'line-style': 'solid',
-            'width': 2
-          }
-        },
-        {
-          selector: 'edge[type="constrains"]',
-          style: {
-            'line-color': '#2196F3',
-            'target-arrow-color': '#2196F3',
-            'line-style': 'dotted',
-            'width': 1.5
-          }
-        },
-        {
-          selector: 'edge[type="supersedes"]',
-          style: {
-            'line-color': '#9E9E9E',
-            'target-arrow-color': '#9E9E9E',
-            'line-style': 'dashed',
-            'width': 1
-          }
-        },
-        {
-          selector: 'node[?metadata]',
-          style: {
-            'border-width': function(ele) {
-              const meta = ele.data('metadata') || {};
-              return meta.owner ? 3 : 2;
-            },
-            'border-color': function(ele) {
-              const meta = ele.data('metadata') || {};
-              if (!meta.owner) return '#0f3460';
-              const stability = meta.stability;
-              if (stability === 'deprecated') return '#E74C3C';
-              if (stability === 'experimental') return '#F39C12';
-              if (stability === 'legacy') return '#95A5A6';
-              return '#27AE60';
-            }
-          }
+  // ---- Sigma init ----
+  function initSigma(graph) {
+    if (sigmaInstance) {
+      sigmaInstance.kill();
+      sigmaInstance = null;
+    }
+    graphologyGraph = graph;
+
+    // Size nodes by degree
+    graph.nodes().forEach(function(id) {
+      graph.setNodeAttribute(id, 'size', Math.min(12, Math.max(3, 3 + graph.degree(id) * 0.5)));
+    });
+
+    sigmaInstance = new Sigma(graph, document.getElementById('cy'), {
+      nodeReducer: nodeReducer,
+      edgeReducer: edgeReducer,
+      renderEdgeLabels: false,
+      labelFont: 'monospace',
+      labelSize: 12,
+      labelColor: { color: '#d0d0d0' },
+      labelRenderedSizeThreshold: 8,
+      defaultDrawNodeHover: function(context, data, settings) {
+        var size = data.size || 5;
+        var label = data.label || '';
+        var x = data.x;
+        var y = data.y;
+        // Draw hover ring
+        context.beginPath();
+        context.arc(x, y, size + 3, 0, Math.PI * 2);
+        context.closePath();
+        context.lineWidth = 2;
+        context.strokeStyle = '#F1C40F';
+        context.stroke();
+        // Draw label background
+        if (label) {
+          context.font = (settings.labelFont || 'monospace') + ' ' + (settings.labelSize || 12) + 'px ' + (settings.labelFont || 'monospace');
+          context.font = '12px monospace';
+          var textWidth = context.measureText(label).width;
+          var bgX = x + size + 4;
+          var bgY = y - 8;
+          var padding = 4;
+          context.fillStyle = 'rgba(30, 30, 46, 0.9)';
+          context.beginPath();
+          context.roundRect(bgX - padding, bgY - padding, textWidth + padding * 2, 18 + padding, 4);
+          context.fill();
+          // Draw label text
+          context.fillStyle = '#e0e0e0';
+          context.fillText(label, bgX, bgY + 12);
         }
-      ],
-      layout: { name: 'cose', animate: false, nodeDimensionsIncludeLabels: true }
+      }
     });
 
-    cy.on('tap', 'node', function(evt) { showNodeDetail(evt.target.data()); });
-    cy.on('dbltap', 'node', function(evt) { zoomToSubgraph(evt.target.id()); });
-    cy.on('tap', function(evt) {
-      if (evt.target === cy) closeDetail();
+    // ---- Event: clickNode ----
+    sigmaInstance.on('clickNode', function(event) {
+      var node = event.node;
+      var attrs = graphologyGraph.getNodeAttributes(node);
+      showDetailPanel(node, attrs);
+
+      // Highlight connected edges
+      graphologyGraph.edges().forEach(function(edge) {
+        var src = graphologyGraph.source(edge);
+        var tgt = graphologyGraph.target(edge);
+        graphologyGraph.setEdgeAttribute(edge, 'highlighted', src === node || tgt === node);
+      });
+      sigmaInstance.refresh();
     });
 
-    const EDGE_LABELS = {
-        calls: 'Calls',
-        produces: 'Produces',
-        consumes_contract: 'Consumes Contract',
-        validates: 'Validates',
-        violates: 'Violates',
-        constrains: 'Constrains',
-        supersedes: 'Supersedes'
-    };
-
-    cy.on('mouseover', 'edge', function(evt) {
-        const edge = evt.target;
-        const tip = document.getElementById('edge-tooltip');
-        const edgeType = edge.data('type');
-        const displayLabel = EDGE_LABELS[edgeType] || edgeType;
-        tip.textContent = displayLabel + ': ' + edge.data('source') + ' → ' + edge.data('target');
-        tip.style.display = 'block';
-        const pos = evt.renderedPosition || evt.position;
-        const container = document.getElementById('cy-container');
-        const rect = container.getBoundingClientRect();
-        tip.style.left = (pos.x + 10) + 'px';
-        tip.style.top = (pos.y - 20) + 'px';
+    // ---- Event: clickStage (deselect) ----
+    sigmaInstance.on('clickStage', function() {
+      closeDetail();
+      graphologyGraph.edges().forEach(function(edge) {
+        graphologyGraph.setEdgeAttribute(edge, 'highlighted', false);
+      });
+      sigmaInstance.refresh();
     });
 
-    cy.on('mouseout', 'edge', function() {
-        document.getElementById('edge-tooltip').style.display = 'none';
+    // ---- Event: enterEdge ----
+    sigmaInstance.on('enterEdge', function(event) {
+      var edge = event.edge;
+      var attrs = graphologyGraph.getEdgeAttributes(edge);
+      showEdgeTooltip(edge, attrs);
     });
 
-    cy.on('tap', 'node', function(evt) {
-        cy.edges().removeClass('highlighted');
-        evt.target.connectedEdges().addClass('highlighted');
+    // ---- Event: leaveEdge ----
+    sigmaInstance.on('leaveEdge', function() {
+      hideEdgeTooltip();
     });
 
     updateStats();
   }
 
-  const LAYOUTS = ['cose', 'circle', 'grid', 'concentric', 'breadthfirst'];
+  // ---- Detail panel ----
+  function showDetailPanel(nodeId, attrs) {
+    $detailTitle.textContent = attrs.label || nodeId;
+    var html = '';
+    var fields = [
+      ['ID', nodeId],
+      ['Type', attrs.nodeType || 'unknown'],
+      ['Label', attrs.label || nodeId],
+      ['File Path', attrs.file_path || '\\u2014'],
+      ['Manual', attrs.manual ? 'Yes' : 'No']
+    ];
+    fields.forEach(function(pair) {
+      html += '<div class="detail-field"><div class="label">' + pair[0] + '</div><div class="value">' + escapeHtml(String(pair[1])) + '</div></div>';
+    });
+    if (attrs.metadata && Object.keys(attrs.metadata).length > 0) {
+      html += '<div class="detail-field"><div class="label">Metadata</div><div class="value"><pre style="font-size:11px;white-space:pre-wrap;color:#9ab;">' + escapeHtml(JSON.stringify(attrs.metadata, null, 2)) + '</pre></div></div>';
+    }
 
-  function runLayout(name) {
-    if (!cy) return;
-    const layoutConfigs = {
-        cose: { name: 'cose', animate: true, animationDuration: 500, nodeDimensionsIncludeLabels: true },
-        circle: { name: 'circle', animate: true, animationDuration: 500 },
-        grid: { name: 'grid', animate: true, animationDuration: 500 },
-        concentric: { name: 'concentric', animate: true, animationDuration: 500,
-            concentric: function(node) { return node.degree(); },
-            levelWidth: function() { return 2; }
-        },
-        breadthfirst: { name: 'breadthfirst', animate: true, animationDuration: 500, directed: true }
-    };
-    cy.layout(layoutConfigs[name] || layoutConfigs.cose).run();
+    if (graphologyGraph) {
+      var inEdges = graphologyGraph.inEdges(nodeId);
+      var outEdges = graphologyGraph.outEdges(nodeId);
+      if (inEdges.length > 0) {
+        html += '<div class="detail-field"><div class="label">Incoming Edges (' + inEdges.length + ')</div><ul class="edge-list">';
+        inEdges.forEach(function(edge) {
+          var eAttrs = graphologyGraph.getEdgeAttributes(edge);
+          var src = graphologyGraph.source(edge);
+          html += '<li><span class="edge-type">' + escapeHtml(eAttrs.edgeType || '') + '</span> from ' + escapeHtml(src) + '</li>';
+        });
+        html += '</ul></div>';
+      }
+      if (outEdges.length > 0) {
+        html += '<div class="detail-field"><div class="label">Outgoing Edges (' + outEdges.length + ')</div><ul class="edge-list">';
+        outEdges.forEach(function(edge) {
+          var eAttrs = graphologyGraph.getEdgeAttributes(edge);
+          var tgt = graphologyGraph.target(edge);
+          html += '<li><span class="edge-type">' + escapeHtml(eAttrs.edgeType || '') + '</span> to ' + escapeHtml(tgt) + '</li>';
+        });
+        html += '</ul></div>';
+      }
+    }
+
+    $detailBody.innerHTML = html;
+    $detailPanel.classList.add('open');
   }
 
-  // ---- Load graph ----
-  async function loadGraph() {
-    const path = $path.value.trim();
-    if (!path) { showError('Enter a project path'); return; }
-    $loadBtn.disabled = true;
-    $loading.style.display = 'block';
-    $errorMsg.style.display = 'none';
+  function closeDetail() { $detailPanel.classList.remove('open'); }
 
-    try {
-      let resp = await fetch('/api/graph?project_path=' + encodeURIComponent(path));
-      if (resp.status === 404) {
-        // Auto-init: scan the project first
-        $loading.textContent = 'Scanning project...';
-        const initResp = await fetch('/api/init', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({project_path: path})
+  // ---- Edge tooltip ----
+  function showEdgeTooltip(edgeId, attrs) {
+    var tip = document.getElementById('edge-tooltip');
+    var src = graphologyGraph ? graphologyGraph.source(edgeId) : '';
+    var tgt = graphologyGraph ? graphologyGraph.target(edgeId) : '';
+    var conf = attrs.confidence !== undefined ? (' (conf: ' + attrs.confidence.toFixed(2) + ')') : '';
+    tip.textContent = (attrs.edgeType || 'edge') + ': ' + src + ' \\u2192 ' + tgt + conf;
+    tip.style.display = 'block';
+    // mouseover position is not directly available; position near center of container
+    var cont = document.getElementById('cy-container');
+    var rect = cont ? cont.getBoundingClientRect() : { width: 400, height: 300 };
+    tip.style.left = '20px';
+    tip.style.top = '20px';
+  }
+
+  function hideEdgeTooltip() {
+    document.getElementById('edge-tooltip').style.display = 'none';
+  }
+
+  // ---- Search ----
+  var searchTimer = null;
+  $search.addEventListener('input', function() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(function() { applyClientFilters(); }, 300);
+  });
+
+  function applyClientFilters() {
+    if (!graphologyGraph || !sigmaInstance) { return; }
+    var query = $search.value.trim().toLowerCase();
+    activeTypes.clear();
+    document.querySelectorAll('#filters input[type=checkbox]').forEach(function(cb) {
+      if (cb.checked) { activeTypes.add(cb.value); }
+    });
+
+    graphologyGraph.nodes().forEach(function(id) {
+      var attrs = graphologyGraph.getNodeAttributes(id);
+      var typeOk = activeTypes.size === 0 || activeTypes.has(attrs.nodeType || 'unknown');
+      var searchOk = !query || (attrs.label || id).toLowerCase().indexOf(query) !== -1 || id.toLowerCase().indexOf(query) !== -1;
+      graphologyGraph.setNodeAttribute(id, 'hidden', !(typeOk && searchOk));
+    });
+
+    // Hide edges where either endpoint is hidden
+    graphologyGraph.edges().forEach(function(edge) {
+      var src = graphologyGraph.source(edge);
+      var tgt = graphologyGraph.target(edge);
+      var srcHidden = graphologyGraph.getNodeAttribute(src, 'hidden');
+      var tgtHidden = graphologyGraph.getNodeAttribute(tgt, 'hidden');
+      graphologyGraph.setEdgeAttribute(edge, 'hidden', srcHidden || tgtHidden);
+    });
+
+    sigmaInstance.refresh();
+    updateStats();
+  }
+
+  // ---- Stats ----
+  function updateStats() {
+    if (!graphologyGraph) { return; }
+    var totalNodes = graphologyGraph.order;
+    var totalEdges = graphologyGraph.size;
+    var visNodes = 0;
+    graphologyGraph.nodes().forEach(function(id) {
+      if (!graphologyGraph.getNodeAttribute(id, 'hidden')) { visNodes++; }
+    });
+    document.getElementById('stat-nodes').textContent = totalNodes;
+    document.getElementById('stat-edges').textContent = totalEdges;
+    document.getElementById('stat-visible').textContent = visNodes;
+
+    var avgDeg = totalNodes > 0 ? (2 * totalEdges / totalNodes).toFixed(1) : '0';
+    document.getElementById('stat-avg-degree').textContent = avgDeg;
+
+    // Connected components (simple BFS ignoring hidden)
+    var visited = new Set();
+    var components = 0;
+    graphologyGraph.nodes().forEach(function(startId) {
+      if (visited.has(startId)) { return; }
+      components++;
+      var queue = [startId];
+      while (queue.length > 0) {
+        var cur = queue.shift();
+        if (visited.has(cur)) { continue; }
+        visited.add(cur);
+        graphologyGraph.neighbors(cur).forEach(function(nb) {
+          if (!visited.has(nb)) { queue.push(nb); }
         });
-        if (!initResp.ok) {
-          const err = await initResp.json().catch(() => ({}));
-          throw new Error(err.error || 'Failed to initialize project');
-        }
-        $loading.textContent = 'Loading...';
-        resp = await fetch('/api/graph?project_path=' + encodeURIComponent(path));
       }
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error || resp.statusText);
-      }
-      const d3Data = await resp.json();
-      allElements = d3ToCytoscape(d3Data);
-      buildFilters(d3Data.nodes || []);
-      $search.disabled = false;
-      $search.value = '';
-      initCy(allElements);
-      buildLegend();
-    } catch (e) {
-      showError(e.message);
-    } finally {
-      $loadBtn.disabled = false;
-      $loading.style.display = 'none';
+    });
+    document.getElementById('stat-components').textContent = components;
+
+    // Type distribution
+    var typeCounts = {};
+    graphologyGraph.nodes().forEach(function(id) {
+      var t = graphologyGraph.getNodeAttribute(id, 'nodeType') || 'unknown';
+      typeCounts[t] = (typeCounts[t] || 0) + 1;
+    });
+    var maxCount = Math.max.apply(null, Object.values(typeCounts).concat([1]));
+    var $dist = document.getElementById('type-distribution');
+    if ($dist) {
+      var html = '';
+      Object.keys(typeCounts).sort().forEach(function(t) {
+        var pct = (typeCounts[t] / maxCount) * 100;
+        var color = TYPE_COLORS[t] || DEFAULT_COLOR;
+        html += '<div class="dist-row"><span class="dist-label">' + t + '</span><span class="dist-bar" style="width:' + pct + '%;background:' + color + '"></span><span class="dist-count">' + typeCounts[t] + '</span></div>';
+      });
+      $dist.innerHTML = html;
     }
   }
 
-  // ---- Filters ----
+  // ---- Legend ----
+  function buildLegend() {
+    var $legend = document.getElementById('legend');
+    if (!$legend) { return; }
+    var html = '';
+    Object.keys(TYPE_COLORS).sort().forEach(function(t) {
+      html += '<div class="legend-item"><span class="legend-swatch" style="background:' + TYPE_COLORS[t] + '"></span>' + t + '</div>';
+    });
+    html += '<div class="legend-divider"></div>';
+    var edgeStyles = {
+      imports: { color: '#E67E22', style: 'dashed' },
+      implements: { color: '#9B59B6', style: '' },
+      calls: { color: '#3498DB', style: '' },
+      contains: { color: '#2ECC71', style: 'dotted' },
+      produces: { color: '#8E44AD', style: '' },
+      consumes_contract: { color: '#9B59B6', style: 'dashed' },
+      validates: { color: '#27AE60', style: 'dotted' },
+      violates: { color: '#E74C3C', style: '' },
+      constrains: { color: '#2196F3', style: 'dotted' },
+      supersedes: { color: '#9E9E9E', style: 'dashed' },
+      default: { color: '#2a3a5e', style: '' }
+    };
+    Object.keys(edgeStyles).forEach(function(t) {
+      var s = edgeStyles[t];
+      html += '<div class="legend-item"><span class="legend-line ' + s.style + '" style="border-color:' + s.color + '"></span>' + t + '</div>';
+    });
+    $legend.innerHTML = html;
+  }
+
+  // ---- Node type client filters ----
   function buildFilters(nodes) {
-    const types = new Set(nodes.map(n => n.type || 'unknown'));
+    var types = new Set((nodes || []).map(function(n) { return n.type || 'unknown'; }));
     activeTypes = new Set(types);
     $filters.innerHTML = '';
-    [...types].sort().forEach(t => {
-      const lbl = document.createElement('label');
-      const cb = document.createElement('input');
+    Array.from(types).sort().forEach(function(t) {
+      var lbl = document.createElement('label');
+      var cb = document.createElement('input');
       cb.type = 'checkbox'; cb.checked = true; cb.value = t;
-      cb.addEventListener('change', applyFilters);
-      const colorDot = document.createElement('span');
+      cb.addEventListener('change', applyClientFilters);
+      var colorDot = document.createElement('span');
       colorDot.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:50%;background:' + (TYPE_COLORS[t] || DEFAULT_COLOR);
       lbl.appendChild(cb); lbl.appendChild(colorDot);
       lbl.appendChild(document.createTextNode(' ' + t));
@@ -722,194 +802,312 @@ body {
     });
   }
 
-  function applyFilters() {
-    if (!cy) return;
-    activeTypes.clear();
-    $filters.querySelectorAll('input[type=checkbox]').forEach(cb => {
-      if (cb.checked) activeTypes.add(cb.value);
-    });
-    const query = $search.value.trim().toLowerCase();
-    cy.nodes().forEach(n => {
-      const typeOk = activeTypes.has(n.data('type'));
-      const searchOk = !query || n.data('label').toLowerCase().includes(query) || n.data('id').toLowerCase().includes(query);
-      if (typeOk && searchOk) n.removeClass('hidden').style('display', 'element');
-      else n.addClass('hidden').style('display', 'none');
-    });
-    cy.edges().forEach(e => {
-      const srcVis = e.source().style('display') !== 'none';
-      const tgtVis = e.target().style('display') !== 'none';
-      if (srcVis && tgtVis) e.style('display', 'element');
-      else e.style('display', 'none');
-    });
-    updateStats();
-  }
+  // ---- Load graph ----
+  async function loadGraph() {
+    var path = $path.value.trim();
+    if (!path) { showError('Enter a project path'); return; }
+    currentProjectPath = path;
+    $loadBtn.disabled = true;
+    $loading.style.display = 'block';
+    $loading.textContent = 'Loading graph...';
+    $errorMsg.style.display = 'none';
 
-  // ---- Search ----
-  let searchTimer = null;
-  $search.addEventListener('input', function() {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(applyFilters, 300);
-  });
-
-  // ---- Stats ----
-  function updateStats() {
-    if (!cy) return;
-    const visNodes = cy.nodes().filter(n => n.style('display') !== 'none');
-    const totalNodes = cy.nodes().length;
-    const totalEdges = cy.edges().length;
-    document.getElementById('stat-nodes').textContent = totalNodes;
-    document.getElementById('stat-edges').textContent = totalEdges;
-    document.getElementById('stat-visible').textContent = visNodes.length;
-
-    // Avg degree
-    const avgDeg = totalNodes > 0 ? (2 * totalEdges / totalNodes).toFixed(1) : '0';
-    document.getElementById('stat-avg-degree').textContent = avgDeg;
-
-    // Connected components (simple BFS)
-    const visited = new Set();
-    let components = 0;
-    cy.nodes().forEach(n => {
-        if (!visited.has(n.id())) {
-            components++;
-            const queue = [n];
-            while (queue.length > 0) {
-                const cur = queue.shift();
-                if (visited.has(cur.id())) continue;
-                visited.add(cur.id());
-                cur.neighborhood('node').forEach(nb => {
-                    if (!visited.has(nb.id())) queue.push(nb);
-                });
-            }
-        }
-    });
-    document.getElementById('stat-components').textContent = components;
-
-    // Type distribution bar chart
-    const typeCounts = {};
-    cy.nodes().forEach(n => {
-        const t = n.data('type') || 'unknown';
-        typeCounts[t] = (typeCounts[t] || 0) + 1;
-    });
-    const maxCount = Math.max(...Object.values(typeCounts), 1);
-    const $dist = document.getElementById('type-distribution');
-    if ($dist) {
-        let html = '';
-        Object.keys(typeCounts).sort().forEach(t => {
-            const pct = (typeCounts[t] / maxCount) * 100;
-            const color = TYPE_COLORS[t] || DEFAULT_COLOR;
-            html += '<div class="dist-row"><span class="dist-label">' + t + '</span><span class="dist-bar" style="width:' + pct + '%;background:' + color + '"></span><span class="dist-count">' + typeCounts[t] + '</span></div>';
-        });
-        $dist.innerHTML = html;
-    }
-  }
-
-  // ---- Legend ----
-  function buildLegend() {
-    const $legend = document.getElementById('legend');
-    if (!$legend) return;
-    let html = '';
-    // Node types
-    Object.keys(TYPE_COLORS).sort().forEach(t => {
-        html += '<div class="legend-item"><span class="legend-swatch" style="background:' + TYPE_COLORS[t] + '"></span>' + t + '</div>';
-    });
-    html += '<div class="legend-divider"></div>';
-    // Edge types
-    const edgeStyles = {
-        imports: { color: '#E67E22', style: 'dashed' },
-        implements: { color: '#9B59B6', style: '' },
-        calls: { color: '#3498DB', style: '' },
-        contains: { color: '#2ECC71', style: 'dotted' },
-        produces: { color: '#8E44AD', style: '' },
-        consumes_contract: { color: '#9B59B6', style: 'dashed' },
-        validates: { color: '#27AE60', style: 'dotted' },
-        violates: { color: '#E74C3C', style: '' },
-        constrains: { color: '#2196F3', style: 'dotted' },
-        supersedes: { color: '#9E9E9E', style: 'dashed' },
-        default: { color: '#2a3a5e', style: '' }
-    };
-    Object.keys(edgeStyles).forEach(t => {
-        const s = edgeStyles[t];
-        html += '<div class="legend-item"><span class="legend-line ' + s.style + '" style="border-color:' + s.color + '"></span>' + t + '</div>';
-    });
-    $legend.innerHTML = html;
-  }
-
-  // ---- Detail panel ----
-  function showNodeDetail(data) {
-    $detailTitle.textContent = data.label || data.id;
-    let html = '';
-    const fields = [
-      ['ID', data.id], ['Type', data.type], ['Label', data.label],
-      ['File Path', data.file_path || 'N/A'], ['Manual', data.manual ? 'Yes' : 'No']
-    ];
-    fields.forEach(([label, val]) => {
-      html += '<div class="detail-field"><div class="label">' + label + '</div><div class="value">' + escapeHtml(String(val)) + '</div></div>';
-    });
-    if (data.metadata && Object.keys(data.metadata).length > 0) {
-      html += '<div class="detail-field"><div class="label">Metadata</div><div class="value"><pre style="font-size:11px;white-space:pre-wrap;color:#9ab;">' + escapeHtml(JSON.stringify(data.metadata, null, 2)) + '</pre></div></div>';
-    }
-
-    // Connected edges
-    if (cy) {
-      const node = cy.getElementById(data.id);
-      const incoming = node.incomers('edge');
-      const outgoing = node.outgoers('edge');
-      if (incoming.length > 0) {
-        html += '<div class="detail-field"><div class="label">Incoming Edges (' + incoming.length + ')</div><ul class="edge-list">';
-        incoming.forEach(e => {
-          html += '<li><span class="edge-type">' + escapeHtml(e.data('type')) + '</span> from ' + escapeHtml(e.data('source')) + '</li>';
-        });
-        html += '</ul></div>';
-      }
-      if (outgoing.length > 0) {
-        html += '<div class="detail-field"><div class="label">Outgoing Edges (' + outgoing.length + ')</div><ul class="edge-list">';
-        outgoing.forEach(e => {
-          html += '<li><span class="edge-type">' + escapeHtml(e.data('type')) + '</span> to ' + escapeHtml(e.data('target')) + '</li>';
-        });
-        html += '</ul></div>';
+    var maxNodes = parseInt($maxNodes.value, 10);
+    if (!isNaN(maxNodes) && maxNodes > 2000) {
+      if (!confirm('Loading ' + maxNodes + ' nodes may be slow. Continue?')) {
+        $loadBtn.disabled = false;
+        return;
       }
     }
-    $detailBody.innerHTML = html;
-    $detailPanel.classList.add('open');
-  }
+    var pathPrefix = $pathPrefix.value.trim();
 
-  function closeDetail() { $detailPanel.classList.remove('open'); }
+    var apiUrl = '/api/graph?project_path=' + encodeURIComponent(path);
+    apiUrl += '&max_nodes=' + (isNaN(maxNodes) ? 500 : maxNodes);
+    if (pathPrefix) { apiUrl += '&path_prefix=' + encodeURIComponent(pathPrefix); }
 
-  function escapeHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
-  // ---- Zoom to subgraph ----
-  async function zoomToSubgraph(nodeId) {
-    const path = $path.value.trim();
-    if (!path || !cy) return;
     try {
-      const resp = await fetch('/api/subgraph?project_path=' + encodeURIComponent(path) + '&node_id=' + encodeURIComponent(nodeId) + '&depth=2');
-      if (!resp.ok) return;
-      const d3Data = await resp.json();
-      const subIds = new Set((d3Data.nodes || []).map(n => n.id));
-      const subNodes = cy.nodes().filter(n => subIds.has(n.id()));
-      if (subNodes.length > 0) cy.fit(subNodes, 40);
-    } catch(e) { /* silently ignore */ }
+      var resp = await fetch(apiUrl);
+      if (resp.status === 404) {
+        $loading.textContent = 'Scanning project...';
+        var initResp = await fetch('/api/init', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({project_path: path})
+        });
+        if (!initResp.ok) {
+          var initErr = await initResp.json().catch(function() { return {}; });
+          throw new Error(initErr.error || 'Failed to initialize project');
+        }
+        $loading.textContent = 'Loading...';
+        resp = await fetch(apiUrl);
+      }
+      if (!resp.ok) {
+        var errData = await resp.json().catch(function() { return {}; });
+        throw new Error(errData.error || resp.statusText);
+      }
+      var d3Data = await resp.json();
+
+      // Show truncation/filter banner
+      var shownNodes = (d3Data.nodes || []).length;
+      var totalNodes = d3Data.unfiltered_total_nodes || shownNodes;
+      if (d3Data.truncated) {
+        $truncationBanner.textContent = 'Top ' + shownNodes + ' hotspot nodes of ' + d3Data.total_nodes +
+          (d3Data.total_nodes !== totalNodes ? ' filtered (' + totalNodes + ' total)' : ' total');
+        $truncationBanner.style.display = 'block';
+      } else if (shownNodes < totalNodes) {
+        $truncationBanner.textContent = 'Showing ' + shownNodes + ' of ' + totalNodes + ' total nodes (filtered)';
+        $truncationBanner.style.display = 'block';
+      } else {
+        $truncationBanner.style.display = 'none';
+      }
+
+      var graph = d3ToGraphology(d3Data);
+      buildFilters(d3Data.nodes || []);
+      $search.disabled = false;
+      $search.value = '';
+      initSigma(graph);
+      buildLegend();
+    } catch(e) {
+      showError(e.message);
+    } finally {
+      $loadBtn.disabled = false;
+      $loading.style.display = 'none';
+      $loading.textContent = 'Loading graph...';
+    }
+  }
+
+  // ---- Layout functions ----
+  function applyLayoutAndReset(fn) {
+    fn();
+    sigmaInstance.refresh();
+    setTimeout(function() { sigmaInstance.getCamera().animatedReset(); }, 50);
+  }
+
+  function applyForceLayout() {
+    // Component-aware spring layout — O(n + edges), instant for any graph size
+    var nodeIds = graphologyGraph.nodes();
+    var n = nodeIds.length;
+    if (n === 0) return;
+
+    // 1. Find connected components via BFS
+    var visited = new Set();
+    var components = [];
+    nodeIds.forEach(function(startId) {
+      if (visited.has(startId)) return;
+      var comp = [];
+      var queue = [startId];
+      visited.add(startId);
+      while (queue.length > 0) {
+        var id = queue.shift();
+        comp.push(id);
+        graphologyGraph.neighbors(id).forEach(function(nb) {
+          if (!visited.has(nb)) { visited.add(nb); queue.push(nb); }
+        });
+      }
+      components.push(comp);
+    });
+
+    // 2. Sort components largest-first
+    components.sort(function(a, b) { return b.length - a.length; });
+
+    // 3. Lay out each component in a circle, then place components in a grid
+    var pos = {};
+    var compCols = Math.ceil(Math.sqrt(components.length));
+    var spacing = Math.sqrt(n) * 3;
+
+    components.forEach(function(comp, ci) {
+      var cx = (ci % compCols) * spacing;
+      var cy = Math.floor(ci / compCols) * spacing;
+      var compN = comp.length;
+
+      if (compN === 1) {
+        pos[comp[0]] = { x: cx, y: cy };
+        return;
+      }
+
+      // Lay out within component: BFS layers from highest-degree node
+      var root = comp[0];
+      var bestDeg = -1;
+      comp.forEach(function(id) {
+        var deg = graphologyGraph.degree(id);
+        if (deg > bestDeg) { bestDeg = deg; root = id; }
+      });
+
+      var layerVisited = new Set();
+      var layers = [];
+      var q = [root];
+      layerVisited.add(root);
+      while (q.length > 0) {
+        layers.push(q.slice());
+        var next = [];
+        q.forEach(function(id) {
+          graphologyGraph.neighbors(id).forEach(function(nb) {
+            if (!layerVisited.has(nb) && comp.indexOf(nb) !== -1) {
+              layerVisited.add(nb); next.push(nb);
+            }
+          });
+        });
+        q = next;
+      }
+      // Place unvisited in final layer
+      comp.forEach(function(id) { if (!layerVisited.has(id)) layers.push([id]); });
+
+      // Position: concentric rings from root outward
+      var ringSpacing = Math.min(spacing * 0.4, 15 + compN * 0.5);
+      layers.forEach(function(layer, depth) {
+        if (depth === 0) {
+          pos[layer[0]] = { x: cx, y: cy };
+          return;
+        }
+        var radius = depth * ringSpacing;
+        layer.forEach(function(id, i) {
+          var angle = (2 * Math.PI * i) / layer.length;
+          pos[id] = { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
+        });
+      });
+    });
+
+    // 4. Write positions to graphology
+    nodeIds.forEach(function(id) {
+      if (pos[id]) {
+        graphologyGraph.setNodeAttribute(id, 'x', pos[id].x);
+        graphologyGraph.setNodeAttribute(id, 'y', pos[id].y);
+      }
+    });
+    sigmaInstance.refresh();
+    setTimeout(function() { sigmaInstance.getCamera().animatedReset(); }, 50);
+  }
+
+  function applyCircularLayout() {
+    applyLayoutAndReset(function() {
+      var nodes = graphologyGraph.nodes();
+      var n = nodes.length;
+      nodes.forEach(function(id, i) {
+        var angle = (2 * Math.PI * i) / n;
+        graphologyGraph.setNodeAttribute(id, 'x', Math.cos(angle) * 100);
+        graphologyGraph.setNodeAttribute(id, 'y', Math.sin(angle) * 100);
+      });
+    });
+  }
+
+  function applyGridLayout() {
+    applyLayoutAndReset(function() {
+      var nodes = graphologyGraph.nodes();
+      var cols = Math.ceil(Math.sqrt(nodes.length));
+      nodes.forEach(function(id, i) {
+        graphologyGraph.setNodeAttribute(id, 'x', (i % cols) * 10);
+        graphologyGraph.setNodeAttribute(id, 'y', Math.floor(i / cols) * 10);
+      });
+    });
+  }
+
+  function applyRandomLayout() {
+    applyLayoutAndReset(function() {
+      graphologyGraph.nodes().forEach(function(id) {
+        graphologyGraph.setNodeAttribute(id, 'x', (Math.random() - 0.5) * 200);
+        graphologyGraph.setNodeAttribute(id, 'y', (Math.random() - 0.5) * 200);
+      });
+    });
+  }
+
+  function applyConcentricLayout() {
+    applyLayoutAndReset(function() {
+      var nodes = graphologyGraph.nodes();
+      // Sort nodes by degree descending — highest-degree nodes in the center
+      var sorted = nodes.slice().sort(function(a, b) {
+        return graphologyGraph.degree(b) - graphologyGraph.degree(a);
+      });
+      // Assign to concentric rings: ring 0 = top degree, ring 1 = next batch, etc.
+      var ringSize = Math.max(1, Math.ceil(sorted.length / 8));
+      sorted.forEach(function(id, i) {
+        var ring = Math.floor(i / ringSize);
+        var posInRing = i % ringSize;
+        var nodesInThisRing = Math.min(ringSize, sorted.length - ring * ringSize);
+        var radius = (ring + 1) * 30;
+        var angle = (2 * Math.PI * posInRing) / nodesInThisRing;
+        graphologyGraph.setNodeAttribute(id, 'x', Math.cos(angle) * radius);
+        graphologyGraph.setNodeAttribute(id, 'y', Math.sin(angle) * radius);
+      });
+    });
+  }
+
+  function applyBreadthfirstLayout() {
+    applyLayoutAndReset(function() {
+      var nodes = graphologyGraph.nodes();
+      // Find root: node with highest in-degree difference (most "parent-like")
+      var root = nodes[0];
+      var bestScore = -Infinity;
+      nodes.forEach(function(id) {
+        var score = graphologyGraph.outDegree(id) - graphologyGraph.inDegree(id);
+        if (score > bestScore) { bestScore = score; root = id; }
+      });
+      // BFS layering
+      var visited = new Set();
+      var layers = [];
+      var queue = [root];
+      visited.add(root);
+      while (queue.length > 0) {
+        layers.push(queue.slice());
+        var next = [];
+        queue.forEach(function(id) {
+          graphologyGraph.outNeighbors(id).forEach(function(nb) {
+            if (!visited.has(nb)) { visited.add(nb); next.push(nb); }
+          });
+        });
+        queue = next;
+      }
+      // Place unvisited nodes in a final layer
+      var remaining = nodes.filter(function(id) { return !visited.has(id); });
+      if (remaining.length > 0) layers.push(remaining);
+      // Position: layers top-to-bottom, nodes spread horizontally
+      var ySpacing = 20;
+      layers.forEach(function(layer, depth) {
+        var xSpacing = Math.max(10, 200 / (layer.length + 1));
+        layer.forEach(function(id, i) {
+          graphologyGraph.setNodeAttribute(id, 'x', (i - layer.length / 2) * xSpacing);
+          graphologyGraph.setNodeAttribute(id, 'y', depth * ySpacing);
+        });
+      });
+    });
+  }
+
+  function applyOriginalLayout() {
+    applyLayoutAndReset(function() {
+      graphologyGraph.nodes().forEach(function(id) {
+        var orig = allNodeData.get(id);
+        if (orig && orig.x !== undefined) {
+          graphologyGraph.setNodeAttribute(id, 'x', orig.x);
+          graphologyGraph.setNodeAttribute(id, 'y', orig.y);
+        }
+      });
+    });
   }
 
   // ---- Toolbar ----
   document.getElementById('btn-fit').addEventListener('click', function() {
-    if (cy) cy.fit(cy.nodes().filter(n => n.style('display') !== 'none'), 30);
+    if (sigmaInstance) { sigmaInstance.getCamera().animatedReset(); }
   });
 
   document.getElementById('btn-layout').addEventListener('click', function() {
-    const idx = LAYOUTS.indexOf(currentLayout);
-    currentLayout = LAYOUTS[(idx + 1) % LAYOUTS.length];
-    this.textContent = currentLayout.charAt(0).toUpperCase() + currentLayout.slice(1);
-    runLayout(currentLayout);
+    currentLayoutIdx = (currentLayoutIdx + 1) % LAYOUTS.length;
+    var layoutName = LAYOUTS[currentLayoutIdx];
+    this.textContent = layoutName.charAt(0).toUpperCase() + layoutName.slice(1);
+    if (!graphologyGraph || !sigmaInstance) return;
+    if (layoutName === 'force') applyForceLayout();
+    else if (layoutName === 'circular') applyCircularLayout();
+    else if (layoutName === 'grid') applyGridLayout();
+    else if (layoutName === 'concentric') applyConcentricLayout();
+    else if (layoutName === 'breadthfirst') applyBreadthfirstLayout();
+    else if (layoutName === 'random') applyRandomLayout();
+    else if (layoutName === 'original') applyOriginalLayout();
   });
 
   document.getElementById('btn-export').addEventListener('click', function() {
-    if (!cy) return;
-    const png = cy.png({ bg: '#1a1a2e', full: true });
-    const a = document.createElement('a');
-    a.href = png; a.download = 'codegiraffe-graph.png'; a.click();
+    if (!sigmaInstance) { return; }
+    var canvas = sigmaInstance.getCanvas();
+    var url = canvas.toDataURL('image/png');
+    var a = document.createElement('a');
+    a.href = url; a.download = 'codegiraffe-graph.png'; a.click();
   });
 
   // ---- Sidebar toggle ----
@@ -922,14 +1120,31 @@ body {
 
   // ---- Keyboard shortcuts ----
   document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') closeDetail();
+    if (e.key === 'Escape') { closeDetail(); }
   });
 
   // ---- Load button ----
   $loadBtn.addEventListener('click', loadGraph);
   $path.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') loadGraph();
+    if (e.key === 'Enter') { loadGraph(); }
   });
+  document.getElementById('apply-server-filters').addEventListener('click', loadGraph);
+
+  // ---- Edge tooltip mouseover (for DOM-level fallback) ----
+  document.getElementById('cy-container').addEventListener('mouseover', function(e) {
+    // Sigma handles enterEdge events; this is a fallback to keep edge-tooltip logic accessible
+  });
+
+  // ---- Auto-load from URL query parameters on page load ----
+  (function() {
+    var params = new URLSearchParams(window.location.search);
+    var pp = params.get('project_path');
+    if (pp) {
+      document.getElementById('project-path').value = pp;
+      currentProjectPath = pp;
+      loadGraph();
+    }
+  })();
 
 })();
 </script>
@@ -1009,8 +1224,19 @@ def register_dashboard_routes(
             max_nodes = int(request.query_params.get("max_nodes", "500"))
         except ValueError:
             max_nodes = 500
+
+        path_prefix = request.query_params.get("path_prefix", "")
+        node_types_raw = request.query_params.get("node_types", "")
+        node_types = [t.strip() for t in node_types_raw.split(",") if t.strip()] if node_types_raw else None
+
         try:
-            result = get_graph_json(ensure_graph_fn, project_path, max_nodes=max_nodes)
+            result = get_graph_json(
+                ensure_graph_fn,
+                project_path,
+                max_nodes=max_nodes,
+                path_prefix=path_prefix,
+                node_types=node_types,
+            )
             return JSONResponse(result)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)

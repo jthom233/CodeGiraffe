@@ -83,7 +83,7 @@ class CppRecognizer:
         """Scan *content* of a C/C++ file and return discovered nodes/edges."""
         nodes: list[Node] = []
         edges: list[Edge] = []
-        rel_path = str(file_path)
+        rel_path = file_path.as_posix()
         filename_stem = file_path.stem
 
         captured_names: set[str] = set()
@@ -249,6 +249,6 @@ class CppRecognizer:
         for match in _CPP_CLASS_INHERITANCE_RE.finditer(content):
             child = match.group(1)
             for base_match in _CPP_BASE_CLASS_RE.finditer(match.group(2)):
-                implementations.append(ImplementationInfo(child_class=child, parent_class=base_match.group(1), file_path=str(file_path)))
+                implementations.append(ImplementationInfo(child_class=child, parent_class=base_match.group(1), file_path=file_path.as_posix()))
 
         return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

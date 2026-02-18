@@ -242,6 +242,8 @@ class DashboardServer:
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
 
+        # NOTE: This handler mirrors the graph_data handler in dashboard.py.
+        # Any changes to parameters or logic must be applied to both files.
         async def graph_data(request: Request) -> JSONResponse:
             project_path = request.query_params.get("project_path", "")
             if not project_path:
@@ -252,8 +254,19 @@ class DashboardServer:
                 max_nodes = int(request.query_params.get("max_nodes", "500"))
             except ValueError:
                 max_nodes = 500
+
+            path_prefix = request.query_params.get("path_prefix", "")
+            node_types_raw = request.query_params.get("node_types", "")
+            node_types = [t.strip() for t in node_types_raw.split(",") if t.strip()] if node_types_raw else None
+
             try:
-                result = get_graph_json(ensure_graph_fn, project_path, max_nodes=max_nodes)
+                result = get_graph_json(
+                    ensure_graph_fn,
+                    project_path,
+                    max_nodes=max_nodes,
+                    path_prefix=path_prefix,
+                    node_types=node_types,
+                )
                 return JSONResponse(result)
             except RuntimeError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=404)
@@ -299,12 +312,25 @@ class DashboardServer:
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
 
+        async def logo(request: Request) -> "Response":
+            from pathlib import Path as _Path
+            from starlette.responses import Response
+
+            logo_path = _Path(__file__).parent / "assets" / "logo.png"
+            if logo_path.exists():
+                return Response(
+                    content=logo_path.read_bytes(),
+                    media_type="image/png",
+                )
+            return Response(status_code=404)
+
         routes = [
             Route("/dashboard", endpoint=dashboard_page, methods=["GET"]),
             Route("/api/init", endpoint=init_graph, methods=["POST"]),
             Route("/api/graph", endpoint=graph_data, methods=["GET"]),
             Route("/api/node", endpoint=node_detail, methods=["GET"]),
             Route("/api/subgraph", endpoint=subgraph_data, methods=["GET"]),
+            Route("/api/logo", endpoint=logo, methods=["GET"]),
         ]
 
         return Starlette(routes=routes)

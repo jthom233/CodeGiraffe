@@ -1,6 +1,6 @@
 [project]
 name = "codegiraffe"
-version = "0.13.0"
+version = "0.14.0"
 description = "Architecture knowledge graph MCP server for AI-assisted development"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,6 +49,9 @@ ast = [
     "tree-sitter-typescript>=0.23.0",
     "tree-sitter-rust>=0.23.0",
     "tree-sitter-java>=0.23.0",
+]
+layout = [
+    "fa2>=0.1",
 ]
 
 [build-system]

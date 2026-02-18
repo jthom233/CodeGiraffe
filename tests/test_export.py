@@ -168,3 +168,76 @@ class TestD3Export:
     def test_d3_schema_version(self, export_graph_data):
         result = json.loads(to_d3_json(export_graph_data))
         assert result["metadata"]["schema_version"] == "1.0"
+
+
+class TestToD3JsonLayoutCoords:
+    """TDD RED tests: to_d3_json must emit x/y coords from GraphData.layout."""
+
+    def test_xy_present_when_layout_has_entries(self):
+        """Nodes with layout entries should have x and y in D3 output."""
+        nodes = {
+            "n1": Node(id="n1", type=NodeType.SERVICE, label="Node 1"),
+            "n2": Node(id="n2", type=NodeType.SERVICE, label="Node 2"),
+        }
+        data = GraphData(
+            nodes=nodes,
+            edges=[],
+            project_path="/test",
+            last_scan="",
+            layout={"n1": [0.5, -0.3], "n2": [-0.1, 0.8]},
+        )
+        result = json.loads(to_d3_json(data))
+        node_by_id = {n["id"]: n for n in result["nodes"]}
+
+        assert "x" in node_by_id["n1"], "n1 should have an x coord from layout"
+        assert "y" in node_by_id["n1"], "n1 should have a y coord from layout"
+        assert node_by_id["n1"]["x"] == pytest.approx(0.5)
+        assert node_by_id["n1"]["y"] == pytest.approx(-0.3)
+
+        assert "x" in node_by_id["n2"], "n2 should have an x coord from layout"
+        assert "y" in node_by_id["n2"], "n2 should have a y coord from layout"
+        assert node_by_id["n2"]["x"] == pytest.approx(-0.1)
+        assert node_by_id["n2"]["y"] == pytest.approx(0.8)
+
+    def test_xy_absent_when_layout_is_empty(self):
+        """Nodes should NOT have x or y keys when layout is empty."""
+        nodes = {
+            "n1": Node(id="n1", type=NodeType.SERVICE, label="Node 1"),
+            "n2": Node(id="n2", type=NodeType.SERVICE, label="Node 2"),
+        }
+        data = GraphData(
+            nodes=nodes,
+            edges=[],
+            project_path="/test",
+            last_scan="",
+            layout={},
+        )
+        result = json.loads(to_d3_json(data))
+        for node_dict in result["nodes"]:
+            assert "x" not in node_dict, f"Node {node_dict['id']} should not have x"
+            assert "y" not in node_dict, f"Node {node_dict['id']} should not have y"
+
+    def test_partial_layout_only_matching_nodes_get_xy(self):
+        """Only nodes with a layout entry should get x/y; others should not."""
+        nodes = {
+            "n1": Node(id="n1", type=NodeType.SERVICE, label="Node 1"),
+            "n2": Node(id="n2", type=NodeType.SERVICE, label="Node 2"),
+        }
+        # Only n1 has a layout entry; n2 does not
+        data = GraphData(
+            nodes=nodes,
+            edges=[],
+            project_path="/test",
+            last_scan="",
+            layout={"n1": [1.0, 2.0]},
+        )
+        result = json.loads(to_d3_json(data))
+        node_by_id = {n["id"]: n for n in result["nodes"]}
+
+        assert "x" in node_by_id["n1"], "n1 has a layout entry, should have x"
+        assert "y" in node_by_id["n1"], "n1 has a layout entry, should have y"
+        assert node_by_id["n1"]["x"] == pytest.approx(1.0)
+        assert node_by_id["n1"]["y"] == pytest.approx(2.0)
+
+        assert "x" not in node_by_id["n2"], "n2 has no layout entry, must not have x"
+        assert "y" not in node_by_id["n2"], "n2 has no layout entry, must not have y"

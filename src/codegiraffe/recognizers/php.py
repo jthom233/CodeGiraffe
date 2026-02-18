@@ -112,7 +112,7 @@ class PhpRecognizer:
         """Scan *content* of a PHP file and return discovered nodes/edges."""
         nodes: list[Node] = []
         edges: list[Edge] = []
-        rel_path = str(file_path)
+        rel_path = file_path.as_posix()
 
         endpoint_ids: list[str] = []
         table_ids: list[str] = []
@@ -295,10 +295,10 @@ class PhpRecognizer:
 
         implementations: list[ImplementationInfo] = []
         for match in _PHP_CLASS_EXTENDS_RE.finditer(content):
-            implementations.append(ImplementationInfo(child_class=match.group(1), parent_class=match.group(2), file_path=str(file_path)))
+            implementations.append(ImplementationInfo(child_class=match.group(1), parent_class=match.group(2), file_path=file_path.as_posix()))
         for match in _PHP_CLASS_IMPL_RE.finditer(content):
             child = match.group(1)
             for parent in [p.strip().split("\\")[-1] for p in match.group(2).split(",") if p.strip()]:
-                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=str(file_path)))
+                implementations.append(ImplementationInfo(child_class=child, parent_class=parent, file_path=file_path.as_posix()))
 
         return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)
