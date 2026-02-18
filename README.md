@@ -1,6 +1,8 @@
-# Code Giraffe
-
-**Architecture knowledge graph MCP server for AI-assisted development.**
+<p align="center">
+  <img src="src/codegiraffe/assets/logo.png" alt="Code Giraffe" width="280">
+</p>
+<h1 align="center">Code Giraffe</h1>
+<p align="center"><strong>Architecture knowledge graph MCP server for AI-assisted development.</strong></p>
 
 Code Giraffe captures the relationships that static code analysis can't see -- runtime coupling, data flows, cross-system contracts, and operational context -- and exposes them as an MCP (Model Context Protocol) server that AI agents can query directly.
 

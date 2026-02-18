@@ -49,6 +49,7 @@ The dashboard also exposes JSON API endpoints for programmatic access:
 | `GET /api/graph?project_path=...` | Full graph as D3.js-compatible JSON |
 | `GET /api/node?project_path=...&node_id=...` | Node detail with connected edges |
 | `GET /api/subgraph?project_path=...&node_id=...&depth=2` | Subgraph centered on a node |
+| `GET /api/logo` | Code Giraffe logo as PNG (cached 24h) |
 
 These endpoints return the same data as the MCP tools but as plain JSON over HTTP, making them suitable for integration with custom tooling or CI pipelines.
 
