@@ -289,6 +289,85 @@ class TestConfigContractInference:
 
         assert _contract_nodes(result) == []
 
+    def test_config_contract_not_inferred_from_contains_edges_only(self):
+        """Contains edges alone must NOT trigger a config contract (false-positive fix).
+
+        The scanner auto-generates a ``contains`` edge from every module to
+        every entity it declares.  When two modules both ``contains`` the same
+        env_var node, that should not create a config contract — those edges
+        are structural, not intentional usage.
+        """
+        result = ScanResult(
+            nodes=[
+                Node(id="env:DATABASE_URL", type=NodeType.ENV_VAR.value, label="DATABASE_URL"),
+                Node(id="module:config", type="module", label="config"),
+                Node(id="module:settings", type="module", label="settings"),
+            ],
+            edges=[
+                Edge(
+                    source="module:config",
+                    target="env:DATABASE_URL",
+                    type=EdgeType.CONTAINS.value,
+                ),
+                Edge(
+                    source="module:settings",
+                    target="env:DATABASE_URL",
+                    type=EdgeType.CONTAINS.value,
+                ),
+            ],
+        )
+
+        _infer_contract_edges(result)
+
+        assert _contract_nodes(result) == []
+
+    def test_config_contract_ignores_contains_with_semantic_edges(self):
+        """Contains-only nodes must not appear as participants in a config contract.
+
+        When an env_var is referenced by two nodes via ``configures`` edges and
+        a third node via a ``contains`` edge only, a contract IS created (the
+        semantic references meet the threshold), but the contains-only node
+        must not appear as producer or consumer.
+        """
+        result = ScanResult(
+            nodes=[
+                Node(id="env:REDIS_URL", type=NodeType.ENV_VAR.value, label="REDIS_URL"),
+                Node(id="service:api", type=NodeType.SERVICE.value, label="api"),
+                Node(id="service:worker", type=NodeType.SERVICE.value, label="worker"),
+                # This module only has a structural contains edge — should be excluded.
+                Node(id="module:env_loader", type="module", label="env_loader"),
+            ],
+            edges=[
+                Edge(
+                    source="service:api",
+                    target="env:REDIS_URL",
+                    type=EdgeType.CONFIGURES.value,
+                ),
+                Edge(
+                    source="service:worker",
+                    target="env:REDIS_URL",
+                    type=EdgeType.CONFIGURES.value,
+                ),
+                Edge(
+                    source="module:env_loader",
+                    target="env:REDIS_URL",
+                    type=EdgeType.CONTAINS.value,
+                ),
+            ],
+        )
+
+        _infer_contract_edges(result)
+
+        contracts = _contract_nodes(result)
+        assert len(contracts) == 1
+        c = contracts[0]
+        assert c.id == "contract:config:REDIS_URL"
+
+        participants = {c.metadata["producer"]} | set(c.metadata["consumers"])
+        assert "module:env_loader" not in participants
+        assert "service:api" in participants
+        assert "service:worker" in participants
+
 
 # ===========================================================================
 # Data contract inference
