@@ -89,12 +89,23 @@ class ScanResult:
     method_sets: list[MethodSetEntry] = field(default_factory=list)
 
     def merge(self, other: ScanResult) -> None:
-        """Merge another ScanResult into this one, deduplicating by node id."""
-        seen_node_ids = {n.id for n in self.nodes}
+        """Merge *other* into this result, deduplicating all fields.
+
+        Nodes are keyed by ``id`` (additive metadata merge for duplicates).
+        Edges by ``(source, target, type)``.  Structured data (imports,
+        implementations, calls, interfaces, method_sets) by their natural
+        identity tuples.
+        """
+        node_index: dict[str, Node] = {n.id: n for n in self.nodes}
         for node in other.nodes:
-            if node.id not in seen_node_ids:
+            if node.id not in node_index:
                 self.nodes.append(node)
-                seen_node_ids.add(node.id)
+                node_index[node.id] = node
+            else:
+                existing = node_index[node.id]
+                for k, v in node.metadata.items():
+                    if k not in existing.metadata:
+                        existing.metadata[k] = v
 
         seen_edges = {(e.source, e.target, e.type) for e in self.edges}
         for edge in other.edges:
@@ -103,11 +114,40 @@ class ScanResult:
                 self.edges.append(edge)
                 seen_edges.add(key)
 
-        self.imports.extend(other.imports)
-        self.implementations.extend(other.implementations)
-        self.calls.extend(other.calls)
-        self.interfaces.extend(other.interfaces)
-        self.method_sets.extend(other.method_sets)
+        seen_imports = {(i.module_path, i.style) for i in self.imports}
+        for imp in other.imports:
+            key = (imp.module_path, imp.style)
+            if key not in seen_imports:
+                self.imports.append(imp)
+                seen_imports.add(key)
+
+        seen_implementations = {(i.child_class, i.parent_class, i.file_path) for i in self.implementations}
+        for impl in other.implementations:
+            key = (impl.child_class, impl.parent_class, impl.file_path)
+            if key not in seen_implementations:
+                self.implementations.append(impl)
+                seen_implementations.add(key)
+
+        seen_calls = {(c.caller, c.callee, c.file_path, c.receiver) for c in self.calls}
+        for call in other.calls:
+            key = (call.caller, call.callee, call.file_path, call.receiver)
+            if key not in seen_calls:
+                self.calls.append(call)
+                seen_calls.add(key)
+
+        seen_interfaces = {(i.name, i.file_path) for i in self.interfaces}
+        for iface in other.interfaces:
+            key = (iface.name, iface.file_path)
+            if key not in seen_interfaces:
+                self.interfaces.append(iface)
+                seen_interfaces.add(key)
+
+        seen_method_sets = {(m.struct_name, m.method_name, m.file_path) for m in self.method_sets}
+        for ms in other.method_sets:
+            key = (ms.struct_name, ms.method_name, ms.file_path)
+            if key not in seen_method_sets:
+                self.method_sets.append(ms)
+                seen_method_sets.add(key)
 
 
 # ---------------------------------------------------------------------------
@@ -2131,7 +2171,7 @@ def sync_files(
     file_paths:
         List of **absolute** paths to the files that have changed.
     scanner_mode:
-        ``"regex"`` (default) or ``"ast"`` — selects the scanner registry.
+        ``"regex"`` (default), ``"ast"``, or ``"hybrid"`` — selects the scanner registry.
 
     Returns
     -------
@@ -2148,6 +2188,9 @@ def sync_files(
     if scanner_mode == "ast":
         from codegiraffe.ast_scanner import get_ast_registry
         active_registry = get_ast_registry()
+    elif scanner_mode == "hybrid":
+        from codegiraffe.ast_scanner import get_hybrid_registry
+        active_registry = get_hybrid_registry()
     else:
         active_registry = get_default_registry()
 

@@ -115,7 +115,7 @@ def build_graph_at_ref(
     ref:
         A git ref (branch, tag, or commit SHA) to check out.
     scanner_mode:
-        ``"regex"`` (default) or ``"ast"`` for tree-sitter scanning.
+        ``"regex"`` (default), ``"ast"``, or ``"hybrid"`` for tree-sitter scanning.
 
     Raises
     ------
@@ -136,11 +136,14 @@ def build_graph_at_ref(
             )
 
         try:
-            # Select registry if AST mode requested
+            # Select registry based on scanner mode
             registry = None
             if scanner_mode == "ast":
                 from codegiraffe.ast_scanner import get_ast_registry
                 registry = get_ast_registry()
+            elif scanner_mode == "hybrid":
+                from codegiraffe.ast_scanner import get_hybrid_registry
+                registry = get_hybrid_registry()
 
             scan_result = scan_project(tmpdir, registry=registry)
 
