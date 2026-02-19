@@ -128,6 +128,17 @@ Complete version history and future plans for Code Giraffe.
 - [x] CI/CD integration workflow: migration planning for large refactors with phased rollout
 - [x] 1339+ tests
 
+## v0.14.0 — Sigma.js v3 Dashboard (completed)
+
+- [x] Sigma.js v3 + Graphology replacing Cytoscape.js as the dashboard renderer
+- [x] WebGL renderer for interactive visualization of 33k+ node graphs
+- [x] Server-side ForceAtlas2 layout computation via `layout.py` (fa2 optional dep)
+- [x] Standalone Starlette/uvicorn background HTTP server via `dashboard_server.py`
+- [x] 7 layout algorithms available (ForceAtlas2, circular, random, and more)
+- [x] New files: `layout.py`, `dashboard_server.py`
+- [x] New optional dependency: `fa2>=0.1` (layout extra)
+- [x] 1452+ tests
+
 ---
 
 ## Future

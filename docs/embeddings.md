@@ -55,10 +55,10 @@ codegiraffe_context_for(
 )
 --> JSON subgraph with payments endpoint, its middleware, DB tables, env vars, ranked by relevance
     _token_estimate: 1856
-    _retrieval_strategy: "combined" (embedding + impact)
+    _retrieval_strategy: "refactor"
 ```
 
-The `_retrieval_strategy` field in the response tells you which strategy was used: `keyword`, `embedding`, `impact`, `change_aware`, or `combined`.
+The `_retrieval_strategy` field in the response tells you which task intent was classified: `create`, `debug`, `refactor`, `delete`, `test`, or `modify`.
 
 ---
 

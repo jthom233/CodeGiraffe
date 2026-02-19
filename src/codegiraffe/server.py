@@ -2327,7 +2327,7 @@ def codegiraffe_dashboard(project_path: str, port: int = 8251) -> str:
     """Launch the Code Giraffe web dashboard for the given project.
 
     Starts a background HTTP server (if not already running) serving the
-    interactive Cytoscape.js dashboard and opens the user's default browser.
+    interactive Sigma.js v3 dashboard and opens the user's default browser.
 
     The project must be initialized first (run *codegiraffe_init* if you
     haven't already).

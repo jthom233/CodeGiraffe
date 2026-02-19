@@ -11,6 +11,7 @@ All edges in the architecture graph carry a `confidence` value (0.0–1.0) that 
 | Detection Method | Confidence |
 |---|---|
 | AST-parsed edges (tree-sitter) | 1.0 |
+| `contains` edges (module → entity) | 1.0 |
 | Regex imports with exact matches | 0.9 |
 | Inheritance (extends/implements) | 0.8 |
 | Call-graph edges (high certainty) | 0.8 |

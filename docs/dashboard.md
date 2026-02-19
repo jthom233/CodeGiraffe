@@ -2,7 +2,7 @@
 
 # Web Dashboard
 
-Code Giraffe includes a built-in web dashboard for interactive graph exploration. No additional dependencies required — it uses Cytoscape.js loaded from CDN and is served via FastMCP's HTTP routes.
+Code Giraffe includes a built-in web dashboard for interactive graph exploration. The core dashboard requires no extra dependencies — it uses Sigma.js v3 and Graphology loaded from CDN and is served via FastMCP's HTTP routes. For optimal layout, install the `fa2` package (`uv pip install -e ".[layout]"`) to enable server-side ForceAtlas2 layout computation. Without it, the dashboard falls back to grid layout.
 
 ---
 
@@ -24,16 +24,16 @@ Then open `http://localhost:8000/dashboard` in your browser.
 - **Node type filtering** — Toggle visibility by type (endpoint, service, database_table, etc.)
 - **Search** — Filter nodes by label or ID in real-time
 - **Node detail panel** — Click any node to see its properties, metadata, and connected edges
-- **Subgraph focus** — Double-click a node to zoom into its neighborhood
-- **5 layout algorithms** — Force-directed (cose), circular, grid, concentric, and breadthfirst layouts
+- **7 layout algorithms** — `original` (precomputed ForceAtlas2), `force` (spring-based), `circular`, `grid`, `concentric`, `breadthfirst`, and `random` layouts
 - **Legend & stats** — Visual legend of node types and real-time graph statistics
 - **Edge tooltips** — Hover edges to see relationship type and metadata
-- **Styled edge types** — Color-coded edges:
-  - Orange dashed: `imports`
-  - Purple solid: `implements`
-  - Blue solid: `calls`
-  - Green dotted: `contains`
-  - Contract-specific styles: `produces`, `consumes_contract`, `validates`, `violates`
+- **Color-coded edges** — Edges are differentiated by color per relationship type:
+  - Orange: `imports`
+  - Purple: `implements`
+  - Blue: `calls`
+  - Green: `contains`
+  - Contract-specific colors: `produces`, `consumes_contract`, `validates`, `violates`
+- **Circular nodes with color coding** — All nodes render as circles; node type is indicated by color (e.g., contract nodes are purple circles)
 - **PNG export** — Download the current view as an image
 - **Dark theme** — Developer-friendly dark interface with refined color palette
 

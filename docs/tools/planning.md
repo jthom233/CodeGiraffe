@@ -39,9 +39,9 @@ Infer or manage domain groupings from directory structure. Groups related servic
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
-| `action` | `str` | — | yes | Action: `"infer"`, `"list"`, `"create"`, or `"update"` |
-| `name` | `str` | optional | no | Domain name (required for `create`/`update`) |
-| `node_ids` | `list[str]` | optional | no | Node IDs to assign to domain (for `create`/`update`) |
+| `action` | `str` | `"list"` | no | Action: `"list"`, `"infer"`, `"add"`, or `"remove"` |
+| `name` | `str` | `""` | no | Domain name (required for `add`/`remove`) |
+| `node_ids` | `str` | `""` | no | Comma-separated node IDs to assign to domain (required for `add`) |
 
 **Example:**
 ```
@@ -74,25 +74,24 @@ Order a list of tasks by dependency topology, grouping parallelizable tasks and 
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
-| `tasks` | `str` | — | yes | JSON array of tasks with `id`, `description`, and optional `dependencies` fields |
+| `tasks` | `str` | — | yes | JSON array of tasks. Each task must have `name` (str) and `target_files` (list of file paths). Dependencies are inferred from graph relationships — no explicit `dependencies` field. |
 
 **Example:**
 ```
 codegiraffe_order_tasks(
   project_path="/home/user/my-project",
   tasks='[
-    {"id": "task-1", "description": "Add auth endpoint", "dependencies": []},
-    {"id": "task-2", "description": "Add user table", "dependencies": []},
-    {"id": "task-3", "description": "Add user service", "dependencies": ["task-1", "task-2"]}
+    {"name": "Add auth endpoint", "target_files": ["src/auth.py"]},
+    {"name": "Add user table", "target_files": ["src/models/user.py"]},
+    {"name": "Add user service", "target_files": ["src/services/user_service.py"]}
   ]'
 )
---> {
-      "ordered_groups": [
-        ["task-1", "task-2"],  # Can run in parallel
-        ["task-3"]              # Depends on both above
-      ],
-      "conflict_zones": []
-    }
+--> ## Task Ordering Report
+    **3 task(s) ordered**
+
+    ### Execution Plan
+    Group 1 (parallel): Add auth endpoint, Add user table
+    Group 2 (sequential): Add user service
 ```
 
 ---
@@ -105,14 +104,14 @@ Generate an ordered migration plan for large refactors, identifying safe stages 
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `description` | `str` | — | yes | Description of the refactor (e.g., "migrate auth from Firebase to JWT") |
-| `target_nodes` | `list[str]` | optional | no | Specific nodes involved in the refactor |
+| `target_nodes` | `str \| None` | `None` | no | Optional JSON array string of explicit node IDs involved in the refactor (e.g. `'["service:AuthService", "endpoint:/api/login"]'`). When omitted, affected nodes are inferred from `description`. |
 
 **Example:**
 ```
 codegiraffe_migration_plan(
   project_path="/home/user/my-project",
   description="migrate auth from Firebase to JWT",
-  target_nodes=["service:AuthService", "endpoint:/api/login"]
+  target_nodes='["service:AuthService", "endpoint:/api/login"]'
 )
 --> {
       "phases": [

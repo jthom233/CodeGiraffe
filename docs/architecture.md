@@ -32,7 +32,9 @@ src/codegiraffe/
 ├── federation.py        # Cross-repo graph federation
 ├── neo4j_storage.py     # Neo4j storage backend (optional)
 ├── ast_scanner.py       # tree-sitter AST-based scanning (optional)
-├── dashboard.py         # Web dashboard (Cytoscape.js, served via HTTP)
+├── dashboard.py         # Web dashboard (Sigma.js v3, served via HTTP)
+├── layout.py            # Server-side ForceAtlas2 layout computation (fa2 optional dep)
+├── dashboard_server.py  # Standalone Starlette/uvicorn background HTTP server for dashboard
 ├── schema.py            # Node/edge type enums (extensible)
 └── recognizers/         # Language-specific pattern recognizers
     ├── __init__.py

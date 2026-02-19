@@ -49,12 +49,19 @@ uv pip install -e ".[neo4j]"
 uv pip install -e ".[ast]"
 ```
 
+**Server-side layout computation** (ForceAtlas2 graph layout for the web dashboard):
+
+```bash
+uv pip install -e ".[layout]"
+```
+
 You can also combine extras or install them with pip:
 
 ```bash
 pip install -e ".[embeddings]"   # Embedding-based scoring
 pip install -e ".[neo4j]"        # Neo4j storage backend
 pip install -e ".[ast]"          # AST-aware scanning
+pip install -e ".[layout]"       # Server-side layout computation
 ```
 
 ---

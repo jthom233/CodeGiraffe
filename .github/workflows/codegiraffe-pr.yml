@@ -43,7 +43,7 @@ jobs:
           import json
           from codegiraffe.storage import JSONStorage
           from codegiraffe.graph import ArchGraph
-          from codegiraffe.query import compute_blast_radius, suggest_tests_for_changes
+          from codegiraffe.query import compute_blast_radius, suggest_tests
           from codegiraffe.git_utils import get_changed_files
 
           storage = JSONStorage('.codegiraffe')
