@@ -5,7 +5,7 @@ for more accurate pattern detection than regex. Falls back to regex
 recognizers when tree-sitter is not installed.
 
 Optional dependencies: tree-sitter, tree-sitter-python, tree-sitter-go,
-tree-sitter-typescript, tree-sitter-rust, tree-sitter-java.
+tree-sitter-typescript, tree-sitter-rust, tree-sitter-java, tree-sitter-c-sharp.
 Install with: ``pip install codegiraffe[ast]``
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from codegiraffe.graph import Node, Edge
-from codegiraffe.scanner import CallInfo, ScanResult
+from codegiraffe.scanner import CallInfo, ImportInfo, ImplementationInfo, InterfaceInfo, ScanResult
 from codegiraffe.schema import EdgeType, NodeType
 
 # Import Go stdlib package set for filtering (shared with regex recognizer)
@@ -44,6 +44,14 @@ try:
     import tree_sitter_rust as _ts_rust  # type: ignore[no-redef]
     import tree_sitter_java as _ts_java  # type: ignore[no-redef]
     HAS_TREE_SITTER = True
+except ImportError:
+    pass
+
+_ts_csharp: Any = None
+HAS_TS_CSHARP = False
+try:
+    import tree_sitter_c_sharp as _ts_csharp  # type: ignore[no-redef]
+    HAS_TS_CSHARP = True
 except ImportError:
     pass
 
@@ -1098,6 +1106,618 @@ class JavaASTRecognizer:
 
 
 # ---------------------------------------------------------------------------
+# C# AST Recognizer
+# ---------------------------------------------------------------------------
+
+_CS_ATTRIBUTE_QUERY = """
+(attribute
+  name: (identifier) @attr_name
+  (attribute_argument_list) @attr_args)
+"""
+
+_CS_ATTRIBUTE_NO_ARGS_QUERY = """
+(attribute
+  name: (identifier) @attr_name)
+"""
+
+_CS_GENERIC_NAME_QUERY = """
+(generic_name
+  (identifier) @generic_id
+  (type_argument_list) @type_args)
+"""
+
+_CS_INVOCATION_QUERY = """
+(invocation_expression
+  function: (member_access_expression
+    expression: (identifier) @obj
+    name: (identifier) @method)
+  (argument_list) @args)
+"""
+
+_CS_CLASS_QUERY = """
+(class_declaration
+  name: (identifier) @class_name
+  (base_list) @bases)
+"""
+
+
+_CS_INTERFACE_QUERY = """
+(interface_declaration
+  name: (identifier) @iface_name)
+"""
+
+_CS_USING_QUERY = """
+(using_directive
+  (qualified_name) @using_name)
+"""
+
+_CS_USING_SIMPLE_QUERY = """
+(using_directive
+  (identifier) @using_name)
+"""
+
+_CS_ELEMENT_ACCESS_QUERY = """
+(element_access_expression
+  expression: (identifier) @obj
+  (bracketed_argument_list
+    (argument
+      (string_literal) @key)))
+"""
+
+_CS_INVOCATION_GENERIC_QUERY = """
+(invocation_expression
+  function: (member_access_expression
+    expression: (identifier) @obj
+    name: (generic_name
+      (identifier) @method
+      (type_argument_list) @type_args))
+  (argument_list) @args)
+"""
+
+# C# builtins/framework types to skip in call detection
+_CS_AST_BUILTINS = frozenset({
+    "Console", "Math", "Convert", "Enum", "Activator", "GC",
+    "Environment", "String", "Object", "Task", "Thread", "Encoding",
+    "Path", "File", "Directory", "Stream", "StringBuilder",
+    "Enumerable", "Queryable", "Array", "List", "Dictionary",
+    "HashSet", "Queue", "Stack", "Tuple", "DateTime", "TimeSpan",
+    "Guid", "Regex", "Uri", "Exception", "Type", "Assembly",
+    "Interlocked", "Monitor", "Mutex", "SemaphoreSlim",
+    "JsonSerializer", "JsonDocument", "JsonElement",
+})
+
+_CS_HTTP_ATTR_NAMES = frozenset({
+    "HttpGet", "HttpPost", "HttpPut", "HttpDelete", "HttpPatch",
+})
+
+
+class CSharpASTRecognizer:
+    """AST-based C# pattern recognizer using tree-sitter.
+
+    Detected patterns:
+        - ``[HttpGet/Post/Put/Delete("path")]``    -> ``endpoint`` nodes
+        - ``[Route("path")]``                       -> ``endpoint`` nodes
+        - ``[Table("name")]``                       -> ``database_table`` nodes
+        - ``DbSet<T>`` properties                   -> ``database_table`` nodes
+        - ``Environment.GetEnvironmentVariable``    -> ``env_var`` nodes
+        - ``IConfiguration["key"]``                 -> ``config`` nodes
+        - ``HttpClient.XxxAsync("url")``            -> ``external_api`` nodes
+        - ``class X : Hub<T>``                      -> ``service`` (signalr_hub) nodes
+        - ``class X : IRequestHandler<T>``          -> ``worker`` (mediatr) nodes
+        - ``services.AddScoped/Transient/Singleton`` -> ``service`` (di) nodes
+        - ``class X : BackgroundService``           -> ``worker`` (background) nodes
+        - ``class X : IHostedService``              -> ``worker`` (hosted) nodes
+        - ``class X : ControllerBase`` / ``[ApiController]`` -> ``service`` (controller)
+
+    Inferred structured data (graph edges):
+        - ``using X.Y.Z;``              -> :class:`ImportInfo`
+        - ``class X : Y, Z``            -> :class:`ImplementationInfo`
+        - ``interface IFoo { Method() }`` -> :class:`InterfaceInfo`
+        - ``obj.Method(...)``            -> :class:`CallInfo`
+    """
+
+    def __init__(self) -> None:
+        if not HAS_TREE_SITTER or not HAS_TS_CSHARP:
+            raise ImportError(
+                "tree-sitter and tree-sitter-c-sharp packages required for C# AST scanning"
+            )
+        self._parser, self._language = _make_parser(_ts_csharp)
+
+    def recognize(self, file_path: Path, content: str) -> ScanResult:
+        if not content.strip():
+            return ScanResult()
+
+        tree = self._parser.parse(content.encode())
+        nodes: list[Node] = []
+        rel = str(file_path)
+
+        captured_class_names: set[str] = set()
+
+        self._find_attributes(tree, rel, nodes, captured_class_names, content)
+        self._find_dbset(tree, rel, nodes)
+        self._find_invocations(tree, rel, nodes, content)
+        self._find_classes(tree, rel, nodes, captured_class_names)
+
+        imports = self._find_imports(tree, rel)
+        implementations = self._find_implementations(tree, rel)
+        interfaces = self._find_interfaces(tree, rel)
+        calls = self._find_calls(tree, rel)
+
+        return ScanResult(
+            nodes=nodes,
+            edges=[],
+            imports=imports,
+            implementations=implementations,
+            interfaces=interfaces,
+            calls=calls,
+        )
+
+    # -----------------------------------------------------------------------
+    # Node detection
+    # -----------------------------------------------------------------------
+
+    def _find_attributes(
+        self,
+        tree: Any,
+        rel: str,
+        nodes: list[Node],
+        captured_class_names: set[str],
+        content: str,
+    ) -> None:
+        """Detect [HttpGet/Post/...], [Route], [Table], [ApiController] attributes."""
+        seen_routes: set[str] = set()
+        seen_tables: set[str] = set()
+
+        for _pat, caps in _query_matches(self._language, _CS_ATTRIBUTE_QUERY, tree.root_node):
+            name_nodes = caps.get("attr_name", [])
+            args_nodes = caps.get("attr_args", [])
+            if not name_nodes:
+                continue
+            attr_name = _text(name_nodes[0])
+            attr_args = _text(args_nodes[0]) if args_nodes else ""
+
+            if attr_name in _CS_HTTP_ATTR_NAMES:
+                m = re.search(r'"([^"]*)"', attr_args)
+                if m:
+                    route = m.group(1)
+                    if route not in seen_routes:
+                        seen_routes.add(route)
+                        nodes.append(Node(
+                            id=f"endpoint:{route}", type=NodeType.ENDPOINT,
+                            label=route, file_path=rel,
+                            metadata={"route": route, "annotation": attr_name},
+                        ))
+
+            elif attr_name == "Route":
+                m = re.search(r'"([^"]*)"', attr_args)
+                if m:
+                    route = m.group(1)
+                    if route not in seen_routes:
+                        seen_routes.add(route)
+                        nodes.append(Node(
+                            id=f"endpoint:{route}", type=NodeType.ENDPOINT,
+                            label=route, file_path=rel,
+                            metadata={"route": route, "annotation": "Route"},
+                        ))
+
+            elif attr_name == "Table":
+                m = re.search(r'"(\w+)"', attr_args)
+                if m:
+                    tbl = m.group(1)
+                    if tbl not in seen_tables:
+                        seen_tables.add(tbl)
+                        nodes.append(Node(
+                            id=f"table:{tbl}", type=NodeType.DATABASE_TABLE,
+                            label=tbl, file_path=rel,
+                            metadata={"table_name": tbl, "orm": "entity_framework"},
+                        ))
+
+        # [ApiController] marker (no args) — find the class it decorates
+        for _pat, caps in _query_matches(self._language, _CS_ATTRIBUTE_NO_ARGS_QUERY, tree.root_node):
+            name_nodes = caps.get("attr_name", [])
+            if not name_nodes:
+                continue
+            attr_name = _text(name_nodes[0])
+            if attr_name == "ApiController":
+                # Walk up to find the class_declaration it annotates
+                attr_node = name_nodes[0].parent  # attribute
+                container = attr_node.parent if attr_node else None  # attribute_list
+                outer = container.parent if container else None
+                if outer is None:
+                    continue
+                target = outer.parent if outer else None
+                if target is None:
+                    continue
+                for child in target.children:
+                    if child.type == "class_declaration":
+                        for sub in child.children:
+                            if sub.type == "identifier":
+                                cls_name = _text(sub)
+                                if cls_name not in captured_class_names:
+                                    captured_class_names.add(cls_name)
+                                    nodes.append(Node(
+                                        id=f"service:{cls_name}",
+                                        type=NodeType.SERVICE,
+                                        label=cls_name, file_path=rel,
+                                        metadata={"class_name": cls_name, "kind": "controller"},
+                                    ))
+                                break
+
+    def _find_dbset(self, tree: Any, rel: str, nodes: list[Node]) -> None:
+        """Detect DbSet<T> property declarations -> database_table nodes."""
+        seen: set[str] = set()
+        for _pat, caps in _query_matches(self._language, _CS_GENERIC_NAME_QUERY, tree.root_node):
+            id_nodes = caps.get("generic_id", [])
+            type_arg_nodes = caps.get("type_args", [])
+            if not id_nodes:
+                continue
+            generic_id = _text(id_nodes[0])
+            if generic_id != "DbSet":
+                continue
+            type_args = _text(type_arg_nodes[0]) if type_arg_nodes else ""
+            m = re.search(r"<\s*(\w+)\s*>", type_args)
+            if m:
+                entity = m.group(1)
+                if entity not in seen:
+                    seen.add(entity)
+                    nodes.append(Node(
+                        id=f"table:{entity}", type=NodeType.DATABASE_TABLE,
+                        label=entity, file_path=rel,
+                        metadata={"entity": entity, "orm": "entity_framework"},
+                    ))
+
+    def _find_invocations(
+        self, tree: Any, rel: str, nodes: list[Node], content: str,
+    ) -> None:
+        """Detect Environment.GetEnvironmentVariable, HttpClient calls, config access."""
+        seen_env: set[str] = set()
+        seen_api: set[str] = set()
+        seen_config: set[str] = set()
+
+        # obj.Method(args) — plain member access
+        for _pat, caps in _query_matches(self._language, _CS_INVOCATION_QUERY, tree.root_node):
+            obj_nodes = caps.get("obj", [])
+            method_nodes = caps.get("method", [])
+            args_nodes = caps.get("args", [])
+            if not obj_nodes or not method_nodes:
+                continue
+            obj = _text(obj_nodes[0])
+            method = _text(method_nodes[0])
+            args_text = _text(args_nodes[0]) if args_nodes else ""
+
+            if obj == "Environment" and method == "GetEnvironmentVariable":
+                m = re.search(r'"(\w+)"', args_text)
+                if m:
+                    var = m.group(1)
+                    if var not in seen_env:
+                        seen_env.add(var)
+                        nodes.append(Node(
+                            id=f"env:{var}", type=NodeType.ENV_VAR,
+                            label=var, file_path=rel,
+                            metadata={"variable": var},
+                        ))
+
+            elif method.endswith("Async") and obj in {
+                "HttpClient", "_httpClient", "client", "_client", "http",
+            }:
+                m = re.search(r'"(https?://[^"]+)"', args_text)
+                if m:
+                    url = m.group(1)
+                    if url not in seen_api:
+                        seen_api.add(url)
+                        nodes.append(Node(
+                            id=f"api:{url}", type=NodeType.EXTERNAL_API,
+                            label=url, file_path=rel,
+                            metadata={"url": url},
+                        ))
+
+            elif obj in {"configuration", "_configuration", "Configuration"} and \
+                    method == "GetValue":
+                m = re.search(r'"([\w:]+)"', args_text)
+                if m:
+                    key = m.group(1)
+                    if key not in seen_config:
+                        seen_config.add(key)
+                        nodes.append(Node(
+                            id=f"config:{key}", type=NodeType.CONFIG,
+                            label=key, file_path=rel,
+                            metadata={"key": key},
+                        ))
+
+        # obj.Method<T>(args) — generic member access (e.g. GetValue<T>)
+        for _pat, caps in _query_matches(
+            self._language, _CS_INVOCATION_GENERIC_QUERY, tree.root_node
+        ):
+            obj_nodes = caps.get("obj", [])
+            method_nodes = caps.get("method", [])
+            args_nodes = caps.get("args", [])
+            if not obj_nodes or not method_nodes:
+                continue
+            obj = _text(obj_nodes[0])
+            method = _text(method_nodes[0])
+            args_text = _text(args_nodes[0]) if args_nodes else ""
+
+            if obj in {"configuration", "_configuration", "Configuration"} and \
+                    method == "GetValue":
+                m = re.search(r'"([\w:]+)"', args_text)
+                if m:
+                    key = m.group(1)
+                    if key not in seen_config:
+                        seen_config.add(key)
+                        nodes.append(Node(
+                            id=f"config:{key}", type=NodeType.CONFIG,
+                            label=key, file_path=rel,
+                            metadata={"key": key},
+                        ))
+
+            elif method in {"AddScoped", "AddTransient", "AddSingleton"} and \
+                    obj in {"services", "_services", "builder"}:
+                type_args_nodes = caps.get("type_args", [])
+                type_args = _text(type_args_nodes[0]) if type_args_nodes else ""
+                m = re.search(r"<\s*(\w+)", type_args)
+                if m:
+                    svc_name = m.group(1)
+                    nodes.append(Node(
+                        id=f"service:{svc_name}", type=NodeType.SERVICE,
+                        label=svc_name, file_path=rel,
+                        metadata={"class_name": svc_name, "registration": "di"},
+                    ))
+
+        # IConfiguration["key"] element access
+        for _pat, caps in _query_matches(
+            self._language, _CS_ELEMENT_ACCESS_QUERY, tree.root_node
+        ):
+            obj_nodes = caps.get("obj", [])
+            key_nodes = caps.get("key", [])
+            if not obj_nodes or not key_nodes:
+                continue
+            obj = _text(obj_nodes[0])
+            key_raw = _text(key_nodes[0])
+            if obj in {"configuration", "_configuration", "Configuration", "config", "_config"}:
+                key = key_raw.strip('"')
+                if key and key not in seen_config:
+                    seen_config.add(key)
+                    nodes.append(Node(
+                        id=f"config:{key}", type=NodeType.CONFIG,
+                        label=key, file_path=rel,
+                        metadata={"key": key},
+                    ))
+
+    def _find_classes(
+        self,
+        tree: Any,
+        rel: str,
+        nodes: list[Node],
+        captured_class_names: set[str],
+    ) -> None:
+        """Detect architecturally significant class declarations.
+
+        Detects:
+        - class X : Hub / Hub<T>          -> service (signalr_hub)
+        - class X : IRequestHandler<T>    -> worker (mediatr)
+        - class X : BackgroundService     -> worker (background)
+        - class X : IHostedService        -> worker (hosted)
+        - class X : ControllerBase        -> service (controller)
+
+        No generic class-to-service fallback.
+        """
+        hub_bases = {"Hub"}
+        mediatr_bases = {"IRequestHandler", "INotificationHandler", "ICommandHandler"}
+        background_bases = {"BackgroundService"}
+        hosted_bases = {"IHostedService"}
+        controller_bases = {"ControllerBase", "Controller"}
+
+        for _pat, caps in _query_matches(self._language, _CS_CLASS_QUERY, tree.root_node):
+            name_nodes = caps.get("class_name", [])
+            bases_nodes = caps.get("bases", [])
+            if not name_nodes:
+                continue
+            cls_name = _text(name_nodes[0])
+            bases_text = _text(bases_nodes[0]) if bases_nodes else ""
+
+            # Extract base names (strip generic params)
+            raw_bases = [b.strip() for b in bases_text.lstrip(":").split(",")]
+            base_names = {re.sub(r"<.*", "", b).strip() for b in raw_bases if b}
+
+            if base_names & hub_bases:
+                if cls_name not in captured_class_names:
+                    captured_class_names.add(cls_name)
+                    nodes.append(Node(
+                        id=f"service:{cls_name}", type=NodeType.SERVICE,
+                        label=cls_name, file_path=rel,
+                        metadata={"class_name": cls_name, "kind": "signalr_hub"},
+                    ))
+            elif base_names & mediatr_bases:
+                if cls_name not in captured_class_names:
+                    captured_class_names.add(cls_name)
+                    nodes.append(Node(
+                        id=f"worker:{cls_name}", type=NodeType.WORKER,
+                        label=cls_name, file_path=rel,
+                        metadata={"handler": cls_name, "framework": "mediatr"},
+                    ))
+            elif base_names & background_bases:
+                if cls_name not in captured_class_names:
+                    captured_class_names.add(cls_name)
+                    nodes.append(Node(
+                        id=f"worker:{cls_name}", type=NodeType.WORKER,
+                        label=cls_name, file_path=rel,
+                        metadata={"class_name": cls_name, "kind": "background"},
+                    ))
+            elif base_names & hosted_bases:
+                if cls_name not in captured_class_names:
+                    captured_class_names.add(cls_name)
+                    nodes.append(Node(
+                        id=f"worker:{cls_name}", type=NodeType.WORKER,
+                        label=cls_name, file_path=rel,
+                        metadata={"class_name": cls_name, "kind": "hosted"},
+                    ))
+            elif base_names & controller_bases:
+                if cls_name not in captured_class_names:
+                    captured_class_names.add(cls_name)
+                    nodes.append(Node(
+                        id=f"service:{cls_name}", type=NodeType.SERVICE,
+                        label=cls_name, file_path=rel,
+                        metadata={"class_name": cls_name, "kind": "controller"},
+                    ))
+
+    # -----------------------------------------------------------------------
+    # Structured data (graph edge inputs)
+    # -----------------------------------------------------------------------
+
+    def _find_imports(self, tree: Any, rel: str) -> list[ImportInfo]:
+        """Detect ``using X.Y.Z;`` statements -> ImportInfo records."""
+        imports: list[ImportInfo] = []
+        seen: set[str] = set()
+
+        for _pat, caps in _query_matches(self._language, _CS_USING_QUERY, tree.root_node):
+            name_nodes = caps.get("using_name", [])
+            if not name_nodes:
+                continue
+            using_path = _text(name_nodes[0])
+            if using_path not in seen:
+                seen.add(using_path)
+                imports.append(ImportInfo(
+                    module_path=using_path,
+                    symbols=[using_path.split(".")[-1]],
+                    style="absolute",
+                ))
+
+        for _pat, caps in _query_matches(self._language, _CS_USING_SIMPLE_QUERY, tree.root_node):
+            name_nodes = caps.get("using_name", [])
+            if not name_nodes:
+                continue
+            using_path = _text(name_nodes[0])
+            if using_path not in seen:
+                seen.add(using_path)
+                imports.append(ImportInfo(
+                    module_path=using_path,
+                    symbols=[using_path],
+                    style="absolute",
+                ))
+
+        return imports
+
+    def _find_implementations(self, tree: Any, rel: str) -> list[ImplementationInfo]:
+        """Detect ``class X : Y, Z`` declarations -> ImplementationInfo records."""
+        implementations: list[ImplementationInfo] = []
+
+        for _pat, caps in _query_matches(self._language, _CS_CLASS_QUERY, tree.root_node):
+            name_nodes = caps.get("class_name", [])
+            bases_nodes = caps.get("bases", [])
+            if not name_nodes or not bases_nodes:
+                continue
+            child = _text(name_nodes[0])
+            bases_text = _text(bases_nodes[0])
+
+            raw_bases = [b.strip() for b in bases_text.lstrip(":").split(",")]
+            for raw in raw_bases:
+                parent = re.sub(r"<.*", "", raw).strip()
+                if parent and parent[0].isupper():
+                    implementations.append(ImplementationInfo(
+                        child_class=child,
+                        parent_class=parent,
+                        file_path=rel,
+                    ))
+
+        return implementations
+
+    def _find_interfaces(self, tree: Any, rel: str) -> list[InterfaceInfo]:
+        """Detect interface declarations and their method signatures -> InterfaceInfo records."""
+        interfaces: list[InterfaceInfo] = []
+
+        for _pat, caps in _query_matches(self._language, _CS_INTERFACE_QUERY, tree.root_node):
+            name_nodes = caps.get("iface_name", [])
+            if not name_nodes:
+                continue
+            iface_name = _text(name_nodes[0])
+            iface_node = name_nodes[0].parent  # interface_declaration
+
+            methods: list[str] = []
+            if iface_node is not None:
+                for child in iface_node.children:
+                    if child.type == "declaration_list":
+                        for member in child.children:
+                            if member.type == "method_declaration":
+                                for sub in member.children:
+                                    if sub.type == "identifier":
+                                        methods.append(_text(sub))
+                                        break
+
+            interfaces.append(InterfaceInfo(
+                name=iface_name,
+                methods=methods,
+                file_path=rel,
+            ))
+
+        return interfaces
+
+    def _find_calls(self, tree: Any, rel: str) -> list[CallInfo]:
+        """Detect ``obj.Method(...)`` call expressions -> CallInfo records."""
+        calls: list[CallInfo] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        for _pat, caps in _query_matches(self._language, _CS_INVOCATION_QUERY, tree.root_node):
+            obj_nodes = caps.get("obj", [])
+            method_nodes = caps.get("method", [])
+            if not obj_nodes or not method_nodes:
+                continue
+            receiver = _text(obj_nodes[0])
+            callee = _text(method_nodes[0])
+
+            # Skip framework/stdlib builtins
+            if receiver in _CS_AST_BUILTINS:
+                continue
+
+            call_node = obj_nodes[0]
+            while call_node is not None and call_node.type != "invocation_expression":
+                call_node = call_node.parent
+
+            caller, _enc_class = self._find_enclosing_method_ast(
+                call_node if call_node else obj_nodes[0],
+            )
+
+            key = (caller, callee, receiver)
+            if key not in seen:
+                seen.add(key)
+                calls.append(CallInfo(
+                    caller=caller,
+                    callee=callee,
+                    receiver=receiver,
+                    file_path=rel,
+                    style="method",
+                ))
+
+        return calls
+
+    @staticmethod
+    def _find_enclosing_method_ast(node: Any) -> tuple[str, str]:
+        """Walk tree-sitter parents to find the enclosing method and class names.
+
+        Returns ``(qualified_name, class_name)`` where ``qualified_name`` is
+        ``"ClassName.MethodName"`` when both are found, or just ``"MethodName"``.
+        """
+        method_name = ""
+        class_name = ""
+        current = node.parent
+        while current is not None:
+            if current.type == "method_declaration" and not method_name:
+                for child in current.children:
+                    if child.type == "identifier":
+                        method_name = _text(child)
+                        break
+            elif current.type == "class_declaration" and not class_name:
+                for child in current.children:
+                    if child.type == "identifier":
+                        class_name = _text(child)
+                        break
+            current = current.parent
+
+        if class_name and method_name:
+            return f"{class_name}.{method_name}", class_name
+        return method_name, class_name
+
+
+# ---------------------------------------------------------------------------
 # Registry helper
 # ---------------------------------------------------------------------------
 
@@ -1118,6 +1738,8 @@ def get_ast_registry() -> "RecognizerRegistry":
     registry.register(TypeScriptASTRecognizer(), extensions=[".ts", ".tsx"])
     registry.register(RustASTRecognizer(), extensions=[".rs"])
     registry.register(JavaASTRecognizer(), extensions=[".java"])
+    if HAS_TREE_SITTER and HAS_TS_CSHARP:
+        registry.register(CSharpASTRecognizer(), extensions=[".cs"])
     return registry
 
 
@@ -1166,5 +1788,7 @@ def get_hybrid_registry() -> "RecognizerRegistry":
     registry.register(TypeScriptASTRecognizer(), extensions=[".ts", ".tsx"])
     registry.register(RustASTRecognizer(), extensions=[".rs"])
     registry.register(JavaASTRecognizer(), extensions=[".java"])
+    if HAS_TREE_SITTER and HAS_TS_CSHARP:
+        registry.register(CSharpASTRecognizer(), extensions=[".cs"])
 
     return registry
