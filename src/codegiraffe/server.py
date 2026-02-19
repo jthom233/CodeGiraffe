@@ -127,8 +127,9 @@ def codegiraffe_init(
     ``"sqlite"`` for a SQLite database, or ``"neo4j"`` for Neo4j.
 
     Use *scanner_mode* to choose the scanning strategy: ``"regex"`` (default)
-    for regex-based pattern matching, or ``"ast"`` for tree-sitter AST-based
-    scanning (requires tree-sitter packages).
+    for regex-based pattern matching, ``"ast"`` for tree-sitter AST-based
+    scanning (requires tree-sitter packages), or ``"hybrid"`` for both regex
+    and AST recognizers running together (requires tree-sitter packages).
 
     Returns a summary of the initialized graph.
     """
@@ -147,6 +148,10 @@ def codegiraffe_init(
             from codegiraffe.ast_scanner import get_ast_registry
 
             registry = get_ast_registry()
+        elif scanner_mode == "hybrid":
+            from codegiraffe.ast_scanner import get_hybrid_registry
+
+            registry = get_hybrid_registry()
 
         # Scan the project
         result = scan_project(project_path, registry=registry, include_tests=include_tests)
@@ -1581,12 +1586,26 @@ def _risk_explanation(item: dict) -> str:
 
 
 @mcp.tool()
-def codegiraffe_sync(project_path: str, include_tests: bool = False) -> str:
+def codegiraffe_sync(
+    project_path: str,
+    include_tests: bool = False,
+    scanner_mode: str = "regex",
+) -> str:
     """Re-scan the project and synchronize the architecture graph.
 
     Performs a fresh scan, replaces all auto-discovered nodes and edges,
     while preserving any manually added annotations. Returns a summary
     of what changed.
+
+    Parameters
+    ----------
+    project_path:
+        Absolute path to the project root (must already be initialized with
+        ``codegiraffe_init``).
+    include_tests:
+        When ``True``, test files are included in the scan.
+    scanner_mode:
+        Scanner strategy — ``"regex"`` (default), ``"ast"``, or ``"hybrid"``.
     """
     global _graph  # noqa: PLW0603
 
@@ -1596,8 +1615,19 @@ def codegiraffe_sync(project_path: str, include_tests: bool = False) -> str:
         old_node_count = len(old_data.nodes)
         old_edge_count = len(old_data.edges)
 
+        # Select scanner registry based on mode
+        registry = None
+        if scanner_mode == "ast":
+            from codegiraffe.ast_scanner import get_ast_registry
+
+            registry = get_ast_registry()
+        elif scanner_mode == "hybrid":
+            from codegiraffe.ast_scanner import get_hybrid_registry
+
+            registry = get_hybrid_registry()
+
         # Re-scan
-        result = scan_project(project_path, include_tests=include_tests)
+        result = scan_project(project_path, registry=registry, include_tests=include_tests)
 
         # Build new graph from scan results
         nodes: dict[str, Node] = {node.id: node for node in result.nodes}
@@ -1671,7 +1701,7 @@ def codegiraffe_sync_files(
         (e.g. ``["path/a.py","path/b.py"]``) or a comma-separated string
         (e.g. ``"path/a.py,path/b.py"``).
     scanner_mode:
-        Scanner strategy — ``"regex"`` (default) or ``"ast"``.
+        Scanner strategy — ``"regex"`` (default), ``"ast"``, or ``"hybrid"``.
 
     Returns
     -------
@@ -2140,7 +2170,7 @@ def codegiraffe_pr_diff(
     head_ref:
         The head branch / commit SHA (default ``"HEAD"`` -- the current branch tip).
     scanner_mode:
-        ``"regex"`` (default) or ``"ast"`` for tree-sitter scanning.
+        ``"regex"`` (default), ``"ast"``, or ``"hybrid"`` for tree-sitter scanning.
     """
     from codegiraffe.graph_diff import build_graph_at_ref, compute_graph_diff
 

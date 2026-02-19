@@ -1119,3 +1119,52 @@ def get_ast_registry() -> "RecognizerRegistry":
     registry.register(RustASTRecognizer(), extensions=[".rs"])
     registry.register(JavaASTRecognizer(), extensions=[".java"])
     return registry
+
+
+def get_hybrid_registry() -> "RecognizerRegistry":
+    """Create a registry with both regex and AST recognizers.
+
+    Regex recognizers run first (registered by default registry),
+    then AST recognizers run second. ScanResult.merge() handles
+    deduplication with additive metadata merge.
+
+    Raises :class:`ImportError` if tree-sitter packages are not installed.
+    """
+    from codegiraffe.registry import RecognizerRegistry
+    from codegiraffe.recognizers import (
+        CppRecognizer,
+        CSharpRecognizer,
+        GoRecognizer,
+        JavaRecognizer,
+        PhpRecognizer,
+        RubyRecognizer,
+        RustRecognizer,
+        TypeScriptRecognizer,
+    )
+    from codegiraffe.scanner import PythonRecognizer
+
+    if not HAS_TREE_SITTER:
+        raise ImportError("tree-sitter packages required for hybrid registry")
+
+    # Build a fresh registry — do NOT mutate the get_default_registry() singleton.
+    registry = RecognizerRegistry()
+
+    # 1. Regex recognizers (same set as get_default_registry())
+    registry.register(PythonRecognizer(), extensions=[".py", ".pyi"])
+    registry.register(TypeScriptRecognizer(), extensions=[".ts", ".tsx", ".mts", ".cts"])
+    registry.register(GoRecognizer(), extensions=[".go"])
+    registry.register(RustRecognizer(), extensions=[".rs"])
+    registry.register(JavaRecognizer(), extensions=[".java"])
+    registry.register(CSharpRecognizer(), extensions=[".cs"])
+    registry.register(CppRecognizer(), extensions=[".c", ".cpp", ".h", ".hpp", ".cc", ".cxx"])
+    registry.register(PhpRecognizer(), extensions=[".php"])
+    registry.register(RubyRecognizer(), extensions=[".rb"])
+
+    # 2. AST recognizers on top (same extensions as get_ast_registry())
+    registry.register(PythonASTRecognizer(), extensions=[".py", ".pyi"])
+    registry.register(GoASTRecognizer(), extensions=[".go"])
+    registry.register(TypeScriptASTRecognizer(), extensions=[".ts", ".tsx"])
+    registry.register(RustASTRecognizer(), extensions=[".rs"])
+    registry.register(JavaASTRecognizer(), extensions=[".java"])
+
+    return registry
