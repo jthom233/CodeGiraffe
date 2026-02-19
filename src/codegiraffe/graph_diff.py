@@ -101,7 +101,7 @@ def compute_graph_diff(base_graph: ArchGraph, head_graph: ArchGraph) -> dict[str
 def build_graph_at_ref(
     project_path: str,
     ref: str,
-    scanner_mode: str = "regex",
+    scanner_mode: str = "hybrid",
 ) -> ArchGraph:
     """Create a temporary git worktree at *ref*, scan it, and return the ArchGraph.
 
@@ -115,7 +115,8 @@ def build_graph_at_ref(
     ref:
         A git ref (branch, tag, or commit SHA) to check out.
     scanner_mode:
-        ``"regex"`` (default), ``"ast"``, or ``"hybrid"`` for tree-sitter scanning.
+        ``"hybrid"`` (default, falls back to regex if tree-sitter is
+        unavailable), ``"regex"``, or ``"ast"`` for tree-sitter scanning.
 
     Raises
     ------
@@ -142,8 +143,11 @@ def build_graph_at_ref(
                 from codegiraffe.ast_scanner import get_ast_registry
                 registry = get_ast_registry()
             elif scanner_mode == "hybrid":
-                from codegiraffe.ast_scanner import get_hybrid_registry
-                registry = get_hybrid_registry()
+                try:
+                    from codegiraffe.ast_scanner import get_hybrid_registry
+                    registry = get_hybrid_registry()
+                except ImportError:
+                    registry = None  # falls back to default regex registry
 
             scan_result = scan_project(tmpdir, registry=registry)
 

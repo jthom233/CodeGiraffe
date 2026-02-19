@@ -625,9 +625,9 @@ class TestSyncFilesToolContract:
 
         sig = inspect.signature(codegiraffe_sync_files)
         assert "scanner_mode" in sig.parameters, "Must have scanner_mode param"
-        # Should default to "regex"
+        # Should default to "hybrid"
         default = sig.parameters["scanner_mode"].default
-        assert default == "regex"
+        assert default == "hybrid"
 
     def test_tool_handles_comma_separated_paths(self, two_file_project):
         """Verify the tool accepts comma-separated file paths."""
