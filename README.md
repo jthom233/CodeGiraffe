@@ -24,14 +24,32 @@ Code Giraffe fills this gap by maintaining an **architecture knowledge graph** t
 ```bash
 git clone https://github.com/jthom233/CodeGiraffe.git
 cd CodeGiraffe
-uv venv .venv && source .venv/bin/activate
+uv venv .venv
+```
+
+Activate the virtual environment:
+
+| OS | Shell | Command |
+|---|---|---|
+| Linux / macOS | bash/zsh | `source .venv/bin/activate` |
+| Windows | PowerShell | `.venv\Scripts\Activate.ps1` |
+| Windows | cmd | `.venv\Scripts\activate.bat` |
+| Windows | Git Bash | `source .venv/Scripts/activate` |
+
+Then install:
+
+```bash
 uv pip install -e ".[dev]"
 ```
 
 Add to Claude Code:
 
 ```bash
+# Linux / macOS
 claude mcp add codegiraffe -- /path/to/CodeGiraffe/.venv/bin/python /path/to/CodeGiraffe/src/codegiraffe/server.py
+
+# Windows
+claude mcp add codegiraffe -- /path/to/CodeGiraffe/.venv/Scripts/python.exe /path/to/CodeGiraffe/src/codegiraffe/server.py
 ```
 
 See [Getting Started](docs/getting-started.md) for Claude Desktop setup, optional dependencies (embeddings, Neo4j, AST scanning), and a first-scan walkthrough.
@@ -73,6 +91,8 @@ See [Architecture](docs/architecture.md) for the full module layout, data model,
 uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
+
+> **Windows note:** Replace `source .venv/bin/activate` with the appropriate activate command for your shell (see [Quick Start](#quick-start)).
 
 1452+ tests covering all subsystems. See [Roadmap](docs/roadmap.md) for version history (v0.2.0–v0.14.0).
 

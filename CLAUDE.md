@@ -57,14 +57,23 @@ specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, d
 ## Commands
 
 ```bash
-# Run tests
-source .venv/bin/activate && python -m pytest tests/ -v
+# Create virtual environment
+uv venv .venv
+
+# Activate virtual environment
+# Linux / macOS:  source .venv/bin/activate
+# Windows (PowerShell):  .venv\Scripts\Activate.ps1
+# Windows (cmd):  .venv\Scripts\activate.bat
+# Windows (Git Bash):  source .venv/Scripts/activate
 
 # Install for development
-uv venv .venv && source .venv/bin/activate && uv pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 
 # Install with embedding support
 uv pip install -e ".[dev,embeddings]"
+
+# Run tests
+python -m pytest tests/ -v
 
 # Run the MCP server directly (for testing)
 python src/codegiraffe/server.py
