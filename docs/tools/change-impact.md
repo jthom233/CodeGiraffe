@@ -105,7 +105,8 @@ Compare graph architecture at two git refs to detect structural changes. Useful 
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `base_ref` | `str` | — | yes | Base git ref (branch, tag, or commit) |
-| `head_ref` | `str` | — | yes | Head git ref to compare against |
+| `head_ref` | `str` | `"HEAD"` | no | Head git ref to compare against |
+| `scanner_mode` | `str` | `"regex"` | no | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
 
 **Example:**
 ```
@@ -132,14 +133,14 @@ Map test coverage data from coverage.py, Istanbul, or LCOV files to graph nodes.
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `coverage_path` | `str` | — | yes | Path to coverage file (.coverage, coverage.json, or .lcov) |
-| `format` | `str` | — | yes | Coverage format: `"coverage.py"`, `"istanbul"`, or `"lcov"` |
+| `format` | `str` | `"auto"` | no | Coverage format: `"auto"` (detect from file), `"coverage_py"`, `"istanbul"`, or `"lcov"` |
 
 **Example:**
 ```
 codegiraffe_coverage(
   project_path="/home/user/my-project",
   coverage_path=".coverage",
-  format="coverage.py"
+  format="coverage_py"
 )
 --> "Mapped coverage data: 127 nodes covered (78%), 36 nodes uncovered (22%)"
 ```

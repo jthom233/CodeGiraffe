@@ -5,7 +5,7 @@
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - **Storage**: JSON files + SQLite + Neo4j (optional, all via StorageBackend protocol)
-- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (1339+ tests)
+- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (1452+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
 
@@ -36,7 +36,10 @@ src/codegiraffe/          # Main package
 ├── federation.py         # Cross-repo graph federation
 ├── neo4j_storage.py      # Neo4j storage backend (optional)
 ├── ast_scanner.py        # tree-sitter AST scanning (optional)
-├── dashboard.py          # Web dashboard (Cytoscape.js)
+├── dashboard.py          # Web dashboard (Sigma.js v3, HTTP routes)
+├── layout.py             # Server-side ForceAtlas2 layout computation
+├── dashboard_server.py   # Standalone Starlette/uvicorn dashboard server
+├── assets/               # Logo and static assets
 └── recognizers/          # Language-specific pattern recognizers
     ├── typescript.py
     ├── go.py
@@ -47,7 +50,7 @@ src/codegiraffe/          # Main package
     ├── php.py
     └── ruby.py
 
-tests/                    # 1339+ tests
+tests/                    # 1452+ tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 

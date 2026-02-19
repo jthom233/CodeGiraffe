@@ -40,7 +40,7 @@ See [Getting Started](docs/getting-started.md) for Claude Desktop setup, optiona
 
 | Category | Tools | Description |
 |---|---|---|
-| [Core](docs/tools/core.md) | 7 | Graph init, query, manual annotation, sync, export, drift detection |
+| [Core](docs/tools/core.md) | 8 | Graph init, query, manual annotation, sync, export, drift detection, dashboard |
 | [Context & Analysis](docs/tools/context-and-analysis.md) | 6 | Intelligent context retrieval, hotspots, patterns, blast radius, risk, cycles |
 | [Contracts](docs/tools/contracts.md) | 3 | Cross-system contract modeling and validation |
 | [Change Impact](docs/tools/change-impact.md) | 5 | Change validation, test suggestions, file coupling, PR diffing, coverage |
@@ -57,7 +57,7 @@ See the [full tool reference](docs/tools/README.md) for parameter tables and exa
 - **[Edge Confidence Scoring](docs/edge-confidence.md)** — All edges carry confidence values (0.0–1.0) based on detection method
 - **[3 Storage Backends](docs/storage.md)** — JSON (default), SQLite, Neo4j with transparent StorageBackend protocol
 - **[Embedding-Based Scoring](docs/embeddings.md)** — Optional semantic similarity for smarter context retrieval
-- **[Web Dashboard](docs/dashboard.md)** — Interactive Cytoscape.js graph visualization with search, filtering, and PNG export
+- **[Web Dashboard](docs/dashboard.md)** — Interactive Sigma.js v3 graph visualization with search, filtering, and PNG export
 - **[Cross-System Contracts](docs/tools/contracts.md)** — API, event, config, and data contract modeling with validation
 - **[Usage Patterns](docs/usage-patterns.md)** — Orchestrator workflows, impact analysis, change validation, multi-agent coordination
 
@@ -74,7 +74,7 @@ uv pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-1318+ tests covering all subsystems. See [Roadmap](docs/roadmap.md) for version history (v0.2.0–v0.13.0).
+1452+ tests covering all subsystems. See [Roadmap](docs/roadmap.md) for version history (v0.2.0–v0.14.0).
 
 ## License
 

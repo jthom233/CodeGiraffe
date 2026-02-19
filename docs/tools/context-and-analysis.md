@@ -24,7 +24,7 @@ The killer tool. Given a natural-language task description, returns the minimal 
 
 **Response enhancements (v0.11.0):**
 - `_token_estimate` — Estimated token count for the response
-- `_retrieval_strategy` — Strategy used: `keyword`, `embedding`, `impact`, `change_aware`, or `combined`
+- `_retrieval_strategy` — Classified task intent used to steer retrieval: `create`, `debug`, `refactor`, `delete`, `test`, or `modify`
 
 When `sentence-transformers` is installed and `use_embeddings` is `true`, scoring uses embedding-based semantic similarity for significantly better relevance ranking. Otherwise, it falls back to keyword overlap scoring.
 
@@ -89,24 +89,19 @@ Analyze clusters of same-type nodes to extract naming conventions, structural pa
 **Example:**
 ```
 codegiraffe_patterns(project_path="/home/user/my-project", node_type="endpoint", min_cluster=3)
---> ## Endpoint Patterns
-    **2 cluster(s) found**
+--> ## Convention Mining: `endpoint`
+    **Nodes analysed:** 11
 
-    ### API Cluster (8 endpoints)
-    - **Naming:** GET /api/*, POST /api/*, PUT /api/*
-    - **Common prefix:** /api/
-    - **Avg edges per node:** 2.1
-    - **Avg depth:** 1.7
+    **Naming pattern:** `endpoint:/api/*`
 
-    ### Admin Cluster (3 endpoints)
-    - **Naming:** GET /admin/*, POST /admin/*, DELETE /admin/*
-    - **Common prefix:** /admin/
-    - **Avg edges per node:** 1.0
-    - **Avg depth:** 2.2
+    **Exemplar node:** `endpoint:/api/users`
 
-    ### Anti-patterns detected
-    - 1 orphaned endpoint: /health (0 edges)
-    - 1 naming violation: get_user (uses snake_case, inconsistent with /api pattern)
+    **Common attributes** (present in >66% of nodes):
+    - type: endpoint
+
+    **Outliers** (deviate from naming pattern):
+    - endpoint:/health
+    - endpoint:get_user
 ```
 
 ---
@@ -129,7 +124,7 @@ codegiraffe_blast_radius(
   node_id="service:AuthService",
   include_upstream=true
 )
---> {"node_id": "service:AuthService", "direct": [...], "transitive": [...], "indirect": [...], "hotspots": [...], "cycles": [...]}
+--> Formatted markdown impact report showing downstream dependencies ranked by severity (direct, transitive, indirect), circular dependencies, and hotspots in the impact zone
 ```
 
 ---
@@ -146,7 +141,7 @@ Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4)
 **Example:**
 ```
 codegiraffe_risk_assessment(project_path="/home/user/my-project")
---> [{"node_id": "service:AuthService", "risk_score": 0.82, "degree": 12, "betweenness": 0.45, "descendants": 8, "coverage": "partial"}, ...]
+--> [{"node_id": "service:AuthService", "risk_score": 0.82, "degree_centrality": 0.45, "betweenness_centrality": 0.45, "blast_radius_count": 8, "file_path": "src/auth.py"}, ...]
 ```
 
 ---

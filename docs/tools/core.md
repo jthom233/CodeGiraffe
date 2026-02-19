@@ -103,7 +103,7 @@ Incrementally sync specific changed files without a full rescan. Faster than `co
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
-| `file_paths` | `list[str]` | — | yes | Absolute or relative file paths to sync |
+| `file_paths` | `str` | — | yes | Comma-separated or JSON array string of absolute or relative file paths to sync |
 | `scanner_mode` | `str` | `"regex"` | no | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
 
 **Example:**
@@ -189,7 +189,7 @@ codegiraffe_detect_drift(project_path="/home/user/my-project")
 
 ### `codegiraffe_dashboard`
 
-Launch the interactive Cytoscape.js web dashboard for a project. Spawns a background HTTP server and opens the user's default browser. If a server is already running on the requested port, the existing URL is returned and the browser is opened to it without spawning a second process.
+Launch the interactive Sigma.js v3 web dashboard for a project. Spawns a background HTTP server and opens the user's default browser. If a server is already running on the requested port, the existing URL is returned and the browser is opened to it without spawning a second process.
 
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
