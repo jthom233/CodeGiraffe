@@ -8,7 +8,6 @@ Detects architectural patterns in .cs files including:
     - SignalR hubs (: Hub)                 -> service nodes (kind=signalr_hub)
     - MediatR handlers                     -> worker nodes
     - DI registrations                     -> service nodes
-    - Class definitions (fallback)         -> service nodes
 """
 
 from __future__ import annotations
@@ -69,12 +68,6 @@ _CS_DI_RE = re.compile(
     r"""services\.Add(?:Scoped|Transient|Singleton)<(\w+)>""",
 )
 
-# Class definitions (with optional access/other modifiers) — fallback
-_CS_CLASS_RE = re.compile(
-    r"""(?:public|internal|private|protected|abstract|sealed|partial|static)\s+class\s+(\w+)""",
-)
-
-
 _CS_USING_STMT_RE = re.compile(r'using\s+([\w.]+)\s*;', re.MULTILINE)
 _CS_NAMESPACE_DECL_RE = re.compile(r'namespace\s+([\w.]+)', re.MULTILINE)
 _CS_CLASS_INHERITANCE_RE = re.compile(r'class\s+(\w+)(?:<[^>]*>)?\s*:\s*([\w\s,.<>]+?)(?:\s*\{|\s*where)')
@@ -95,7 +88,6 @@ class CSharpRecognizer:
         - SignalR hubs (``Hub``)               -> ``service`` nodes (kind=signalr_hub)
         - MediatR handlers                     -> ``worker`` nodes
         - DI registrations                     -> ``service`` nodes
-        - Class definitions (fallback)         -> ``service`` nodes
     """
 
     def __init__(self) -> None:
@@ -272,22 +264,6 @@ class CSharpRecognizer:
                         label=service_name,
                         file_path=rel_path,
                         metadata={"class_name": service_name, "registration": "di"},
-                    )
-                )
-
-        # --- Class definitions (fallback to service nodes) ---
-        for match in _CS_CLASS_RE.finditer(content):
-            class_name = match.group(1)
-            if class_name not in captured_class_names:
-                captured_class_names.add(class_name)
-                node_id = f"service:{class_name}"
-                nodes.append(
-                    Node(
-                        id=node_id,
-                        type=NodeType.SERVICE,
-                        label=class_name,
-                        file_path=rel_path,
-                        metadata={"class_name": class_name},
                     )
                 )
 

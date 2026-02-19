@@ -1016,13 +1016,17 @@ services.AddSingleton<ICacheService>();
         assert "service:IOrderService" in ids
         assert "service:ICacheService" in ids
 
-    def test_class_fallback(self, recognizer):
+    def test_plain_class_no_service_node(self, recognizer):
+        """Plain classes with no special base class or attributes must NOT produce a service node.
+
+        This is the key anti-regression test for the class-fallback removal.
+        """
         content = '''
 internal class HelperUtil { }
 '''
         result = recognizer.recognize(Path("Helpers/HelperUtil.cs"), content)
         ids = {n.id for n in result.nodes}
-        assert "service:HelperUtil" in ids
+        assert "service:HelperUtil" not in ids
 
     def test_signalr_hub_not_duplicated_as_service(self, recognizer):
         """SignalR hubs should not also appear as fallback services."""
