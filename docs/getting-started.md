@@ -18,12 +18,26 @@ This guide walks you through installation, optional dependency setup, and config
 
 ## Installation
 
-Clone the repository and install the core package:
+Clone the repository and create a virtual environment:
 
 ```bash
 git clone https://github.com/jthom233/CodeGiraffe.git
 cd CodeGiraffe
-uv venv .venv && source .venv/bin/activate
+uv venv .venv
+```
+
+Activate the virtual environment for your OS and shell:
+
+| OS | Shell | Command |
+|---|---|---|
+| Linux / macOS | bash/zsh | `source .venv/bin/activate` |
+| Windows | PowerShell | `.venv\Scripts\Activate.ps1` |
+| Windows | cmd | `.venv\Scripts\activate.bat` |
+| Windows | Git Bash | `source .venv/Scripts/activate` |
+
+Then install the core package:
+
+```bash
 uv pip install -e ".[dev]"
 ```
 
@@ -71,17 +85,34 @@ pip install -e ".[layout]"       # Server-side layout computation
 Register Code Giraffe as an MCP server using the Claude Code CLI:
 
 ```bash
+# Linux / macOS
 claude mcp add codegiraffe -- /path/to/CodeGiraffe/.venv/bin/python /path/to/CodeGiraffe/src/codegiraffe/server.py
+
+# Windows
+claude mcp add codegiraffe -- /path/to/CodeGiraffe/.venv/Scripts/python.exe /path/to/CodeGiraffe/src/codegiraffe/server.py
 ```
 
 Or add it manually to your `~/.claude.json`:
 
 ```json
+// Linux / macOS
 {
   "mcpServers": {
     "codegiraffe": {
       "type": "stdio",
       "command": "/path/to/CodeGiraffe/.venv/bin/python",
+      "args": ["/path/to/CodeGiraffe/src/codegiraffe/server.py"],
+      "env": {}
+    }
+  }
+}
+
+// Windows
+{
+  "mcpServers": {
+    "codegiraffe": {
+      "type": "stdio",
+      "command": "/path/to/CodeGiraffe/.venv/Scripts/python.exe",
       "args": ["/path/to/CodeGiraffe/src/codegiraffe/server.py"],
       "env": {}
     }
@@ -96,10 +127,21 @@ Or add it manually to your `~/.claude.json`:
 Add the following to your `claude_desktop_config.json`:
 
 ```json
+// Linux / macOS
 {
   "mcpServers": {
     "codegiraffe": {
       "command": "/path/to/CodeGiraffe/.venv/bin/python",
+      "args": ["/path/to/CodeGiraffe/src/codegiraffe/server.py"]
+    }
+  }
+}
+
+// Windows
+{
+  "mcpServers": {
+    "codegiraffe": {
+      "command": "/path/to/CodeGiraffe/.venv/Scripts/python.exe",
       "args": ["/path/to/CodeGiraffe/src/codegiraffe/server.py"]
     }
   }
