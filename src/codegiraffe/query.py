@@ -165,7 +165,7 @@ def _detect_git_renames(project_path: str, since: str | None = None) -> dict[str
         else:
             cmd.append("HEAD~10")  # Default: check last 10 commits
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10)
         if result.returncode != 0:
             return {}
 

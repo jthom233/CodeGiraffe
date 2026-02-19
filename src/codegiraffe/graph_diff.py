@@ -129,6 +129,7 @@ def build_graph_at_ref(
             ["git", "worktree", "add", tmpdir, ref],
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
             cwd=project_path,
         )
         if add_result.returncode != 0:
@@ -167,6 +168,7 @@ def build_graph_at_ref(
                 ["git", "worktree", "remove", "--force", tmpdir],
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
                 cwd=project_path,
             )
 

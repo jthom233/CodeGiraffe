@@ -28,6 +28,7 @@ def is_git_repo(project_path: str) -> bool:
         ["git", "rev-parse", "--git-dir"],
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         cwd=project_path,
     )
     return result.returncode == 0
@@ -51,6 +52,7 @@ def get_uncommitted_diff(project_path: str) -> str:
         ["git", "diff", "HEAD"],
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         cwd=project_path,
     )
 
@@ -60,6 +62,7 @@ def get_uncommitted_diff(project_path: str) -> str:
             ["git", "diff", "--cached"],
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
             cwd=project_path,
         )
 
@@ -79,6 +82,7 @@ def get_changed_files(project_path: str) -> list[str]:
         ["git", "diff", "HEAD", "--name-only"],
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         cwd=project_path,
     )
 
@@ -113,6 +117,7 @@ def get_commit_file_history(
         ],
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         cwd=project_path,
     )
 
