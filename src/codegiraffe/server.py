@@ -113,7 +113,7 @@ def codegiraffe_init(
     project_path: str,
     rescan: bool = False,
     backend: str = "json",
-    scanner_mode: str = "regex",
+    scanner_mode: str = "hybrid",
     include_tests: bool = False,
 ) -> str:
     """Initialize or re-scan the architecture knowledge graph for a project.
@@ -126,10 +126,11 @@ def codegiraffe_init(
     Use *backend* to select the storage backend: ``"json"`` (default),
     ``"sqlite"`` for a SQLite database, or ``"neo4j"`` for Neo4j.
 
-    Use *scanner_mode* to choose the scanning strategy: ``"regex"`` (default)
-    for regex-based pattern matching, ``"ast"`` for tree-sitter AST-based
-    scanning (requires tree-sitter packages), or ``"hybrid"`` for both regex
-    and AST recognizers running together (requires tree-sitter packages).
+    Use *scanner_mode* to choose the scanning strategy: ``"hybrid"`` (default)
+    for both regex and AST recognizers running together (falls back to regex if
+    tree-sitter is unavailable), ``"regex"`` for regex-only pattern matching,
+    or ``"ast"`` for tree-sitter AST-based scanning (requires tree-sitter
+    packages).
 
     Returns a summary of the initialized graph.
     """
@@ -149,9 +150,11 @@ def codegiraffe_init(
 
             registry = get_ast_registry()
         elif scanner_mode == "hybrid":
-            from codegiraffe.ast_scanner import get_hybrid_registry
-
-            registry = get_hybrid_registry()
+            try:
+                from codegiraffe.ast_scanner import get_hybrid_registry
+                registry = get_hybrid_registry()
+            except ImportError:
+                registry = None  # falls back to default regex registry
 
         # Scan the project
         result = scan_project(project_path, registry=registry, include_tests=include_tests)
@@ -1589,7 +1592,7 @@ def _risk_explanation(item: dict) -> str:
 def codegiraffe_sync(
     project_path: str,
     include_tests: bool = False,
-    scanner_mode: str = "regex",
+    scanner_mode: str = "hybrid",
 ) -> str:
     """Re-scan the project and synchronize the architecture graph.
 
@@ -1605,7 +1608,8 @@ def codegiraffe_sync(
     include_tests:
         When ``True``, test files are included in the scan.
     scanner_mode:
-        Scanner strategy — ``"regex"`` (default), ``"ast"``, or ``"hybrid"``.
+        Scanner strategy — ``"hybrid"`` (default, falls back to regex if
+        tree-sitter is unavailable), ``"regex"``, or ``"ast"``.
     """
     global _graph  # noqa: PLW0603
 
@@ -1622,9 +1626,11 @@ def codegiraffe_sync(
 
             registry = get_ast_registry()
         elif scanner_mode == "hybrid":
-            from codegiraffe.ast_scanner import get_hybrid_registry
-
-            registry = get_hybrid_registry()
+            try:
+                from codegiraffe.ast_scanner import get_hybrid_registry
+                registry = get_hybrid_registry()
+            except ImportError:
+                registry = None  # falls back to default regex registry
 
         # Re-scan
         result = scan_project(project_path, registry=registry, include_tests=include_tests)
@@ -1681,7 +1687,7 @@ def codegiraffe_sync(
 def codegiraffe_sync_files(
     project_path: str,
     file_paths: str,
-    scanner_mode: str = "regex",
+    scanner_mode: str = "hybrid",
 ) -> str:
     """Incrementally sync specific changed files in the architecture graph.
 
@@ -1701,7 +1707,8 @@ def codegiraffe_sync_files(
         (e.g. ``["path/a.py","path/b.py"]``) or a comma-separated string
         (e.g. ``"path/a.py,path/b.py"``).
     scanner_mode:
-        Scanner strategy — ``"regex"`` (default), ``"ast"``, or ``"hybrid"``.
+        Scanner strategy — ``"hybrid"`` (default, falls back to regex if
+        tree-sitter is unavailable), ``"regex"``, or ``"ast"``.
 
     Returns
     -------
@@ -2152,7 +2159,7 @@ def codegiraffe_pr_diff(
     project_path: str,
     base_ref: str,
     head_ref: str = "HEAD",
-    scanner_mode: str = "regex",
+    scanner_mode: str = "hybrid",
 ) -> str:
     """Compare the architectural graph between two git refs for PR review.
 
@@ -2170,7 +2177,8 @@ def codegiraffe_pr_diff(
     head_ref:
         The head branch / commit SHA (default ``"HEAD"`` -- the current branch tip).
     scanner_mode:
-        ``"regex"`` (default), ``"ast"``, or ``"hybrid"`` for tree-sitter scanning.
+        ``"hybrid"`` (default, falls back to regex if tree-sitter is
+        unavailable), ``"regex"``, or ``"ast"`` for tree-sitter scanning.
     """
     from codegiraffe.graph_diff import build_graph_at_ref, compute_graph_diff
 

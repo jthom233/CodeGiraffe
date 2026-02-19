@@ -95,7 +95,7 @@ python src/codegiraffe/server.py
 
 ## Key Patterns
 
-- Scanner uses regex by default; AST scanning via tree-sitter available with `scanner_mode="ast"`; hybrid mode (`scanner_mode="hybrid"`) runs both regex and AST recognizers with deduplication
+- Scanner defaults to `scanner_mode="hybrid"` (regex + AST recognizers with deduplication), falling back to regex automatically if tree-sitter is unavailable; use `scanner_mode="ast"` to require tree-sitter exclusively
 - Scanner excludes test files by default; pass `include_tests=True` to include them (tagged with `source: test` metadata)
 - Scanner detects imports (absolute and relative), creates `imports` edges between `module` nodes
 - Scanner detects inheritance, creates `implements` edges from child to parent class

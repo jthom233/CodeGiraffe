@@ -2142,7 +2142,7 @@ def sync_files(
     graph: "ArchGraph",
     project_path: str,
     file_paths: list[str],
-    scanner_mode: str = "regex",
+    scanner_mode: str = "hybrid",
 ) -> dict:
     """Incrementally sync specific files in the architecture graph.
 
@@ -2171,7 +2171,8 @@ def sync_files(
     file_paths:
         List of **absolute** paths to the files that have changed.
     scanner_mode:
-        ``"regex"`` (default), ``"ast"``, or ``"hybrid"`` — selects the scanner registry.
+        ``"hybrid"`` (default, falls back to regex if tree-sitter is
+        unavailable), ``"regex"``, or ``"ast"`` — selects the scanner registry.
 
     Returns
     -------
@@ -2189,8 +2190,11 @@ def sync_files(
         from codegiraffe.ast_scanner import get_ast_registry
         active_registry = get_ast_registry()
     elif scanner_mode == "hybrid":
-        from codegiraffe.ast_scanner import get_hybrid_registry
-        active_registry = get_hybrid_registry()
+        try:
+            from codegiraffe.ast_scanner import get_hybrid_registry
+            active_registry = get_hybrid_registry()
+        except ImportError:
+            active_registry = get_default_registry()  # falls back to regex
     else:
         active_registry = get_default_registry()
 
