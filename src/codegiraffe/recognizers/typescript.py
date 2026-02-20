@@ -42,7 +42,8 @@ _TS_TYPEORM_RE = re.compile(
 
 # Prisma model
 _TS_PRISMA_RE = re.compile(
-    r"""model\s+(\w+)\s*\{""",
+    r"""^\s*model\s+(\w+)\s*\{""",
+    re.MULTILINE,
 )
 
 # process.env
@@ -62,12 +63,14 @@ _TS_EVENT_EMIT_RE = re.compile(
 
 # React/Vue component export
 _TS_COMPONENT_RE = re.compile(
-    r"""export\s+(?:default\s+)?(?:function|const|class)\s+(\w+)""",
+    r"""^\s*export\s+(?:default\s+)?(?:function|const|class)\s+(\w+)""",
+    re.MULTILINE,
 )
 
 # Class definitions
 _TS_CLASS_RE = re.compile(
-    r"""(?:export\s+)?class\s+(\w+)""",
+    r"""^\s*(?:export\s+)?(?:abstract\s+)?class\s+(\w+)""",
+    re.MULTILINE,
 )
 
 # Queue (Bull/BullMQ)
@@ -80,8 +83,8 @@ _TS_QUEUE_RE = re.compile(
 _TS_NAMED_IMPORT_RE = re.compile(r"""import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]""")
 _TS_DEFAULT_IMPORT_RE = re.compile(r"""import\s+(\w+)\s+from\s+['"]([^'"]+)['"]""")
 _TS_NAMESPACE_IMPORT_RE = re.compile(r"""import\s+\*\s+as\s+\w+\s+from\s+['"]([^'"]+)['"]""")
-_TS_CLASS_EXTENDS_RE = re.compile(r'class\s+(\w+)\s+extends\s+(\w+)')
-_TS_CLASS_IMPLEMENTS_RE = re.compile(r'class\s+(\w+)\s+(?:extends\s+\w+\s+)?implements\s+([\w,\s<>]+?)(?:\s*\{)')
+_TS_CLASS_EXTENDS_RE = re.compile(r'^\s*(?:export\s+)?(?:abstract\s+)?class\s+(\w+)\s+extends\s+(\w+)', re.MULTILINE)
+_TS_CLASS_IMPLEMENTS_RE = re.compile(r'^\s*(?:export\s+)?(?:abstract\s+)?class\s+(\w+)\s+(?:extends\s+\w+\s+)?implements\s+([\w,\s<>]+?)(?:\s*\{)', re.MULTILINE)
 
 # ---------------------------------------------------------------------------
 # TypeScript call detection (v0.9.0)
@@ -92,7 +95,7 @@ _TS_FUNC_DEF_RE = re.compile(
     r'(?:(?:async\s+)?function\s+(\w+)|(?:export\s+)?(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*[\w<>\[\]|&\s]+)?\s*\{)',
     re.MULTILINE,
 )
-_TS_CLASS_DEF_RE = re.compile(r'(?:export\s+)?class\s+(\w+)', re.MULTILINE)
+_TS_CLASS_DEF_RE = re.compile(r'^\s*(?:export\s+)?(?:abstract\s+)?class\s+(\w+)', re.MULTILINE)
 _TS_NEW_CONSTRUCTOR_RE = re.compile(r'new\s+(\w+)\s*\(')
 
 _TS_BUILTINS = frozenset({
@@ -159,6 +162,31 @@ def _ts_import_to_module_path(import_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Comment stripping
+# ---------------------------------------------------------------------------
+
+def _strip_ts_comments(text: str) -> str:
+    """Remove JS/TS comments while preserving string literals."""
+    def _replacer(match: re.Match) -> str:
+        if match.group(1) is not None:  # single-quoted string
+            return match.group(0)
+        if match.group(2) is not None:  # double-quoted string
+            return match.group(0)
+        if match.group(3) is not None:  # template literal
+            return match.group(0)
+        return ""  # comment -- remove it
+    return re.sub(
+        r"""('(?:\\.|[^'\\])*')"""       # group 1: single-quoted string
+        r"""|("(?:\\.|[^"\\])*")"""      # group 2: double-quoted string
+        r"""|(`(?:\\.|[^`\\])*`)"""      # group 3: template literal
+        r"""|(\/\*[\s\S]*?\*\/)"""       # group 4: block comment
+        r"""|(\/\/[^\n]*)""",            # group 5: line comment
+        _replacer,
+        text,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Recognizer
 # ---------------------------------------------------------------------------
 
@@ -179,6 +207,8 @@ class TypeScriptRecognizer:
 
     def recognize(self, file_path: Path, content: str) -> ScanResult:
         """Scan *content* of a TypeScript file and return discovered nodes/edges."""
+        # Strip comments to prevent false positives from JSDoc/block comments
+        content = _strip_ts_comments(content)
         nodes: list[Node] = []
         edges: list[Edge] = []
         rel_path = file_path.as_posix()
