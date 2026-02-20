@@ -349,6 +349,7 @@ _SUFFIX_TO_LANGUAGE: dict[str, str] = {
     ".cxx": "cpp",
     ".php": "php",
     ".rb": "ruby",
+    ".lua": "lua",
 }
 
 

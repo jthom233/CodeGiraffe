@@ -6,6 +6,7 @@ from pathlib import Path
 from codegiraffe.recognizers import (
     TypeScriptRecognizer,
     GoRecognizer,
+    LuaRecognizer,
     RustRecognizer,
     JavaRecognizer,
     CSharpRecognizer,
@@ -1203,7 +1204,7 @@ class TestDefaultRegistryExtensions:
         extensions = registry.registered_extensions
         for ext in [
             ".py", ".pyi", ".ts", ".tsx", ".mts", ".cts", ".go", ".rs", ".java",
-            ".cs", ".c", ".cpp", ".h", ".hpp", ".cc", ".cxx", ".php", ".rb",
+            ".cs", ".c", ".cpp", ".h", ".hpp", ".cc", ".cxx", ".php", ".rb", ".lua",
         ]:
             assert ext in extensions, f"Missing extension: {ext}"
 
@@ -2000,3 +2001,255 @@ class Foo : public IBar, public IBaz {
         impl_map = {(i.child_class, i.parent_class) for i in result.implementations}
         assert ("Foo", "IBar") in impl_map
         assert ("Foo", "IBaz") in impl_map
+
+
+# ---------------------------------------------------------------------------
+# Lua recognizer tests
+# ---------------------------------------------------------------------------
+
+
+class TestLuaRecognizer:
+    @pytest.fixture
+    def recognizer(self):
+        return LuaRecognizer()
+
+    def test_require_import(self, recognizer):
+        content = 'local M = require("module.name")'
+        result = recognizer.recognize(Path("addon.lua"), content)
+        paths = [i.module_path for i in result.imports]
+        assert "module.name" in paths
+
+    def test_dofile_import(self, recognizer):
+        content = 'dofile("path/file.lua")'
+        result = recognizer.recognize(Path("addon.lua"), content)
+        paths = [i.module_path for i in result.imports]
+        assert "path/file.lua" in paths
+
+    def test_class_setmetatable(self, recognizer):
+        content = "MyClass = setmetatable({}, Base)"
+        result = recognizer.recognize(Path("myclass.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:MyClass" in ids
+
+    def test_class_extend(self, recognizer):
+        content = "MyClass = Base:extend()"
+        result = recognizer.recognize(Path("myclass.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:MyClass" in ids
+
+    def test_class_new(self, recognizer):
+        content = "MyClass = Base:new()"
+        result = recognizer.recognize(Path("myclass.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:MyClass" in ids
+
+    def test_lowercase_table_not_service(self, recognizer):
+        content = "local tbl = {}\nlocal config = {}"
+        result = recognizer.recognize(Path("utils.lua"), content)
+        service_ids = [n.id for n in result.nodes if n.type == "service"]
+        assert len(service_ids) == 0
+
+    def test_env_var(self, recognizer):
+        content = 'local home = os.getenv("HOME")'
+        result = recognizer.recognize(Path("main.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "env:HOME" in ids
+
+    def test_libstub(self, recognizer):
+        content = 'local AceAddon = LibStub("AceAddon-3.0")'
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "ext:AceAddon-3.0" in ids
+
+    def test_wow_api(self, recognizer):
+        content = "local data = C_UnitAuras.GetBuffDataByIndex(unit, i)"
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "ext:C_UnitAuras" in ids
+
+    def test_wow_api_dedup(self, recognizer):
+        content = (
+            "C_UnitAuras.GetBuffDataByIndex(unit, 1)\n"
+            "C_UnitAuras.GetDebuffDataByIndex(unit, 1)\n"
+            "C_UnitAuras.GetAuraDataByIndex(unit, 1)\n"
+        )
+        result = recognizer.recognize(Path("addon.lua"), content)
+        api_nodes = [n for n in result.nodes if n.id == "ext:C_UnitAuras"]
+        assert len(api_nodes) == 1
+
+    def test_register_event(self, recognizer):
+        content = 'frame:RegisterEvent("PLAYER_ENTERING_WORLD")'
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "event:PLAYER_ENTERING_WORLD" in ids
+
+    def test_slash_command(self, recognizer):
+        content = 'AceConsole:RegisterChatCommand("hekili", cmdHandler)'
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/hekili" in ids
+
+    def test_slash_command_with_leading_slash(self, recognizer):
+        content = 'RegisterChatCommand("/reload", handler)'
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/reload" in ids
+
+    def test_onupdate_worker(self, recognizer):
+        content = 'frame:SetScript("OnUpdate", function(self, elapsed) end)'
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "worker:OnUpdate:addon" in ids
+
+    def test_onupdate_single_node_per_file(self, recognizer):
+        content = (
+            'frame1:SetScript("OnUpdate", function() end)\n'
+            'frame2:SetScript("OnUpdate", function() end)\n'
+        )
+        result = recognizer.recognize(Path("addon.lua"), content)
+        onupdate_nodes = [n for n in result.nodes if n.id == "worker:OnUpdate:addon"]
+        assert len(onupdate_nodes) == 1
+
+    def test_wow_api_aliased_reference(self, recognizer):
+        """C_ API references without call parens should be detected."""
+        content = "local GetBuff = C_UnitAuras.GetBuffDataByIndex"
+        result = recognizer.recognize(Path("test.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "ext:C_UnitAuras" in ids
+
+    def test_newaddon_service(self, recognizer):
+        """LibStub AceAddon NewAddon should produce a service node."""
+        content = '''Hekili = LibStub("AceAddon-3.0"):NewAddon("Hekili", "AceConsole-3.0")'''
+        result = recognizer.recognize(Path("hekili.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:Hekili" in ids
+
+    def test_onupdate_per_file(self, recognizer):
+        """OnUpdate worker nodes should be file-scoped."""
+        content = '''frame:SetScript("OnUpdate", function(self, elapsed) end)'''
+        result1 = recognizer.recognize(Path("events.lua"), content)
+        result2 = recognizer.recognize(Path("ui.lua"), content)
+        ids1 = {n.id for n in result1.nodes}
+        ids2 = {n.id for n in result2.nodes}
+        assert "worker:OnUpdate:events" in ids1
+        assert "worker:OnUpdate:ui" in ids2
+        assert ids1 != ids2  # different node IDs
+
+    def test_comment_stripping(self, recognizer):
+        content = (
+            "-- require(\"fake\") this is a comment\n"
+            "-- C_Fake.Call()\n"
+            "local x = 1\n"
+        )
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "ext:C_Fake" not in ids
+        paths = [i.module_path for i in result.imports]
+        assert "fake" not in paths
+
+    def test_long_string_stripping(self, recognizer):
+        content = 'local data = [[ require("fake") C_Fake.Call() ]]'
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "ext:C_Fake" not in ids
+        paths = [i.module_path for i in result.imports]
+        assert "fake" not in paths
+
+    def test_block_comment_stripping(self, recognizer):
+        content = "--[[ require(\"fake\")\nC_Fake.Call() ]]"
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "ext:C_Fake" not in ids
+        paths = [i.module_path for i in result.imports]
+        assert "fake" not in paths
+
+    def test_function_definitions_no_service_nodes(self, recognizer):
+        content = (
+            "function MyModule:update(dt) end\n"
+            "function MyModule.init() end\n"
+            "local function helper() end\n"
+            "function globalFunc() end\n"
+        )
+        result = recognizer.recognize(Path("module.lua"), content)
+        service_ids = [n.id for n in result.nodes if n.type == "service"]
+        assert len(service_ids) == 0
+
+    def test_require_various_quote_styles(self, recognizer):
+        content = (
+            "local a = require('single.quoted')\n"
+            'local b = require("double.quoted")\n'
+        )
+        result = recognizer.recognize(Path("addon.lua"), content)
+        paths = [i.module_path for i in result.imports]
+        assert "single.quoted" in paths
+        assert "double.quoted" in paths
+
+    def test_multiple_node_types_same_file(self, recognizer):
+        content = (
+            'local AceAddon = LibStub("AceAddon-3.0")\n'
+            'local home = os.getenv("HOME")\n'
+            'frame:RegisterEvent("PLAYER_LOGIN")\n'
+            'MyAddon = Base:extend()\n'
+        )
+        result = recognizer.recognize(Path("addon.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "ext:AceAddon-3.0" in ids
+        assert "env:HOME" in ids
+        assert "event:PLAYER_LOGIN" in ids
+        assert "service:MyAddon" in ids
+
+    def test_leveled_long_string_stripping(self, recognizer):
+        """Leveled long strings [=[ ]=] should be stripped."""
+        content = '[=[ require("fake") ]=]\nlocal x = require("real")'
+        result = recognizer.recognize(Path("test.lua"), content)
+        assert len(result.imports) == 1
+        assert result.imports[0].module_path == "real"
+
+    def test_leveled_long_string_containing_brackets(self, recognizer):
+        """[=[ ... ]] ... ]=] should strip the entire span."""
+        content = '[=[ data with ]] inside ]=]\nlocal x = require("real")'
+        result = recognizer.recognize(Path("test.lua"), content)
+        assert len(result.imports) == 1
+        assert result.imports[0].module_path == "real"
+
+    def test_require_without_parens(self, recognizer):
+        """require 'module' without parentheses should work."""
+        content = """require 'mylib.utils' """
+        result = recognizer.recognize(Path("test.lua"), content)
+        assert len(result.imports) == 1
+        assert result.imports[0].module_path == "mylib.utils"
+
+    def test_loadfile_import(self, recognizer):
+        """loadfile should produce an ImportInfo."""
+        content = """loadfile("extra.lua")"""
+        result = recognizer.recognize(Path("test.lua"), content)
+        assert len(result.imports) == 1
+        assert result.imports[0].module_path == "extra.lua"
+
+    def test_slash_command_with_hyphen(self, recognizer):
+        """Slash commands with hyphens should be captured."""
+        content = """self:RegisterChatCommand("my-addon", "Handler")"""
+        result = recognizer.recognize(Path("test.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/my-addon" in ids
+
+    def test_event_with_digit(self, recognizer):
+        """Events with digits should be captured."""
+        content = """RegisterEvent("UNIT_AURA2", handler)"""
+        result = recognizer.recognize(Path("test.lua"), content)
+        ids = {n.id for n in result.nodes}
+        assert "event:UNIT_AURA2" in ids
+
+
+class TestScanProjectWithLua:
+    def test_scan_project_with_lua(self, tmp_path):
+        (tmp_path / "addon.lua").write_text(
+            'local M = require("utils.helpers")\n'
+            "MyAddon = Base:extend()\n"
+        )
+        result = scan_project(str(tmp_path))
+        ids = {n.id for n in result.nodes}
+        # module node for the file itself
+        assert any("addon" in nid for nid in ids)
+        # service node from table-as-class pattern
+        assert "service:MyAddon" in ids
