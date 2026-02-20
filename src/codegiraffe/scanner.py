@@ -318,6 +318,8 @@ _IGNORE_DIRS: frozenset[str] = frozenset(
         "dist",
         "build",
         "*.egg-info",
+        "obj",
+        "bin",
     }
 )
 
@@ -1631,12 +1633,34 @@ def _infer_call_edges(result: ScanResult) -> None:
     resolved to an existing node (via receiver matching or symbol registry),
     creates a calls edge. Creates demand-driven method-level nodes only
     when they participate in call relationships.
+
+    Cross-language edges are suppressed: if both the caller's file and the
+    target node have a known language (via their file_path extension), they
+    must match.  When either side's language is None (unknown or no
+    file_path), the edge is allowed as a fallback.
     """
     if not result.calls:
         return
 
     existing_edges = {(e.source, e.target, e.type) for e in result.edges}
     existing_node_ids = {n.id for n in result.nodes}
+
+    # Build a language map for all nodes keyed by node id
+    node_language: dict[str, str | None] = {}
+    for node in result.nodes:
+        fp = node.file_path
+        if fp:
+            suffix = "." + fp.rsplit(".", 1)[-1] if "." in fp else ""
+            node_language[node.id] = _SUFFIX_TO_LANGUAGE.get(suffix)
+        else:
+            node_language[node.id] = None
+
+    def _same_language_or_unknown(caller_lang: str | None, target_node_id: str) -> bool:
+        """Return True when both sides share a language or either side is unknown."""
+        target_lang = node_language.get(target_node_id)
+        if caller_lang is None or target_lang is None:
+            return True
+        return caller_lang == target_lang
 
     # Build symbol registry: map names to node IDs
     # Maps: struct_name -> node_id, module_label -> module_node_id
@@ -1655,18 +1679,30 @@ def _infer_call_edges(result: ScanResult) -> None:
                 module_registry[pkg] = node.id
 
     for call in result.calls:
+        # Determine the caller's language from its file path
+        caller_lang: str | None = None
+        if call.file_path and "." in call.file_path:
+            suffix = "." + call.file_path.rsplit(".", 1)[-1]
+            caller_lang = _SUFFIX_TO_LANGUAGE.get(suffix)
+
         # Try to resolve the callee to an existing node
         callee_node_id = None
 
         if call.receiver:
             # receiver.callee() — try to find receiver as a known symbol
-            callee_node_id = symbol_registry.get(call.receiver)
+            candidate = symbol_registry.get(call.receiver)
+            if candidate and _same_language_or_unknown(caller_lang, candidate):
+                callee_node_id = candidate
             if not callee_node_id:
                 # Try matching receiver as a module/package
-                callee_node_id = module_registry.get(call.receiver)
+                candidate = module_registry.get(call.receiver)
+                if candidate and _same_language_or_unknown(caller_lang, candidate):
+                    callee_node_id = candidate
         else:
             # Direct call — try to find callee as a known symbol
-            callee_node_id = symbol_registry.get(call.callee)
+            candidate = symbol_registry.get(call.callee)
+            if candidate and _same_language_or_unknown(caller_lang, candidate):
+                callee_node_id = candidate
 
         if callee_node_id is None:
             continue  # Can't resolve — skip

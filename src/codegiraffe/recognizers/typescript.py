@@ -61,15 +61,24 @@ _TS_EVENT_EMIT_RE = re.compile(
     r"""\.(?:emit|on|once)\s*\(\s*['"]([\w:.]+?)['"]""",
 )
 
-# React/Vue component export
-_TS_COMPONENT_RE = re.compile(
-    r"""^\s*export\s+(?:default\s+)?(?:function|const|class)\s+(\w+)""",
+# TypeScript enum (exported or non-exported, const or plain)
+_TS_ENUM_RE = re.compile(
+    r"""^\s*(?:export\s+)?(?:const\s+)?enum\s+([A-Z]\w*)""",
     re.MULTILINE,
 )
 
-# Class definitions
+# React/Vue component export — negative lookahead prevents `const enum` from matching.
+# Use const(?!\s+enum\b) so `const` does NOT consume whitespace; the outer \s+ handles it.
+_TS_COMPONENT_RE = re.compile(
+    r"""^\s*export\s+(?:default\s+)?(?:function|const(?!\s+enum\b)|class)\s+(\w+)""",
+    re.MULTILINE,
+)
+
+# Class definitions -- require PascalCase to avoid false positives from keywords
+# like `is`, `manually`, `on`, `new`, `export` that appear after `class` in
+# comments or template literals that survived stripping.
 _TS_CLASS_RE = re.compile(
-    r"""^\s*(?:export\s+)?(?:abstract\s+)?class\s+(\w+)""",
+    r"""^\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Z]\w*)""",
     re.MULTILINE,
 )
 
@@ -166,15 +175,24 @@ def _ts_import_to_module_path(import_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _strip_ts_comments(text: str) -> str:
-    """Remove JS/TS comments while preserving string literals."""
+    """Remove JS/TS comments and template literal content while preserving string literals.
+
+    Template literal *content* is replaced with an equivalent number of newlines so
+    that line-based regex patterns (e.g. _TS_CLASS_RE with re.MULTILINE) still match
+    at the correct line numbers.  Only the backtick delimiters are kept.
+    """
     def _replacer(match: re.Match) -> str:
         if match.group(1) is not None:  # single-quoted string
             return match.group(0)
         if match.group(2) is not None:  # double-quoted string
             return match.group(0)
-        if match.group(3) is not None:  # template literal
-            return match.group(0)
+        if match.group(3) is not None:  # template literal -- blank out contents
+            inner = match.group(3)
+            # Preserve only the newlines so multiline patterns stay aligned
+            newlines = "\n" * inner.count("\n")
+            return f"`{newlines}`"
         return ""  # comment -- remove it
+
     return re.sub(
         r"""('(?:\\.|[^'\\])*')"""       # group 1: single-quoted string
         r"""|("(?:\\.|[^"\\])*")"""      # group 2: double-quoted string
@@ -348,6 +366,24 @@ class TypeScriptRecognizer:
                         label=queue_name,
                         file_path=rel_path,
                         metadata={"queue": queue_name},
+                    )
+                )
+
+        # --- Enums (exported/non-exported, const or plain) ---
+        seen_enums: set[str] = set()
+        for match in _TS_ENUM_RE.finditer(content):
+            enum_name = match.group(1)
+            if enum_name not in seen_enums:
+                seen_enums.add(enum_name)
+                captured_class_names.add(enum_name)
+                node_id = f"component:{enum_name}"
+                nodes.append(
+                    Node(
+                        id=node_id,
+                        type=NodeType.FRONTEND_COMPONENT,
+                        label=enum_name,
+                        file_path=rel_path,
+                        metadata={"component": enum_name, "kind": "enum"},
                     )
                 )
 

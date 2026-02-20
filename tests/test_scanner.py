@@ -156,6 +156,34 @@ class VendoredService:
 
         assert "service:VendoredService" not in service_ids
 
+    def test_scan_skips_obj_dir(self, tmp_path):
+        """MSBuild obj/ output directory must be excluded from scanning."""
+        obj_dir = tmp_path / "obj" / "Debug"
+        obj_dir.mkdir(parents=True)
+        (obj_dir / "generated.py").write_text('''
+class GeneratedService:
+    pass
+''')
+
+        result = scan_project(str(tmp_path))
+        service_ids = {n.id for n in result.nodes if n.type == NodeType.SERVICE}
+
+        assert "service:GeneratedService" not in service_ids
+
+    def test_scan_skips_bin_dir(self, tmp_path):
+        """MSBuild bin/ output directory must be excluded from scanning."""
+        bin_dir = tmp_path / "bin" / "Release"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "compiled.py").write_text('''
+class CompiledService:
+    pass
+''')
+
+        result = scan_project(str(tmp_path))
+        service_ids = {n.id for n in result.nodes if n.type == NodeType.SERVICE}
+
+        assert "service:CompiledService" not in service_ids
+
 
 class TestScanEmptyProject:
     """test_scan_empty_project -- empty dir returns empty ScanResult."""
