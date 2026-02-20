@@ -334,3 +334,63 @@ class TestInferCallEdges:
         assert len(call_edges) == 1
         assert call_edges[0].source == "mod:myapp.handlers"
         assert call_edges[0].target == "service:DB"
+
+    def test_cross_language_call_edge_not_created(self):
+        """TypeScript caller must not resolve a C# target with the same name."""
+        result = ScanResult(
+            nodes=[
+                Node(id="mod:app.main", type="module", label="main",
+                     file_path="src/main.ts"),
+                Node(id="service:Configuration", type="service", label="Configuration",
+                     file_path="Config/Configuration.cs",
+                     metadata={"class_name": "Configuration"}),
+            ],
+            calls=[
+                CallInfo(caller="Bootstrap", callee="Get", receiver="Configuration",
+                         file_path="src/main.ts", style="method"),
+            ],
+        )
+        _infer_call_edges(result)
+        call_edges = [e for e in result.edges if e.type == EdgeType.CALLS.value]
+        assert len(call_edges) == 0
+
+    def test_same_language_call_edge_still_created(self):
+        """TypeScript caller resolving a TypeScript target must create an edge."""
+        result = ScanResult(
+            nodes=[
+                Node(id="mod:app.main", type="module", label="main",
+                     file_path="src/main.ts"),
+                Node(id="service:ConfigService", type="service", label="ConfigService",
+                     file_path="src/config.service.ts",
+                     metadata={"class_name": "ConfigService"}),
+            ],
+            calls=[
+                CallInfo(caller="Bootstrap", callee="Get", receiver="ConfigService",
+                         file_path="src/main.ts", style="method"),
+            ],
+        )
+        _infer_call_edges(result)
+        call_edges = [e for e in result.edges if e.type == EdgeType.CALLS.value]
+        assert len(call_edges) == 1
+        assert call_edges[0].source == "mod:app.main"
+        assert call_edges[0].target == "service:ConfigService"
+
+    def test_unknown_language_node_allowed_as_fallback(self):
+        """A service node without a file_path (language unknown) must still be linkable."""
+        result = ScanResult(
+            nodes=[
+                Node(id="mod:app.main", type="module", label="main",
+                     file_path="src/main.ts"),
+                Node(id="service:ExternalBus", type="service", label="ExternalBus",
+                     metadata={"struct_name": "ExternalBus"}),
+                # no file_path -> language is None
+            ],
+            calls=[
+                CallInfo(caller="Bootstrap", callee="Publish", receiver="ExternalBus",
+                         file_path="src/main.ts", style="method"),
+            ],
+        )
+        _infer_call_edges(result)
+        call_edges = [e for e in result.edges if e.type == EdgeType.CALLS.value]
+        assert len(call_edges) == 1
+        assert call_edges[0].target == "service:ExternalBus"

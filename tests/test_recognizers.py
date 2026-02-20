@@ -81,6 +81,37 @@ export const UserList = () => {};
         ids = {n.id for n in result.nodes}
         assert any("UserProfile" in nid for nid in ids)
 
+    def test_export_const_component_detected(self, recognizer):
+        """Regression: `export const MyComponent = () => {}` must produce a component node.
+
+        The previous regex `const\s+(?!enum\b)` consumed the whitespace between `const`
+        and the identifier, leaving nothing for the outer `\\s+` to match.  The fix uses
+        `const(?!\\s+enum\\b)` so `const` is matched without consuming whitespace.
+        """
+        content = 'export const MyComponent = () => <div />;'
+        result = recognizer.recognize(Path("MyComponent.tsx"), content)
+        ids = {n.id for n in result.nodes}
+        assert "component:MyComponent" in ids, (
+            f"export const component not detected. Nodes found: {ids}"
+        )
+
+    def test_export_const_enum_still_excluded(self, recognizer):
+        """Regression guard: `export const enum Foo` must NOT match the component regex
+        (it is handled by _TS_ENUM_RE instead and must not double-produce via component regex).
+        """
+        content = '''
+export const enum Direction {
+    Up = 0,
+    Down = 1,
+}
+'''
+        result = recognizer.recognize(Path("direction.ts"), content)
+        ids = {n.id for n in result.nodes}
+        # Enum is captured correctly
+        assert "component:Direction" in ids
+        # Must not produce a spurious component:enum node
+        assert "component:enum" not in ids
+
     def test_event_emitter(self, recognizer):
         content = '''
 eventEmitter.emit("user:created");
@@ -264,6 +295,140 @@ class ActivationsService {
         assert "service:auto" not in ids
         assert service_nodes == ["service:ActivationsService"], (
             f"Expected only service:ActivationsService but got: {service_nodes}"
+        )
+
+    def test_exported_enum_detected_as_component(self, recognizer):
+        """Regression: `export enum Foo` must produce component:Foo, not be silently dropped."""
+        content = '''
+export enum HeartbeatStatus {
+    Active = "active",
+    Inactive = "inactive",
+}
+'''
+        result = recognizer.recognize(Path("heartbeat.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "component:HeartbeatStatus" in ids
+        assert "component:enum" not in ids
+
+    def test_const_enum_detected_as_component(self, recognizer):
+        """Regression: `export const enum Foo` must produce component:Foo, not component:enum."""
+        content = '''
+export const enum DiscoveryCommandType {
+    Start = 0,
+    Stop = 1,
+}
+'''
+        result = recognizer.recognize(Path("discovery.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "component:DiscoveryCommandType" in ids
+        assert "component:enum" not in ids
+
+    def test_non_exported_enum_detected_as_component(self, recognizer):
+        """Non-exported PascalCase enums should also be captured as component nodes."""
+        content = '''
+enum LocalEnum {
+    A = 1,
+    B = 2,
+}
+'''
+        result = recognizer.recognize(Path("local.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "component:LocalEnum" in ids
+
+    def test_enum_not_duplicated_as_service(self, recognizer):
+        """An enum captured in component:* must not also appear as service:*."""
+        content = '''
+export enum Status {
+    Ok = "ok",
+    Error = "error",
+}
+'''
+        result = recognizer.recognize(Path("status.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "component:Status" in ids
+        assert "service:Status" not in ids
+
+    def test_const_enum_not_spurious_component_enum_node(self, recognizer):
+        """Ensure `export const enum Foo` does not also add a spurious component:enum node."""
+        content = '''
+export const enum CommandType {
+    Ping = 0,
+    Pong = 1,
+}
+const x = CommandType.Ping;
+'''
+        result = recognizer.recognize(Path("cmd.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "component:CommandType" in ids
+        assert "component:enum" not in ids
+
+    def test_class_in_template_literal_not_detected(self, recognizer):
+        """Regression: 'class' keyword inside a template literal must NOT produce spurious service nodes."""
+        content = '''const msg = `
+  class is auto-generated
+  class manually managed
+`;
+class RealService {
+    getMessage() { return msg; }
+}
+'''
+        result = recognizer.recognize(Path("real.service.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:RealService" in ids
+        assert "service:is" not in ids
+        assert "service:manually" not in ids
+
+    def test_multiline_template_literal_class_not_detected(self, recognizer):
+        """Template literals spanning multiple lines must not produce spurious service nodes."""
+        content = '''const description = `
+This module contains the base class for all services.
+class on its own line should not be detected.
+`;
+class MyService {
+    run() {}
+}
+'''
+        result = recognizer.recognize(Path("my.service.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:MyService" in ids
+        assert "service:on" not in ids
+        service_nodes = sorted(nid for nid in ids if nid.startswith("service:"))
+        assert service_nodes == ["service:MyService"], (
+            f"Expected only service:MyService but got: {service_nodes}"
+        )
+
+    def test_pascal_case_class_names_detected(self, recognizer):
+        """Real TypeScript class names (PascalCase) must still be detected as service nodes."""
+        content = '''class MyService {
+    run() {}
+}
+abstract class BaseComponent {
+    abstract render(): void;
+}
+export class FooController {
+    handle() {}
+}
+'''
+        result = recognizer.recognize(Path("services.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:MyService" in ids
+        assert "service:BaseComponent" in ids
+        # FooController is exported so it lands in component:* namespace
+        assert "component:FooController" in ids
+
+    def test_lowercase_after_class_keyword_not_service(self, recognizer):
+        """Lowercase words after 'class' keyword must not produce service nodes (PascalCase guard)."""
+        content = '''class ValidService {
+    run() {}
+}
+'''
+        result = recognizer.recognize(Path("valid.service.ts"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:ValidService" in ids
+        # Verify no lowercase-named service nodes were created
+        service_nodes = [nid for nid in ids if nid.startswith("service:")]
+        assert all(nid[len("service:"):][0].isupper() for nid in service_nodes), (
+            f"Found lowercase service nodes: {service_nodes}"
         )
 
 
@@ -986,7 +1151,8 @@ struct Server { int fd; };
         result = scan_project(str(tmp_path))
         ids = {n.id for n in result.nodes}
         assert "env:HOST" in ids
-        assert "service:Server" in ids
+        # Structs are data structures and must not produce service nodes
+        assert "service:Server" not in ids
 
     def test_scan_project_with_php(self, tmp_path):
         (tmp_path / "routes.php").write_text("""
@@ -1162,6 +1328,68 @@ public class NotificationHub : Hub {
         hub_nodes = [nid for nid in ids if "NotificationHub" in nid]
         assert len(hub_nodes) == 1
 
+    def test_http_get_verb_metadata(self, recognizer):
+        """[HttpGet] endpoints must carry http_method: GET in metadata."""
+        content = '[HttpGet("users")]\npublic IActionResult GetUsers() { return Ok(); }'
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        node = next((n for n in result.nodes if n.id == "endpoint:users"), None)
+        assert node is not None
+        assert node.metadata.get("http_method") == "GET"
+
+    def test_http_post_verb_metadata(self, recognizer):
+        """[HttpPost] endpoints must carry http_method: POST in metadata."""
+        content = '[HttpPost("users")]\npublic IActionResult CreateUser() { return Created(); }'
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        node = next((n for n in result.nodes if n.id == "endpoint:users"), None)
+        assert node is not None
+        assert node.metadata.get("http_method") == "POST"
+
+    def test_http_put_verb_metadata(self, recognizer):
+        """[HttpPut] endpoints must carry http_method: PUT in metadata."""
+        content = '[HttpPut("users/{id}")]\npublic IActionResult UpdateUser(int id) { return Ok(); }'
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        node = next((n for n in result.nodes if n.id == "endpoint:users/{id}"), None)
+        assert node is not None
+        assert node.metadata.get("http_method") == "PUT"
+
+    def test_http_delete_verb_metadata(self, recognizer):
+        """[HttpDelete] endpoints must carry http_method: DELETE in metadata."""
+        content = '[HttpDelete("users/{id}")]\npublic IActionResult DeleteUser(int id) { return NoContent(); }'
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        node = next((n for n in result.nodes if n.id == "endpoint:users/{id}"), None)
+        assert node is not None
+        assert node.metadata.get("http_method") == "DELETE"
+
+    def test_http_patch_verb_metadata(self, recognizer):
+        """[HttpPatch] endpoints must carry http_method: PATCH in metadata."""
+        content = '[HttpPatch("users/{id}")]\npublic IActionResult PatchUser(int id) { return Ok(); }'
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        node = next((n for n in result.nodes if n.id == "endpoint:users/{id}"), None)
+        assert node is not None
+        assert node.metadata.get("http_method") == "PATCH"
+
+    def test_route_controller_template_skipped(self, recognizer):
+        """[Route("api/[controller]")] must NOT produce an endpoint node."""
+        content = '[Route("api/[controller]")]\npublic class UsersController : ControllerBase { }'
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:api/[controller]" not in ids
+        assert not any(n.type == "endpoint" for n in result.nodes)
+
+    def test_route_controller_template_case_insensitive(self, recognizer):
+        """[controller] token check is case-insensitive ([Controller] variant)."""
+        content = '[Route("api/[Controller]")]\npublic class UsersController : ControllerBase { }'
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        assert not any(n.type == "endpoint" for n in result.nodes)
+
+    def test_route_custom_gets_any_method(self, recognizer):
+        """[Route("custom")] without an HTTP verb must produce an endpoint with http_method: ANY."""
+        content = '[Route("custom")]\npublic IActionResult Custom() { return Ok(); }'
+        result = recognizer.recognize(Path("Controllers/CustomController.cs"), content)
+        node = next((n for n in result.nodes if n.id == "endpoint:custom"), None)
+        assert node is not None
+        assert node.metadata.get("http_method") == "ANY"
+
 
 class TestCppRecognizer:
     @pytest.fixture
@@ -1174,9 +1402,14 @@ class TestCppRecognizer:
 #include "utils/helper.h"
 '''
         result = recognizer.recognize(Path("src/main.cpp"), content)
+        # Local includes produce ImportInfo (imports edges between modules), not service nodes.
+        # Phantom service nodes for include targets must NOT be created.
+        module_paths = {i.module_path for i in result.imports}
+        assert "mylib" in module_paths
+        assert "utils.helper" in module_paths
         ids = {n.id for n in result.nodes}
-        assert "service:mylib" in ids
-        assert "service:helper" in ids
+        assert "service:mylib" not in ids
+        assert "service:helper" not in ids
 
     def test_system_include_ignored(self, recognizer):
         content = '''
@@ -1188,7 +1421,8 @@ class TestCppRecognizer:
         # System includes should NOT produce nodes
         assert not any("stdio" in nid for nid in ids)
 
-    def test_struct_definition(self, recognizer):
+    def test_struct_definition_no_service_node(self, recognizer):
+        """C structs are data structures, not services — no service node should be created."""
         content = '''
 struct Connection {
     int fd;
@@ -1197,9 +1431,21 @@ struct Connection {
 '''
         result = recognizer.recognize(Path("network.h"), content)
         ids = {n.id for n in result.nodes}
-        assert "service:Connection" in ids
+        assert "service:Connection" not in ids
 
-    def test_class_definition(self, recognizer):
+    def test_plain_class_no_service_node(self, recognizer):
+        """A C++ class without inheritance is not a service — no service node should be created."""
+        content = '''
+class Buffer {
+    char data[1024];
+};
+'''
+        result = recognizer.recognize(Path("buffer.h"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:Buffer" not in ids
+
+    def test_class_with_inheritance_creates_service_node(self, recognizer):
+        """A C++ class with public inheritance is likely a service implementation."""
         content = '''
 class HttpServer : public BaseServer {
     void handle();
@@ -1237,7 +1483,8 @@ curl_easy_setopt(curl, CURLOPT_URL, "https://api.example.com/data");
         ids = {n.id for n in result.nodes}
         assert any("api.example.com" in nid for nid in ids)
 
-    def test_function_definition(self, recognizer):
+    def test_function_definition_no_service_node(self, recognizer):
+        """C/C++ functions are NOT services — no standalone service node should be created."""
         content = '''
 void process_request(int fd) {
     // do stuff
@@ -1245,9 +1492,10 @@ void process_request(int fd) {
 '''
         result = recognizer.recognize(Path("handler.c"), content)
         ids = {n.id for n in result.nodes}
-        assert "service:process_request" in ids
+        assert "service:process_request" not in ids
 
-    def test_control_flow_excluded(self, recognizer):
+    def test_control_flow_not_captured(self, recognizer):
+        """Control-flow keywords must never appear as service nodes."""
         content = '''
 void main() {
     if (x > 0) {
@@ -1260,9 +1508,9 @@ void main() {
 '''
         result = recognizer.recognize(Path("main.c"), content)
         ids = {n.id for n in result.nodes}
-        # 'if', 'while', 'return' should NOT be captured as functions
         assert "service:if" not in ids
         assert "service:while" not in ids
+        assert "service:main" not in ids
 
     def test_define_macro(self, recognizer):
         content = '''
@@ -1284,21 +1532,22 @@ void main() {
         ids = {n.id for n in result.nodes}
         assert "config:MY_HEADER_H_" not in ids
 
-    def test_include_creates_source_node(self, recognizer):
-        """A file with only #include directives should create a node for the file itself."""
+    def test_include_produces_import_info_not_service_node(self, recognizer):
+        """#include directives should produce ImportInfo for module-level edges, not service nodes."""
         content = '''
 #include "networking.h"
 #include "utils/logging.h"
 '''
         result = recognizer.recognize(Path("src/client.cpp"), content)
+        module_paths = {i.module_path for i in result.imports}
+        assert "networking" in module_paths
+        assert "utils.logging" in module_paths
+        # The scanner creates a module node for the file itself — the recognizer must not
         ids = {n.id for n in result.nodes}
-        assert "service:client" in ids
-        source_node = next(n for n in result.nodes if n.id == "service:client")
-        assert source_node.type == NodeType.SERVICE
-        assert source_node.metadata.get("kind") == "compilation_unit"
+        assert "service:client" not in ids
 
-    def test_include_source_node_not_duplicated_when_class_exists(self, recognizer):
-        """A file whose stem matches a class name should not produce duplicate nodes."""
+    def test_plain_class_with_include_no_phantom_nodes(self, recognizer):
+        """A plain class (no inheritance) with an include must not produce any service nodes."""
         content = '''
 #include "foo.h"
 class TestCom {
@@ -1307,8 +1556,8 @@ class TestCom {
 '''
         result = recognizer.recognize(Path("TestCom.cpp"), content)
         ids = [n.id for n in result.nodes]
-        testcom_nodes = [nid for nid in ids if nid == "service:TestCom"]
-        assert len(testcom_nodes) == 1
+        testcom_nodes = [nid for nid in ids if "service:TestCom" in nid]
+        assert len(testcom_nodes) == 0
 
 
 class TestPhpRecognizer:

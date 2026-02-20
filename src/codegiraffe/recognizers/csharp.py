@@ -24,8 +24,9 @@ from codegiraffe.schema import EdgeType, NodeType
 # ---------------------------------------------------------------------------
 
 # ASP.NET route attributes: [HttpGet("/path")], [HttpPost("/path")], etc.
+# Group 1: verb (Get/Post/Put/Delete/Patch), Group 2: route path
 _CS_HTTP_ATTR_RE = re.compile(
-    r"""\[Http(?:Get|Post|Put|Delete|Patch)\s*\(\s*"([^"]*)"\s*\)""",
+    r"""\[Http(Get|Post|Put|Delete|Patch)\s*\(\s*"([^"]*)"\s*\)""",
 )
 
 # [Route("path")] attribute
@@ -119,7 +120,8 @@ class CSharpRecognizer:
         # --- Endpoints (ASP.NET Http attributes) ---
         seen_routes: set[str] = set()
         for match in _CS_HTTP_ATTR_RE.finditer(content):
-            route_path = match.group(1)
+            verb = match.group(1).upper()  # e.g. "GET", "POST"
+            route_path = match.group(2)
             if route_path not in seen_routes:
                 seen_routes.add(route_path)
                 node_id = f"endpoint:{route_path}"
@@ -129,14 +131,17 @@ class CSharpRecognizer:
                         type=NodeType.ENDPOINT,
                         label=route_path,
                         file_path=rel_path,
-                        metadata={"route": route_path, "framework": "aspnet"},
+                        metadata={"route": route_path, "framework": "aspnet", "http_method": verb},
                     )
                 )
                 endpoint_ids.append(node_id)
 
         # --- Endpoints ([Route] attribute) ---
+        # Skip class-level route templates containing [controller] tokens (runtime-resolved by ASP.NET)
         for match in _CS_ROUTE_ATTR_RE.finditer(content):
             route_path = match.group(1)
+            if "[controller]" in route_path.lower():
+                continue
             if route_path not in seen_routes:
                 seen_routes.add(route_path)
                 node_id = f"endpoint:{route_path}"
@@ -146,7 +151,7 @@ class CSharpRecognizer:
                         type=NodeType.ENDPOINT,
                         label=route_path,
                         file_path=rel_path,
-                        metadata={"route": route_path, "framework": "aspnet"},
+                        metadata={"route": route_path, "framework": "aspnet", "http_method": "ANY"},
                     )
                 )
                 endpoint_ids.append(node_id)
