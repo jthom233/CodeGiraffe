@@ -59,7 +59,8 @@ def get_default_registry() -> RecognizerRegistry:
     """Return the default recognizer registry with built-in recognizers.
 
     Lazily creates and populates the registry on first call. Registers
-    recognizers for Python, TypeScript, Go, Rust, Java, C#, C/C++, PHP, and Ruby files.
+    recognizers for Python, TypeScript, Go, Rust, Java, C#, C/C++, PHP, Ruby,
+    and Lua files.
     """
     global _default_registry
     if _default_registry is None:
@@ -69,6 +70,7 @@ def get_default_registry() -> RecognizerRegistry:
             CSharpRecognizer,
             GoRecognizer,
             JavaRecognizer,
+            LuaRecognizer,
             PhpRecognizer,
             RubyRecognizer,
             RustRecognizer,
@@ -89,6 +91,7 @@ def get_default_registry() -> RecognizerRegistry:
         )
         _default_registry.register(PhpRecognizer(), extensions=[".php"])
         _default_registry.register(RubyRecognizer(), extensions=[".rb"])
+        _default_registry.register(LuaRecognizer(), extensions=[".lua"])
     return _default_registry
 
 

@@ -4,6 +4,7 @@ from codegiraffe.recognizers.cpp import CppRecognizer
 from codegiraffe.recognizers.csharp import CSharpRecognizer
 from codegiraffe.recognizers.go import GoRecognizer
 from codegiraffe.recognizers.java import JavaRecognizer
+from codegiraffe.recognizers.lua import LuaRecognizer
 from codegiraffe.recognizers.php import PhpRecognizer
 from codegiraffe.recognizers.ruby import RubyRecognizer
 from codegiraffe.recognizers.rust import RustRecognizer
@@ -14,6 +15,7 @@ __all__ = [
     "CSharpRecognizer",
     "TypeScriptRecognizer",
     "GoRecognizer",
+    "LuaRecognizer",
     "RustRecognizer",
     "JavaRecognizer",
     "PhpRecognizer",
