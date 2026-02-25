@@ -426,18 +426,28 @@ def codegiraffe_context_for(
 
 
 @mcp.tool()
-def codegiraffe_detect_drift(project_path: str) -> str:
+def codegiraffe_detect_drift(project_path: str, scanner_mode: str = "hybrid") -> str:
     """Detect drift between the architecture graph and the actual codebase.
 
     Re-scans the project and compares the results against the stored graph.
     Reports nodes that exist in the graph but not in code, nodes found in
     code but missing from the graph, and potential renames.
 
+    Parameters
+    ----------
+    project_path:
+        Filesystem path to the project root.
+    scanner_mode:
+        Scanner registry to use: ``"hybrid"`` (default), ``"ast"``, or
+        ``"regex"``.  Should match the mode used when the graph was built
+        with ``codegiraffe_init`` so that AST-discovered nodes are not
+        falsely reported as drift.
+
     Returns a JSON array of drift records.
     """
     try:
         graph = _ensure_graph(project_path)
-        drifts = detect_drift(graph, project_path)
+        drifts = detect_drift(graph, project_path, scanner_mode=scanner_mode)
         return json.dumps(drifts, indent=2)
     except Exception as exc:
         return f"Error detecting drift: {exc}"

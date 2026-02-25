@@ -29,6 +29,12 @@ _CS_HTTP_ATTR_RE = re.compile(
     r"""\[Http(Get|Post|Put|Delete|Patch)\s*\(\s*"([^"]*)"\s*\)""",
 )
 
+# ASP.NET verb-only attributes with no route argument: [HttpGet], [HttpPost], etc.
+# Group 1: verb (Get/Post/Put/Delete/Patch)
+_CS_HTTP_VERB_ONLY_RE = re.compile(
+    r"""\[Http(Get|Post|Put|Delete|Patch)\s*\]""",
+)
+
 # [Route("path")] attribute
 _CS_ROUTE_ATTR_RE = re.compile(
     r"""\[Route\s*\(\s*"([^"]*)"\s*\)""",
@@ -117,44 +123,97 @@ class CSharpRecognizer:
         table_ids: list[str] = []
         captured_class_names: set[str] = set()
 
-        # --- Endpoints (ASP.NET Http attributes) ---
+        # --- Endpoints (ASP.NET route composition) ---
+        # Two-pass approach: first extract class-level route prefix, then compose
+        # method-level routes against it.
         seen_routes: set[str] = set()
-        for match in _CS_HTTP_ATTR_RE.finditer(content):
-            verb = match.group(1).upper()  # e.g. "GET", "POST"
-            route_path = match.group(2)
-            if route_path not in seen_routes:
-                seen_routes.add(route_path)
-                node_id = f"endpoint:{route_path}"
-                nodes.append(
-                    Node(
-                        id=node_id,
-                        type=NodeType.ENDPOINT,
-                        label=route_path,
-                        file_path=rel_path,
-                        metadata={"route": route_path, "framework": "aspnet", "http_method": verb},
-                    )
-                )
-                endpoint_ids.append(node_id)
+        lines = content.split('\n')
 
-        # --- Endpoints ([Route] attribute) ---
-        # Skip class-level route templates containing [controller] tokens (runtime-resolved by ASP.NET)
-        for match in _CS_ROUTE_ATTR_RE.finditer(content):
-            route_path = match.group(1)
-            if "[controller]" in route_path.lower():
-                continue
-            if route_path not in seen_routes:
-                seen_routes.add(route_path)
-                node_id = f"endpoint:{route_path}"
-                nodes.append(
-                    Node(
-                        id=node_id,
-                        type=NodeType.ENDPOINT,
-                        label=route_path,
-                        file_path=rel_path,
-                        metadata={"route": route_path, "framework": "aspnet", "http_method": "ANY"},
+        # Pass 1: Find the class-level [Route("...")] prefix.
+        # A class-level [Route] appears on a line before a `class` declaration
+        # (within a small look-ahead window). Skip templates that contain
+        # [controller] tokens since those are resolved at runtime by ASP.NET.
+        class_route_prefix = ""
+        class_route_lines: set[int] = set()
+        for i, line in enumerate(lines):
+            route_match = _CS_ROUTE_ATTR_RE.search(line)
+            if route_match:
+                route_path = route_match.group(1)
+                if "[controller]" in route_path.lower():
+                    class_route_lines.add(i)
+                    continue
+                # Look ahead up to 5 lines for a class declaration
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    if re.search(r'\bclass\b', lines[j]):
+                        class_route_prefix = route_path.rstrip('/')
+                        class_route_lines.add(i)
+                        break
+
+        # Pass 2: Find method-level Http verb attributes and compose full routes.
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Match [HttpVerb("route")] — verb + explicit route string
+            http_match = _CS_HTTP_ATTR_RE.search(stripped)
+            if http_match:
+                verb = http_match.group(1).upper()
+                method_route = http_match.group(2)
+                if class_route_prefix and not method_route.startswith('/'):
+                    full_route = f"{class_route_prefix}/{method_route}"
+                else:
+                    full_route = method_route
+                if full_route not in seen_routes:
+                    seen_routes.add(full_route)
+                    node_id = f"endpoint:/{full_route}" if not full_route.startswith('/') else f"endpoint:{full_route}"
+                    nodes.append(
+                        Node(
+                            id=node_id,
+                            type=NodeType.ENDPOINT,
+                            label=full_route,
+                            file_path=rel_path,
+                            metadata={"route": full_route, "framework": "aspnet", "http_method": verb},
+                        )
                     )
-                )
-                endpoint_ids.append(node_id)
+                    endpoint_ids.append(node_id)
+                continue
+
+            # Match [HttpVerb] with no route argument — route is just the class prefix
+            verb_only_match = _CS_HTTP_VERB_ONLY_RE.search(stripped)
+            if verb_only_match:
+                verb = verb_only_match.group(1).upper()
+                full_route = class_route_prefix if class_route_prefix else ""
+                if full_route and full_route not in seen_routes:
+                    seen_routes.add(full_route)
+                    node_id = f"endpoint:/{full_route}" if not full_route.startswith('/') else f"endpoint:{full_route}"
+                    nodes.append(
+                        Node(
+                            id=node_id,
+                            type=NodeType.ENDPOINT,
+                            label=full_route,
+                            file_path=rel_path,
+                            metadata={"route": full_route, "framework": "aspnet", "http_method": verb},
+                        )
+                    )
+                    endpoint_ids.append(node_id)
+                continue
+
+            # Match non-class-level [Route("...")] as standalone endpoints
+            route_match = _CS_ROUTE_ATTR_RE.search(stripped)
+            if route_match and i not in class_route_lines:
+                route_path = route_match.group(1)
+                if "[controller]" not in route_path.lower() and route_path not in seen_routes:
+                    seen_routes.add(route_path)
+                    node_id = f"endpoint:{route_path}"
+                    nodes.append(
+                        Node(
+                            id=node_id,
+                            type=NodeType.ENDPOINT,
+                            label=route_path,
+                            file_path=rel_path,
+                            metadata={"route": route_path, "framework": "aspnet", "http_method": "ANY"},
+                        )
+                    )
+                    endpoint_ids.append(node_id)
 
         # --- Database tables (Entity Framework [Table] attribute) ---
         seen_tables: set[str] = set()

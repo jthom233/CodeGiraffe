@@ -1256,6 +1256,35 @@ class CSharpASTRecognizer:
     # Node detection
     # -----------------------------------------------------------------------
 
+    def _get_class_route_prefix(self, attr_node: Any) -> str:
+        """Walk up from an attribute node to find the enclosing class's [Route] prefix.
+
+        In the C# tree-sitter grammar, attribute_list nodes for a class are direct
+        children of the class_declaration node (before the identifier and body).
+        """
+        node = attr_node
+        while node is not None:
+            if node.type == "class_declaration":
+                # attribute_list nodes are direct children of class_declaration
+                for child in node.children:
+                    if child.type == "attribute_list":
+                        for attr_child in child.children:
+                            if attr_child.type == "attribute":
+                                name_node = None
+                                args_node = None
+                                for sub in attr_child.children:
+                                    if sub.type in ("identifier", "name"):
+                                        name_node = sub
+                                    elif sub.type == "attribute_argument_list":
+                                        args_node = sub
+                                if name_node and _text(name_node) == "Route" and args_node:
+                                    m = re.search(r'"([^"]*)"', _text(args_node))
+                                    if m:
+                                        return m.group(1).rstrip("/")
+                return ""
+            node = node.parent
+        return ""
+
     def _find_attributes(
         self,
         tree: Any,
@@ -1280,10 +1309,15 @@ class CSharpASTRecognizer:
                 m = re.search(r'"([^"]*)"', attr_args)
                 if m:
                     route = m.group(1)
+                    # Compose with class-level [Route] prefix
+                    class_prefix = self._get_class_route_prefix(name_nodes[0])
+                    if class_prefix and not route.startswith("/"):
+                        route = f"{class_prefix}/{route}"
                     if route not in seen_routes:
                         seen_routes.add(route)
+                        node_id = f"endpoint:/{route}" if not route.startswith("/") else f"endpoint:{route}"
                         nodes.append(Node(
-                            id=f"endpoint:{route}", type=NodeType.ENDPOINT,
+                            id=node_id, type=NodeType.ENDPOINT,
                             label=route, file_path=rel,
                             metadata={"route": route, "annotation": attr_name},
                         ))
@@ -1292,13 +1326,29 @@ class CSharpASTRecognizer:
                 m = re.search(r'"([^"]*)"', attr_args)
                 if m:
                     route = m.group(1)
-                    if route not in seen_routes:
-                        seen_routes.add(route)
-                        nodes.append(Node(
-                            id=f"endpoint:{route}", type=NodeType.ENDPOINT,
-                            label=route, file_path=rel,
-                            metadata={"route": route, "annotation": "Route"},
-                        ))
+                    # Only emit method-level [Route] attributes as endpoint nodes.
+                    # Class-level [Route] is a prefix only — skip it here.
+                    attr_node = name_nodes[0].parent
+                    parent = attr_node
+                    while parent is not None:
+                        if parent.type == "class_declaration":
+                            # Class-level route — skip, used only as a prefix
+                            break
+                        if parent.type in ("method_declaration", "property_declaration"):
+                            # Method-level [Route] — compose with class prefix
+                            class_prefix = self._get_class_route_prefix(name_nodes[0])
+                            if class_prefix and not route.startswith("/"):
+                                route = f"{class_prefix}/{route}"
+                            if route not in seen_routes:
+                                seen_routes.add(route)
+                                node_id = f"endpoint:/{route}" if not route.startswith("/") else f"endpoint:{route}"
+                                nodes.append(Node(
+                                    id=node_id, type=NodeType.ENDPOINT,
+                                    label=route, file_path=rel,
+                                    metadata={"route": route, "annotation": "Route"},
+                                ))
+                            break
+                        parent = parent.parent
 
             elif attr_name == "Table":
                 m = re.search(r'"(\w+)"', attr_args)
@@ -1312,7 +1362,8 @@ class CSharpASTRecognizer:
                             metadata={"table_name": tbl, "orm": "entity_framework"},
                         ))
 
-        # [ApiController] marker (no args) — find the class it decorates
+        # Attributes without argument lists — handles [ApiController] and argumentless
+        # HTTP verb attributes like [HttpGet], [HttpPost], etc.
         for _pat, caps in _query_matches(self._language, _CS_ATTRIBUTE_NO_ARGS_QUERY, tree.root_node):
             name_nodes = caps.get("attr_name", [])
             if not name_nodes:
@@ -1342,6 +1393,28 @@ class CSharpASTRecognizer:
                                         metadata={"class_name": cls_name, "kind": "controller"},
                                     ))
                                 break
+            elif attr_name in _CS_HTTP_ATTR_NAMES:
+                # [HttpGet] / [HttpPost] / etc. with NO route argument.
+                # The no-args query also matches attributes that DO have args, so guard
+                # against that by checking the attribute node's children directly.
+                attr_node = name_nodes[0].parent  # the attribute node
+                has_args = (
+                    attr_node is not None
+                    and any(c.type == "attribute_argument_list" for c in attr_node.children)
+                )
+                if has_args:
+                    # Already handled by the with-args query above
+                    continue
+                # Route is just the class-level prefix
+                class_prefix = self._get_class_route_prefix(name_nodes[0])
+                if class_prefix and class_prefix not in seen_routes:
+                    seen_routes.add(class_prefix)
+                    node_id = f"endpoint:/{class_prefix}" if not class_prefix.startswith("/") else f"endpoint:{class_prefix}"
+                    nodes.append(Node(
+                        id=node_id, type=NodeType.ENDPOINT,
+                        label=class_prefix, file_path=rel,
+                        metadata={"route": class_prefix, "annotation": attr_name},
+                    ))
 
     def _find_dbset(self, tree: Any, rel: str, nodes: list[Node]) -> None:
         """Detect DbSet<T> property declarations -> database_table nodes."""
