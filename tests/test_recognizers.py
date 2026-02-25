@@ -2646,3 +2646,243 @@ public class SecretEngine : ISecretEngine, IDisposable {
         assert node is not None
         implements = node.metadata.get("implements", [])
         assert "ISecretEngine" in implements
+
+
+# ---------------------------------------------------------------------------
+# CsprojRecognizer tests
+# ---------------------------------------------------------------------------
+
+
+class TestCsprojRecognizer:
+    """Tests for the .csproj recognizer."""
+
+    @pytest.fixture
+    def recognizer(self):
+        from codegiraffe.recognizers.csproj import CsprojRecognizer
+        return CsprojRecognizer()
+
+    def test_sdk_style_package_references(self, recognizer):
+        """SDK-style .csproj with PackageReference elements emits depends_on edges."""
+        content = '''<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Autofac" Version="7.1.0" />
+  </ItemGroup>
+</Project>'''
+        result = recognizer.recognize(Path("MyApp/MyApp.csproj"), content)
+
+        # Project module node must exist.
+        project_node = next((n for n in result.nodes if n.id == "mod:MyApp"), None)
+        assert project_node is not None, "Expected mod:MyApp project node"
+        assert project_node.metadata["kind"] == "project"
+        assert project_node.metadata["language"] == "csharp"
+        assert project_node.metadata["target_framework"] == "net8.0"
+
+        # Dependency edges.
+        edge_targets = {e.target for e in result.edges}
+        assert "mod:Newtonsoft.Json" in edge_targets
+        assert "mod:Autofac" in edge_targets
+
+        # All edges are depends_on from the project node.
+        from codegiraffe.schema import EdgeType
+        for edge in result.edges:
+            assert edge.source == "mod:MyApp"
+            assert edge.type == EdgeType.DEPENDS_ON
+            assert edge.metadata["reference_type"] == "nuget"
+
+    def test_sdk_style_package_reference_version_captured(self, recognizer):
+        """Version attribute from PackageReference is stored in edge metadata."""
+        content = '''<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Serilog" Version="3.1.1" />
+  </ItemGroup>
+</Project>'''
+        result = recognizer.recognize(Path("Svc/Svc.csproj"), content)
+        edge = next((e for e in result.edges if e.target == "mod:Serilog"), None)
+        assert edge is not None
+        assert edge.metadata.get("version") == "3.1.1"
+
+    def test_old_style_msbuild_namespace(self, recognizer):
+        """Old-style .csproj with MSBuild XML namespace is parsed correctly."""
+        content = '''<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NUnit" Version="3.13.3" />
+  </ItemGroup>
+</Project>'''
+        result = recognizer.recognize(Path("Legacy/Legacy.csproj"), content)
+        project_node = next((n for n in result.nodes if n.id == "mod:Legacy"), None)
+        assert project_node is not None
+        edge = next((e for e in result.edges if e.target == "mod:NUnit"), None)
+        assert edge is not None
+        assert edge.metadata["reference_type"] == "nuget"
+
+    def test_project_reference_detection(self, recognizer):
+        """ProjectReference elements emit depends_on edges with reference_type=project_reference."""
+        content = '''<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\\Thycotic.ihawu.Business\\Thycotic.ihawu.Business.csproj" />
+    <ProjectReference Include="..\\Thycotic.ihawu.Entities\\Thycotic.ihawu.Entities.csproj" />
+  </ItemGroup>
+</Project>'''
+        result = recognizer.recognize(Path("Web/Thycotic.ihawu.Web.csproj"), content)
+
+        edge_targets = {e.target for e in result.edges}
+        assert "mod:Thycotic.ihawu.Business" in edge_targets
+        assert "mod:Thycotic.ihawu.Entities" in edge_targets
+
+        for edge in result.edges:
+            assert edge.metadata["reference_type"] == "project_reference"
+            assert edge.type == "depends_on"
+
+    def test_target_framework_extraction(self, recognizer):
+        """TargetFramework is extracted and stored in node metadata."""
+        content = '''<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+</Project>'''
+        result = recognizer.recognize(Path("Lib/MyLib.csproj"), content)
+        node = next((n for n in result.nodes if n.id == "mod:MyLib"), None)
+        assert node is not None
+        assert node.metadata["target_framework"] == "net9.0"
+
+    def test_target_frameworks_plural(self, recognizer):
+        """TargetFrameworks (plural) is also extracted."""
+        content = '''<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net48</TargetFrameworks>
+  </PropertyGroup>
+</Project>'''
+        result = recognizer.recognize(Path("Multi/Multi.csproj"), content)
+        node = next((n for n in result.nodes if n.id == "mod:Multi"), None)
+        assert node is not None
+        assert node.metadata["target_framework"] == "net8.0;net48"
+
+    def test_empty_csproj(self, recognizer):
+        """A minimal/empty .csproj still emits a project module node."""
+        content = '<Project Sdk="Microsoft.NET.Sdk"></Project>'
+        result = recognizer.recognize(Path("Empty/Empty.csproj"), content)
+        assert any(n.id == "mod:Empty" for n in result.nodes)
+        assert result.edges == []
+
+    def test_broken_xml_returns_empty(self, recognizer):
+        """Malformed XML returns an empty ScanResult without raising."""
+        content = "<Project><this is broken"
+        result = recognizer.recognize(Path("Bad/Bad.csproj"), content)
+        assert result.nodes == []
+        assert result.edges == []
+
+    def test_assembly_name_derived_from_filename(self, recognizer):
+        """Assembly name (and mod: ID) is derived from the .csproj filename stem."""
+        content = '<Project Sdk="Microsoft.NET.Sdk"></Project>'
+        result = recognizer.recognize(
+            Path("src/Thycotic.ihawu.Business.Logic/Thycotic.ihawu.Business.Logic.csproj"),
+            content,
+        )
+        assert any(n.id == "mod:Thycotic.ihawu.Business.Logic" for n in result.nodes)
+
+
+# ---------------------------------------------------------------------------
+# PackagesConfigRecognizer tests
+# ---------------------------------------------------------------------------
+
+
+class TestPackagesConfigRecognizer:
+    """Tests for the packages.config recognizer."""
+
+    @pytest.fixture
+    def recognizer(self):
+        from codegiraffe.recognizers.packages_config import PackagesConfigRecognizer
+        return PackagesConfigRecognizer()
+
+    def test_basic_packages_config(self, recognizer, tmp_path):
+        """Standard packages.config with multiple packages emits depends_on edges."""
+        # Create a sibling .csproj so the project name can be resolved.
+        (tmp_path / "MyLegacyApp.csproj").write_text("<Project />")
+        config_path = tmp_path / "packages.config"
+
+        content = '''<?xml version="1.0" encoding="utf-8"?>
+<packages>
+  <package id="Newtonsoft.Json" version="10.0.3" targetFramework="net48" />
+  <package id="NUnit" version="3.13.0" targetFramework="net48" />
+  <package id="Autofac" version="6.4.0" targetFramework="net48" />
+</packages>'''
+
+        result = recognizer.recognize(config_path, content)
+
+        # Source project node.
+        project_node = next((n for n in result.nodes if n.id == "mod:MyLegacyApp"), None)
+        assert project_node is not None, "Expected stub project node for MyLegacyApp"
+        assert project_node.metadata["kind"] == "project"
+
+        edge_targets = {e.target for e in result.edges}
+        assert "mod:Newtonsoft.Json" in edge_targets
+        assert "mod:NUnit" in edge_targets
+        assert "mod:Autofac" in edge_targets
+
+        # Edges must carry version and reference_type.
+        nj_edge = next(e for e in result.edges if e.target == "mod:Newtonsoft.Json")
+        assert nj_edge.metadata["version"] == "10.0.3"
+        assert nj_edge.metadata["reference_type"] == "nuget"
+
+    def test_non_packages_config_ignored(self, recognizer):
+        """Recognizer ignores .config files that are not named packages.config."""
+        content = '''<?xml version="1.0"?><configuration><startup /></configuration>'''
+        for name in ("app.config", "web.config", "NLog.config", "connectionStrings.config"):
+            result = recognizer.recognize(Path(name), content)
+            assert result.nodes == [], f"Expected empty result for {name}"
+            assert result.edges == [], f"Expected empty result for {name}"
+
+    def test_packages_config_case_insensitive_name(self, recognizer, tmp_path):
+        """Filename check is case-insensitive — Packages.Config is treated the same as packages.config."""
+        (tmp_path / "MyApp.csproj").write_text("<Project />")
+        content = '<packages><package id="Serilog" version="3.0.0" /></packages>'
+        result = recognizer.recognize(tmp_path / "Packages.Config", content)
+        # Case-insensitive match: Packages.Config == packages.config, so it IS processed.
+        assert any(n.id == "mod:MyApp" for n in result.nodes)
+        assert any(e.target == "mod:Serilog" for e in result.edges)
+
+    def test_association_with_sibling_csproj(self, recognizer, tmp_path):
+        """packages.config is associated with the sibling .csproj in the same dir."""
+        (tmp_path / "Thycotic.ihawu.Web.csproj").write_text("<Project />")
+        content = '<packages><package id="NSubstitute" version="4.0.0" /></packages>'
+        result = recognizer.recognize(tmp_path / "packages.config", content)
+
+        assert any(n.id == "mod:Thycotic.ihawu.Web" for n in result.nodes)
+        edges = [e for e in result.edges if e.source == "mod:Thycotic.ihawu.Web"]
+        assert len(edges) == 1
+        assert edges[0].target == "mod:NSubstitute"
+
+    def test_no_sibling_csproj_falls_back_to_dirname(self, recognizer, tmp_path):
+        """When no .csproj exists, project name falls back to the directory name."""
+        content = '<packages><package id="log4net" version="2.0.15" /></packages>'
+        result = recognizer.recognize(tmp_path / "packages.config", content)
+
+        # The project ID should be based on the parent directory name.
+        dir_name = tmp_path.name
+        assert any(n.id == f"mod:{dir_name}" for n in result.nodes)
+
+    def test_broken_xml_returns_stub_node_only(self, recognizer, tmp_path):
+        """Malformed XML returns the stub project node but no package edges."""
+        (tmp_path / "MyApp.csproj").write_text("<Project />")
+        content = "<packages><this is broken"
+        result = recognizer.recognize(tmp_path / "packages.config", content)
+        # Stub node emitted.
+        assert any(n.id == "mod:MyApp" for n in result.nodes)
+        # No edges (XML parse failed).
+        assert result.edges == []
+
+    def test_empty_packages_config(self, recognizer, tmp_path):
+        """An empty packages element emits the project stub but no edges."""
+        (tmp_path / "App.csproj").write_text("<Project />")
+        content = '<packages></packages>'
+        result = recognizer.recognize(tmp_path / "packages.config", content)
+        assert any(n.id == "mod:App" for n in result.nodes)
+        assert result.edges == []

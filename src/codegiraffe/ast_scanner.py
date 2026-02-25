@@ -2066,8 +2066,10 @@ def get_hybrid_registry() -> "RecognizerRegistry":
     from codegiraffe.recognizers import (
         CppRecognizer,
         CSharpRecognizer,
+        CsprojRecognizer,
         GoRecognizer,
         JavaRecognizer,
+        PackagesConfigRecognizer,
         PhpRecognizer,
         RubyRecognizer,
         RustRecognizer,
@@ -2091,6 +2093,8 @@ def get_hybrid_registry() -> "RecognizerRegistry":
     registry.register(CppRecognizer(), extensions=[".c", ".cpp", ".h", ".hpp", ".cc", ".cxx"])
     registry.register(PhpRecognizer(), extensions=[".php"])
     registry.register(RubyRecognizer(), extensions=[".rb"])
+    registry.register(CsprojRecognizer(), extensions=[".csproj"])
+    registry.register(PackagesConfigRecognizer(), extensions=[".config"])
 
     # 2. AST recognizers on top (same extensions as get_ast_registry())
     registry.register(PythonASTRecognizer(), extensions=[".py", ".pyi"])

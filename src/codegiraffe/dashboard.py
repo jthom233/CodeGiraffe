@@ -447,7 +447,13 @@ body {
     implements: '#9B59B6', produces: '#8E44AD', consumes_contract: '#9B59B6',
     validates: '#27AE60', violates: '#E74C3C', depends_on: '#7af74e',
     uses: '#4ef7f7', belongs_to: '#f76a4e', constrains: '#2196F3',
-    supersedes: '#9E9E9E', default: '#2a3a5e'
+    supersedes: '#9E9E9E', reads: '#5DADE2', writes: '#E74C3C',
+    publishes: '#F39C12', consumes: '#1ABC9C', configures: '#D4AC0D',
+    owns: '#BDC3C7', triggers: '#E91E63',
+    cross_repo_depends_on: '#FF6B6B', cross_repo_calls: '#FF9F43',
+    cross_repo_publishes: '#FECA57', cross_repo_consumes: '#54A0FF',
+    motivated_by: '#A29BFE', tested_by: '#00D2D3',
+    default: '#2a3a5e'
   };
 
   const DEFAULT_COLOR = '#4A90D9';
@@ -798,8 +804,24 @@ body {
       consumes_contract: { color: '#9B59B6', style: 'dashed' },
       validates: { color: '#27AE60', style: 'dotted' },
       violates: { color: '#E74C3C', style: '' },
+      depends_on: { color: '#7af74e', style: '' },
+      uses: { color: '#4ef7f7', style: '' },
+      belongs_to: { color: '#f76a4e', style: 'dotted' },
       constrains: { color: '#2196F3', style: 'dotted' },
       supersedes: { color: '#9E9E9E', style: 'dashed' },
+      reads: { color: '#5DADE2', style: '' },
+      writes: { color: '#E74C3C', style: '' },
+      publishes: { color: '#F39C12', style: 'dashed' },
+      consumes: { color: '#1ABC9C', style: 'dashed' },
+      configures: { color: '#D4AC0D', style: 'dotted' },
+      owns: { color: '#BDC3C7', style: 'dotted' },
+      triggers: { color: '#E91E63', style: '' },
+      cross_repo_depends_on: { color: '#FF6B6B', style: 'dashed' },
+      cross_repo_calls: { color: '#FF9F43', style: 'dashed' },
+      cross_repo_publishes: { color: '#FECA57', style: 'dashed' },
+      cross_repo_consumes: { color: '#54A0FF', style: 'dashed' },
+      motivated_by: { color: '#A29BFE', style: 'dotted' },
+      tested_by: { color: '#00D2D3', style: 'dotted' },
       default: { color: '#2a3a5e', style: '' }
     };
     Object.keys(edgeStyles).forEach(function(t) {
