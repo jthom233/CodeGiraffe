@@ -10,6 +10,7 @@ from codegiraffe.recognizers.packages_config import PackagesConfigRecognizer
 from codegiraffe.recognizers.php import PhpRecognizer
 from codegiraffe.recognizers.ruby import RubyRecognizer
 from codegiraffe.recognizers.rust import RustRecognizer
+from codegiraffe.recognizers.sql import SqlRecognizer
 from codegiraffe.recognizers.typescript import TypeScriptRecognizer
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "JavaRecognizer",
     "PhpRecognizer",
     "RubyRecognizer",
+    "SqlRecognizer",
 ]

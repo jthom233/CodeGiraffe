@@ -60,7 +60,7 @@ def get_default_registry() -> RecognizerRegistry:
 
     Lazily creates and populates the registry on first call. Registers
     recognizers for Python, TypeScript, Go, Rust, Java, C#, C/C++, PHP, Ruby,
-    and Lua files.
+    Lua, and SQL files.
     """
     global _default_registry
     if _default_registry is None:
@@ -76,6 +76,7 @@ def get_default_registry() -> RecognizerRegistry:
             PhpRecognizer,
             RubyRecognizer,
             RustRecognizer,
+            SqlRecognizer,
             TypeScriptRecognizer,
         )
         from codegiraffe.scanner import PythonRecognizer
@@ -96,6 +97,7 @@ def get_default_registry() -> RecognizerRegistry:
         _default_registry.register(LuaRecognizer(), extensions=[".lua"])
         _default_registry.register(CsprojRecognizer(), extensions=[".csproj"])
         _default_registry.register(PackagesConfigRecognizer(), extensions=[".config"])
+        _default_registry.register(SqlRecognizer(), extensions=[".sql"])
     return _default_registry
 
 

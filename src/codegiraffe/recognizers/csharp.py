@@ -103,6 +103,33 @@ _CS_ALREADY_CAPTURED_BASES = frozenset({
     "IRequestHandler", "INotificationHandler", "ICommandHandler",
 })
 
+# ---------------------------------------------------------------------------
+# Cross-language SQL reference patterns (string literals in C# code)
+# ---------------------------------------------------------------------------
+
+# Matches string literals (single or double quoted) that contain a SQL table
+# reference with the ``tb`` prefix convention (e.g. "SELECT * FROM tbSecret").
+# Group 1: the captured table name (tbXxx...)
+_CS_SQL_TABLE_IN_STRING_RE = re.compile(
+    r"""["'](?:[^"']*\b(?:FROM|JOIN|INTO|UPDATE|DELETE\s+FROM)\s+)(tb[A-Z]\w+)""",
+    re.IGNORECASE,
+)
+
+# Matches bare ``tb[A-Z]\w+`` inside any string literal — catches direct table
+# name references like "tbSecret" used as parameters to helper methods.
+# Group 1: the table name
+_CS_SQL_TABLE_BARE_RE = re.compile(
+    r"""["'][^"']*\b(tb[A-Z]\w+)[^"']*["']""",
+)
+
+# Matches stored procedure / function names inside string literals.
+# Covers ``proc_`` and ``sp_`` prefixes.
+# Group 1: the procedure name
+_CS_SQL_PROC_IN_STRING_RE = re.compile(
+    r"""["'][^"']*\b((?:proc|sp)_[A-Za-z]\w+)[^"']*["']""",
+    re.IGNORECASE,
+)
+
 
 def _cs_regex_infer_kind(class_name: str) -> str:
     """Infer a descriptive ``kind`` string from a C# class name suffix."""
@@ -532,5 +559,60 @@ class CSharpRecognizer:
             for base in [b.strip().split("<")[0].strip() for b in match.group(2).split(",") if b.strip()]:
                 if base and base[0].isupper():
                     implementations.append(ImplementationInfo(child_class=child, parent_class=base, file_path=file_path.as_posix()))
+
+        # --- Cross-language SQL references in string literals ---
+        # Detect table names (tb prefix) and stored procedure names referenced
+        # in SQL strings embedded in C# code.  Edges point to the containing
+        # module (the .cs file itself represented as mod:<stem>).
+        file_module_id = f"mod:{file_path.stem}"
+        seen_sql_refs: set[tuple[str, str]] = set()  # (target_id, edge_type)
+
+        # DML-context table references: FROM/JOIN/INTO/UPDATE tbXxx
+        for match in _CS_SQL_TABLE_IN_STRING_RE.finditer(content):
+            tbl = match.group(1)
+            target_id = f"table:{tbl}"
+            key = (target_id, EdgeType.READS)
+            if key not in seen_sql_refs:
+                seen_sql_refs.add(key)
+                edges.append(
+                    Edge(
+                        source=file_module_id,
+                        target=target_id,
+                        type=EdgeType.READS,
+                        metadata={"inferred": True, "cross_language": True},
+                    )
+                )
+
+        # Bare table name references (tbXxx inside any string)
+        for match in _CS_SQL_TABLE_BARE_RE.finditer(content):
+            tbl = match.group(1)
+            target_id = f"table:{tbl}"
+            key = (target_id, EdgeType.READS)
+            if key not in seen_sql_refs:
+                seen_sql_refs.add(key)
+                edges.append(
+                    Edge(
+                        source=file_module_id,
+                        target=target_id,
+                        type=EdgeType.READS,
+                        metadata={"inferred": True, "cross_language": True},
+                    )
+                )
+
+        # Stored procedure / function references (proc_Xxx or sp_Xxx)
+        for match in _CS_SQL_PROC_IN_STRING_RE.finditer(content):
+            proc = match.group(1)
+            target_id = f"service:{proc}"
+            key = (target_id, EdgeType.CALLS)
+            if key not in seen_sql_refs:
+                seen_sql_refs.add(key)
+                edges.append(
+                    Edge(
+                        source=file_module_id,
+                        target=target_id,
+                        type=EdgeType.CALLS,
+                        metadata={"inferred": True, "cross_language": True},
+                    )
+                )
 
         return ScanResult(nodes=nodes, edges=edges, imports=imports, implementations=implementations)

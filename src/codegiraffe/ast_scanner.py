@@ -2073,6 +2073,7 @@ def get_hybrid_registry() -> "RecognizerRegistry":
         PhpRecognizer,
         RubyRecognizer,
         RustRecognizer,
+        SqlRecognizer,
         TypeScriptRecognizer,
     )
     from codegiraffe.scanner import PythonRecognizer
@@ -2095,6 +2096,7 @@ def get_hybrid_registry() -> "RecognizerRegistry":
     registry.register(RubyRecognizer(), extensions=[".rb"])
     registry.register(CsprojRecognizer(), extensions=[".csproj"])
     registry.register(PackagesConfigRecognizer(), extensions=[".config"])
+    registry.register(SqlRecognizer(), extensions=[".sql"])
 
     # 2. AST recognizers on top (same extensions as get_ast_registry())
     registry.register(PythonASTRecognizer(), extensions=[".py", ".pyi"])
