@@ -392,6 +392,63 @@ def query_by_type(graph: ArchGraph, node_type: str) -> GraphData:
     return _merge_graph_data(parts, base_data)
 
 
+_QUERY_RESULT_LIMIT = 50
+
+
+def query_by_text(
+    graph: ArchGraph,
+    query: str,
+    node_type: str | None = None,
+    limit: int = _QUERY_RESULT_LIMIT,
+) -> GraphData:
+    """Return nodes whose label, ID, or metadata values contain *query* (case-insensitive).
+
+    Optionally pre-filter by *node_type* before applying the text search.
+    Each matching node is expanded to depth=1 to include its immediate edges.
+    Results are capped at *limit* nodes (default 50).
+    """
+    needle = query.lower()
+    base_data = graph.to_data()
+
+    # Gather candidate nodes, optionally filtered by type
+    if node_type is not None:
+        candidates: list[Node] = graph.get_nodes_by_type(node_type)
+    else:
+        candidates = [
+            attrs["node"]
+            for _, attrs in graph.graph.nodes(data=True)
+            if "node" in attrs
+        ]
+
+    # Match against id, label, and metadata values
+    matching: list[Node] = []
+    for node in candidates:
+        if needle in node.id.lower() or needle in node.label.lower():
+            matching.append(node)
+            continue
+        for meta_val in node.metadata.values():
+            if isinstance(meta_val, str) and needle in meta_val.lower():
+                matching.append(node)
+                break
+
+    # Cap results
+    matching = matching[:limit]
+
+    if not matching:
+        return GraphData(
+            project_path=base_data.project_path,
+            last_scan=base_data.last_scan,
+            schema_version=base_data.schema_version,
+        )
+
+    parts: list[GraphData] = []
+    for node in matching:
+        sub = graph.get_subgraph(node.id, depth=1)
+        parts.append(sub)
+
+    return _merge_graph_data(parts, base_data)
+
+
 def _format_node_for_detail_level(node_data: dict, detail_level: str) -> dict:
     """Format a node dict based on detail level.
 
