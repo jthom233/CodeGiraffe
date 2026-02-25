@@ -1973,6 +1973,104 @@ def _infer_decision_marker_edges(
 
 
 # ---------------------------------------------------------------------------
+# Cross-repo NuGet/project dependency promotion
+# ---------------------------------------------------------------------------
+
+
+def _promote_cross_repo_edges(result: ScanResult, project_path: str) -> None:
+    """Promote ``depends_on`` edges between project modules from different repos
+    to ``cross_repo_depends_on``, and stub-out external NuGet packages that are
+    not present in the graph.
+
+    A "project module" is a ``module`` node whose metadata contains
+    ``{"kind": "project"}``.  Two such nodes are considered to be in *different
+    repos* when the top-level directory of their ``file_path`` (relative to the
+    scanned project root) differs — i.e. the first path component differs.
+
+    For ``depends_on`` edges where the *target* module is not yet in the graph
+    a lightweight stub node is inserted so the edge can be resolved and the
+    dependency is visible in the graph.
+    """
+    root = Path(project_path)
+
+    # Index all project-kind module nodes by their ID.
+    project_nodes: dict[str, Node] = {}
+    for node in result.nodes:
+        if (
+            node.type in (NodeType.MODULE, NodeType.MODULE.value)
+            and node.metadata.get("kind") == "project"
+        ):
+            project_nodes[node.id] = node
+
+    if not project_nodes:
+        return
+
+    # Helper: derive the top-level directory component of a node's file_path.
+    def _top_dir(node: Node) -> str | None:
+        fp = node.file_path
+        if not fp:
+            return None
+        try:
+            rel = Path(fp)
+            # file_path stored as posix relative path; first part is top-level dir.
+            parts = rel.parts
+            return parts[0] if parts else None
+        except Exception:
+            return None
+
+    # Build a set of all node IDs for quick membership tests.
+    existing_node_ids: set[str] = {n.id for n in result.nodes}
+
+    new_edges: list[Edge] = []
+    new_nodes: list[Node] = []
+    promoted_keys: set[tuple[str, str, str]] = set()
+
+    for edge in result.edges:
+        if edge.type not in (EdgeType.DEPENDS_ON, EdgeType.DEPENDS_ON.value):
+            continue
+        source_node = project_nodes.get(edge.source)
+        if source_node is None:
+            continue
+
+        target_id = edge.target
+        target_node = project_nodes.get(target_id)
+
+        if target_node is not None:
+            # Both source and target are known project nodes.
+            # Promote if they live in different top-level directories.
+            src_top = _top_dir(source_node)
+            tgt_top = _top_dir(target_node)
+            if src_top and tgt_top and src_top != tgt_top:
+                key = (edge.source, target_id, EdgeType.CROSS_REPO_DEPENDS_ON)
+                if key not in promoted_keys:
+                    promoted_keys.add(key)
+                    new_edges.append(
+                        Edge(
+                            source=edge.source,
+                            target=target_id,
+                            type=EdgeType.CROSS_REPO_DEPENDS_ON,
+                            metadata={**edge.metadata, "promoted": True},
+                            confidence=edge.confidence,
+                        )
+                    )
+        elif target_id not in existing_node_ids:
+            # Target module is unknown — create an external stub node.
+            stub_label = target_id.removeprefix("mod:")
+            stub_node = Node(
+                id=target_id,
+                type=NodeType.MODULE,
+                label=stub_label,
+                file_path=None,
+                metadata={"external": True, "source": "nuget"},
+            )
+            new_nodes.append(stub_node)
+            existing_node_ids.add(target_id)
+
+    result.nodes.extend(new_nodes)
+    result.edges.extend(new_edges)
+
+
+# ---------------------------------------------------------------------------
 # Project scanner
 # ---------------------------------------------------------------------------
 
@@ -2166,6 +2264,9 @@ def scan_project(
 
     # Decision marker inference (detects ADR comments in source files)
     _infer_decision_marker_edges(merged, file_contents)
+
+    # Cross-repo NuGet/project dependency promotion
+    _promote_cross_repo_edges(merged, project_path)
 
     return merged
 

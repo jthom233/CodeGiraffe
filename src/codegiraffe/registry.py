@@ -68,9 +68,11 @@ def get_default_registry() -> RecognizerRegistry:
         from codegiraffe.recognizers import (
             CppRecognizer,
             CSharpRecognizer,
+            CsprojRecognizer,
             GoRecognizer,
             JavaRecognizer,
             LuaRecognizer,
+            PackagesConfigRecognizer,
             PhpRecognizer,
             RubyRecognizer,
             RustRecognizer,
@@ -92,6 +94,8 @@ def get_default_registry() -> RecognizerRegistry:
         _default_registry.register(PhpRecognizer(), extensions=[".php"])
         _default_registry.register(RubyRecognizer(), extensions=[".rb"])
         _default_registry.register(LuaRecognizer(), extensions=[".lua"])
+        _default_registry.register(CsprojRecognizer(), extensions=[".csproj"])
+        _default_registry.register(PackagesConfigRecognizer(), extensions=[".config"])
     return _default_registry
 
 
