@@ -220,6 +220,7 @@ def codegiraffe_query(
     node_type: str | None = None,
     query: str | None = None,
     depth: int = 2,
+    max_results: int = 100,
 ) -> str:
     """Query the architecture graph by node ID, node type, or free-text search.
 
@@ -234,6 +235,11 @@ def codegiraffe_query(
 
     *node_id* takes precedence over *query* which takes precedence over
     *node_type* alone.  Returns the subgraph as formatted JSON.
+
+    Use *max_results* (default 100) to cap the number of nodes returned when
+    querying by node_type or query.  A truncation notice is prepended to the
+    output when results are capped.  Set to 0 to disable the cap (caution:
+    large graphs may produce very large output).
     """
     try:
         graph = _ensure_graph(project_path)
@@ -247,7 +253,28 @@ def codegiraffe_query(
         else:
             return "Error: provide either node_id, node_type, or query"
 
-        return subgraph.model_dump_json(indent=2)
+        total_nodes = len(subgraph.nodes)
+        truncated = False
+        if max_results > 0 and total_nodes > max_results:
+            # Trim to max_results nodes and retain only edges between kept nodes
+            kept_ids = set(list(subgraph.nodes.keys())[:max_results])
+            trimmed_nodes = {nid: n for nid, n in subgraph.nodes.items() if nid in kept_ids}
+            trimmed_edges = [
+                e for e in subgraph.edges
+                if e.source in kept_ids and e.target in kept_ids
+            ]
+            subgraph.nodes = trimmed_nodes
+            subgraph.edges = trimmed_edges
+            truncated = True
+
+        result_json = subgraph.model_dump_json(indent=2)
+        if truncated:
+            notice = (
+                f"// Showing {max_results} of {total_nodes} nodes. "
+                "Use query/node_type parameters to filter.\n"
+            )
+            return notice + result_json
+        return result_json
     except Exception as exc:
         return f"Error querying graph: {exc}"
 

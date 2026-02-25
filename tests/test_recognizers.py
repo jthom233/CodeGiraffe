@@ -13,6 +13,7 @@ from codegiraffe.recognizers import (
     CppRecognizer,
     PhpRecognizer,
     RubyRecognizer,
+    SqlRecognizer,
 )
 from codegiraffe.scanner import ScanResult, scan_project, ImportInfo, ImplementationInfo
 from codegiraffe.registry import RecognizerRegistry
@@ -2886,3 +2887,507 @@ class TestPackagesConfigRecognizer:
         result = recognizer.recognize(tmp_path / "packages.config", content)
         assert any(n.id == "mod:App" for n in result.nodes)
         assert result.edges == []
+
+
+# ---------------------------------------------------------------------------
+# SqlRecognizer tests
+# ---------------------------------------------------------------------------
+
+
+class TestSqlRecognizer:
+    @pytest.fixture
+    def recognizer(self):
+        return SqlRecognizer()
+
+    # -----------------------------------------------------------------------
+    # CREATE TABLE detection
+    # -----------------------------------------------------------------------
+
+    def test_create_table_with_schema_brackets(self, recognizer):
+        """CREATE TABLE [dbo].[tbSecret] produces a database_table node."""
+        content = "CREATE TABLE [dbo].[tbSecret] (\n    SecretId INT PRIMARY KEY\n);"
+        result = recognizer.recognize(Path("migration.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:tbSecret" in ids
+        node = next(n for n in result.nodes if n.id == "table:tbSecret")
+        assert node.type == NodeType.DATABASE_TABLE
+        assert node.metadata.get("has_primary_key") is True
+
+    def test_create_table_bare_name(self, recognizer):
+        """CREATE TABLE without schema prefix is still captured."""
+        content = "CREATE TABLE tbComputer (\n    ComputerId INT NOT NULL\n);"
+        result = recognizer.recognize(Path("schema.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:tbComputer" in ids
+
+    def test_create_table_if_not_exists(self, recognizer):
+        """CREATE TABLE IF NOT EXISTS syntax is supported."""
+        content = "CREATE TABLE IF NOT EXISTS tbFolder (FolderId INT);"
+        result = recognizer.recognize(Path("schema.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:tbFolder" in ids
+
+    def test_create_table_case_insensitive(self, recognizer):
+        """SQL keywords are matched case-insensitively."""
+        content = "create table tbSecretType (SecretTypeId int);"
+        result = recognizer.recognize(Path("schema.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:tbSecretType" in ids
+
+    def test_create_table_mixed_case(self, recognizer):
+        """Mixed case CREATE TABLE is also matched."""
+        content = "Create Table [dbo].[tbUser] (UserId INT);"
+        result = recognizer.recognize(Path("schema.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:tbUser" in ids
+
+    def test_create_table_column_count(self, recognizer):
+        """column_count metadata reflects the number of typed column declarations."""
+        content = (
+            "CREATE TABLE tbSecret (\n"
+            "    SecretId INT NOT NULL,\n"
+            "    SecretName NVARCHAR(255) NOT NULL,\n"
+            "    SecretTypeId INT NOT NULL\n"
+            ");"
+        )
+        result = recognizer.recognize(Path("schema.sql"), content)
+        node = next(n for n in result.nodes if n.id == "table:tbSecret")
+        assert node.metadata["column_count"] == 3
+
+    def test_create_table_no_primary_key(self, recognizer):
+        """has_primary_key is False when no PRIMARY KEY constraint is present."""
+        content = "CREATE TABLE tbLog (\n    LogId INT,\n    Message NVARCHAR(MAX)\n);"
+        result = recognizer.recognize(Path("schema.sql"), content)
+        node = next(n for n in result.nodes if n.id == "table:tbLog")
+        assert node.metadata.get("has_primary_key") is False
+
+    # -----------------------------------------------------------------------
+    # ALTER TABLE detection
+    # -----------------------------------------------------------------------
+
+    def test_alter_table_creates_node(self, recognizer):
+        """ALTER TABLE on an unknown table still emits a database_table node."""
+        content = "ALTER TABLE [dbo].[tbSecretOneTimePasswordSettings] ADD ConcurrencyId VARCHAR(50) NULL;"
+        result = recognizer.recognize(Path("delta.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "table:tbSecretOneTimePasswordSettings" in ids
+
+    def test_alter_table_no_duplicate_with_create(self, recognizer):
+        """ALTER TABLE after CREATE TABLE does not produce a duplicate node."""
+        content = (
+            "CREATE TABLE tbSecret (SecretId INT);\n"
+            "ALTER TABLE tbSecret ADD SecretName NVARCHAR(255);\n"
+        )
+        result = recognizer.recognize(Path("schema.sql"), content)
+        table_nodes = [n for n in result.nodes if n.id == "table:tbSecret"]
+        assert len(table_nodes) == 1
+
+    # -----------------------------------------------------------------------
+    # Migration file → table writes edge
+    # -----------------------------------------------------------------------
+
+    def test_migration_file_emits_module_node_and_writes_edge(self, recognizer):
+        """A migration-only file emits a mod node and writes edges to altered tables."""
+        content = "ALTER TABLE [dbo].[tbLauncherSession] ADD PlatformSessionStarted BIT NOT NULL;"
+        result = recognizer.recognize(Path("SqlServer/12.0/000025.sql"), content)
+        # Module node for the migration file
+        assert any(n.id == "mod:000025" for n in result.nodes)
+        # Writes edge to the table
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(e.target == "table:tbLauncherSession" for e in writes_edges)
+
+    def test_migration_version_in_metadata(self, recognizer):
+        """Version is extracted from the SqlServer/<version>/ path segment."""
+        content = "ALTER TABLE tbSecret ADD NewCol INT;"
+        result = recognizer.recognize(Path("SqlServer/10.5/delta_001.sql"), content)
+        table_node = next(n for n in result.nodes if n.id == "table:tbSecret")
+        assert table_node.metadata.get("version") == "10.5"
+
+    def test_create_index_emits_writes_edge(self, recognizer):
+        """CREATE INDEX ... ON tbX emits a writes edge from the file module."""
+        content = "CREATE INDEX IX_tbSecret_Name ON tbSecret (SecretName);"
+        result = recognizer.recognize(Path("index.sql"), content)
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(e.target == "table:tbSecret" for e in writes_edges)
+
+    # -----------------------------------------------------------------------
+    # FOREIGN KEY → depends_on edge
+    # -----------------------------------------------------------------------
+
+    def test_create_table_foreign_key_edge(self, recognizer):
+        """FOREIGN KEY ... REFERENCES in CREATE TABLE body emits depends_on edge."""
+        content = (
+            "CREATE TABLE tbSecretItem (\n"
+            "    SecretItemId INT PRIMARY KEY,\n"
+            "    SecretId INT NOT NULL,\n"
+            "    FOREIGN KEY (SecretId) REFERENCES [dbo].[tbSecret](SecretId)\n"
+            ");\n"
+        )
+        result = recognizer.recognize(Path("schema.sql"), content)
+        depends_edges = [e for e in result.edges if e.type == EdgeType.DEPENDS_ON]
+        assert any(
+            e.source == "table:tbSecretItem" and e.target == "table:tbSecret"
+            for e in depends_edges
+        )
+
+    def test_alter_table_add_foreign_key_edge(self, recognizer):
+        """ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... REFERENCES emits depends_on."""
+        content = (
+            "ALTER TABLE tbSecretItem\n"
+            "ADD CONSTRAINT FK_SecretItem_Secret\n"
+            "FOREIGN KEY (SecretId) REFERENCES tbSecret(SecretId);\n"
+        )
+        result = recognizer.recognize(Path("fk.sql"), content)
+        depends_edges = [e for e in result.edges if e.type == EdgeType.DEPENDS_ON]
+        assert any(e.target == "table:tbSecret" for e in depends_edges)
+
+    # -----------------------------------------------------------------------
+    # CREATE PROCEDURE / PROC detection
+    # -----------------------------------------------------------------------
+
+    def test_create_procedure_with_schema(self, recognizer):
+        """CREATE PROCEDURE [dbo].[proc_GetSecretsByType] emits a service node."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_GetSecretsByType]\n"
+            "    @SecretTypeId INT\n"
+            "AS\n"
+            "BEGIN\n"
+            "    SELECT * FROM tbSecret WHERE SecretTypeId = @SecretTypeId\n"
+            "END\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:proc_GetSecretsByType" in ids
+        node = next(n for n in result.nodes if n.id == "service:proc_GetSecretsByType")
+        assert node.metadata.get("kind") == "stored_procedure"
+        assert node.type == NodeType.SERVICE
+
+    def test_create_proc_abbreviation(self, recognizer):
+        """CREATE PROC (abbreviated) is detected."""
+        content = "CREATE PROC [dbo].[proc_FolderGet]\nAS\nSELECT * FROM tbFolder\n"
+        result = recognizer.recognize(Path("procs.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:proc_FolderGet" in ids
+
+    def test_create_or_alter_procedure(self, recognizer):
+        """CREATE OR ALTER PROCEDURE is detected."""
+        content = (
+            "CREATE OR ALTER PROCEDURE [dbo].[proc_SecretGet]\n"
+            "    @SecretId INT\n"
+            "AS\n"
+            "SELECT * FROM tbSecret WHERE SecretId = @SecretId\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:proc_SecretGet" in ids
+
+    def test_alter_procedure(self, recognizer):
+        """ALTER PROCEDURE is detected and emits a service node."""
+        content = (
+            "ALTER PROCEDURE [dbo].[proc_SecretGet]\n"
+            "AS\n"
+            "SELECT * FROM tbSecret\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:proc_SecretGet" in ids
+
+    def test_procedure_parameters_captured(self, recognizer):
+        """Stored procedure parameters are captured in metadata."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_GetSecretsByType]\n"
+            "    @SecretTypeId INT,\n"
+            "    @FolderId INT\n"
+            "AS\n"
+            "SELECT * FROM tbSecret\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        node = next(n for n in result.nodes if n.id == "service:proc_GetSecretsByType")
+        params = node.metadata.get("parameters", [])
+        param_names = {p["name"] for p in params}
+        assert "@SecretTypeId" in param_names
+        assert "@FolderId" in param_names
+
+    # -----------------------------------------------------------------------
+    # CREATE FUNCTION detection
+    # -----------------------------------------------------------------------
+
+    def test_create_function(self, recognizer):
+        """CREATE FUNCTION emits a service node with kind=function."""
+        content = (
+            "CREATE FUNCTION [dbo].[fn_GetSecretCount]\n"
+            "    (@FolderId INT)\n"
+            "RETURNS INT\n"
+            "AS\n"
+            "BEGIN\n"
+            "    RETURN (SELECT COUNT(*) FROM tbSecret WHERE FolderId = @FolderId)\n"
+            "END\n"
+        )
+        result = recognizer.recognize(Path("functions.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:fn_GetSecretCount" in ids
+        node = next(n for n in result.nodes if n.id == "service:fn_GetSecretCount")
+        assert node.metadata.get("kind") == "function"
+
+    # -----------------------------------------------------------------------
+    # CREATE VIEW detection
+    # -----------------------------------------------------------------------
+
+    def test_create_view(self, recognizer):
+        """CREATE VIEW emits a module node with kind=view."""
+        content = (
+            "CREATE VIEW [dbo].[vw_SecretSummary]\n"
+            "AS\n"
+            "SELECT s.SecretId, s.SecretName, st.SecretTypeName\n"
+            "FROM tbSecret s\n"
+            "JOIN tbSecretType st ON s.SecretTypeId = st.SecretTypeId\n"
+        )
+        result = recognizer.recognize(Path("views.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "mod:vw_SecretSummary" in ids
+        node = next(n for n in result.nodes if n.id == "mod:vw_SecretSummary")
+        assert node.type == NodeType.MODULE
+        assert node.metadata.get("kind") == "view"
+
+    def test_create_or_alter_view(self, recognizer):
+        """CREATE OR ALTER VIEW is detected."""
+        content = "CREATE OR ALTER VIEW [dbo].[vw_Secrets] AS SELECT * FROM tbSecret\n"
+        result = recognizer.recognize(Path("views.sql"), content)
+        ids = {n.id for n in result.nodes}
+        assert "mod:vw_Secrets" in ids
+
+    # -----------------------------------------------------------------------
+    # Procedure/view body → table edges
+    # -----------------------------------------------------------------------
+
+    def test_procedure_body_reads_edge(self, recognizer):
+        """FROM tbX in a procedure body emits a reads edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_ListSecrets]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    SELECT * FROM tbSecret\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        reads_edges = [e for e in result.edges if e.type == EdgeType.READS]
+        assert any(
+            e.source == "service:proc_ListSecrets" and e.target == "table:tbSecret"
+            for e in reads_edges
+        )
+
+    def test_procedure_body_join_reads_edge(self, recognizer):
+        """JOIN tbX in a procedure body emits a reads edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_SecretWithType]\n"
+            "AS\n"
+            "SELECT s.*, st.SecretTypeName\n"
+            "FROM tbSecret s\n"
+            "INNER JOIN tbSecretType st ON s.SecretTypeId = st.SecretTypeId\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        reads_edges = [
+            e for e in result.edges
+            if e.type == EdgeType.READS and e.source == "service:proc_SecretWithType"
+        ]
+        targets = {e.target for e in reads_edges}
+        assert "table:tbSecret" in targets
+        assert "table:tbSecretType" in targets
+
+    def test_procedure_body_writes_edge_insert(self, recognizer):
+        """INSERT INTO tbX in a procedure body emits a writes edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_CreateSecret]\n"
+            "    @Name NVARCHAR(255)\n"
+            "AS\n"
+            "BEGIN\n"
+            "    INSERT INTO tbSecret (SecretName) VALUES (@Name)\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(
+            e.source == "service:proc_CreateSecret" and e.target == "table:tbSecret"
+            for e in writes_edges
+        )
+
+    def test_procedure_body_writes_edge_update(self, recognizer):
+        """UPDATE tbX in a procedure body emits a writes edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_UpdateSecret]\n"
+            "    @SecretId INT\n"
+            "AS\n"
+            "UPDATE tbSecret SET LastModified = GETDATE() WHERE SecretId = @SecretId\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(
+            e.source == "service:proc_UpdateSecret" and e.target == "table:tbSecret"
+            for e in writes_edges
+        )
+
+    def test_procedure_body_writes_edge_delete(self, recognizer):
+        """DELETE FROM tbX in a procedure body emits a writes edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_DeleteSecret]\n"
+            "    @SecretId INT\n"
+            "AS\n"
+            "DELETE FROM tbSecret WHERE SecretId = @SecretId\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(
+            e.source == "service:proc_DeleteSecret" and e.target == "table:tbSecret"
+            for e in writes_edges
+        )
+
+    def test_view_body_reads_edge(self, recognizer):
+        """A view body FROM/JOIN also emits reads edges."""
+        content = (
+            "CREATE VIEW [dbo].[vw_ActiveSecrets]\n"
+            "AS\n"
+            "SELECT s.SecretId, f.FolderName\n"
+            "FROM tbSecret s\n"
+            "JOIN tbFolder f ON s.FolderId = f.FolderId\n"
+        )
+        result = recognizer.recognize(Path("views.sql"), content)
+        reads_edges = [
+            e for e in result.edges
+            if e.type == EdgeType.READS and e.source == "mod:vw_ActiveSecrets"
+        ]
+        targets = {e.target for e in reads_edges}
+        assert "table:tbSecret" in targets
+        assert "table:tbFolder" in targets
+
+    # -----------------------------------------------------------------------
+    # Empty / comment-only files
+    # -----------------------------------------------------------------------
+
+    def test_empty_file_returns_empty_result(self, recognizer):
+        """An empty SQL file produces no nodes or edges."""
+        result = recognizer.recognize(Path("empty.sql"), "")
+        assert result.nodes == []
+        assert result.edges == []
+
+    def test_comment_only_file_returns_empty_result(self, recognizer):
+        """A comment-only SQL file produces no nodes or edges."""
+        content = (
+            "-- This is a comment\n"
+            "/* Multi-line\n"
+            "   comment */\n"
+        )
+        result = recognizer.recognize(Path("comments.sql"), content)
+        assert result.nodes == []
+        assert result.edges == []
+
+    # -----------------------------------------------------------------------
+    # Registration
+    # -----------------------------------------------------------------------
+
+    def test_sql_registered_in_default_registry(self):
+        """SqlRecognizer is registered for .sql extension in default registry."""
+        from codegiraffe.registry import get_default_registry
+        # Reset the singleton so our new registration is picked up
+        import codegiraffe.registry as _reg_mod
+        _reg_mod._default_registry = None
+        registry = get_default_registry()
+        assert ".sql" in registry.registered_extensions
+
+    def test_sql_recognizer_in_default_registry_returns_recognizer(self):
+        """get_recognizers('.sql') includes an SqlRecognizer instance."""
+        from codegiraffe.registry import get_default_registry
+        import codegiraffe.registry as _reg_mod
+        _reg_mod._default_registry = None
+        registry = get_default_registry()
+        recognizers = registry.get_recognizers(Path("schema.sql"))
+        assert any(isinstance(r, SqlRecognizer) for r in recognizers)
+
+
+# ---------------------------------------------------------------------------
+# C# cross-language SQL reference detection
+# ---------------------------------------------------------------------------
+
+
+class TestCSharpSqlCrossLanguageDetection:
+    @pytest.fixture
+    def recognizer(self):
+        return CSharpRecognizer()
+
+    def test_sql_table_in_from_clause_string(self, recognizer):
+        """A C# string literal with FROM tbXxx emits a reads edge to the table."""
+        content = '''
+public class SecretProvider
+{
+    public Secret Load(int id)
+    {
+        var sql = "SELECT * FROM tbSecret WHERE SecretId = @id";
+        return _db.QuerySingle<Secret>(sql, new { id });
+    }
+}
+'''
+        result = recognizer.recognize(Path("SecretProvider.cs"), content)
+        reads_edges = [
+            e for e in result.edges
+            if e.type == EdgeType.READS and e.target == "table:tbSecret"
+        ]
+        assert len(reads_edges) > 0
+        assert reads_edges[0].metadata.get("cross_language") is True
+
+    def test_sql_table_bare_reference_in_string(self, recognizer):
+        """A C# string literal containing a bare tbXxx name emits a reads edge."""
+        content = 'var tbl = "tbSecretType";'
+        result = recognizer.recognize(Path("Repo.cs"), content)
+        reads_edges = [
+            e for e in result.edges
+            if e.type == EdgeType.READS and e.target == "table:tbSecretType"
+        ]
+        assert len(reads_edges) > 0
+
+    def test_stored_procedure_reference_in_string(self, recognizer):
+        """A C# string literal with a proc_ name emits a calls edge."""
+        content = '''
+var result = _db.Execute("proc_SecretGet", new { SecretId = id });
+'''
+        result = recognizer.recognize(Path("SecretRepo.cs"), content)
+        calls_edges = [
+            e for e in result.edges
+            if e.type == EdgeType.CALLS and e.target == "service:proc_SecretGet"
+        ]
+        assert len(calls_edges) > 0
+
+    def test_sp_prefix_stored_procedure_reference(self, recognizer):
+        """Stored procedure with sp_ prefix is also detected."""
+        content = 'var sql = "sp_helptext";'
+        result = recognizer.recognize(Path("DbHelper.cs"), content)
+        calls_edges = [
+            e for e in result.edges
+            if e.type == EdgeType.CALLS and e.target == "service:sp_helptext"
+        ]
+        assert len(calls_edges) > 0
+
+    def test_no_false_positive_on_non_tb_table(self, recognizer):
+        """String literals without the tb prefix do not emit spurious table edges."""
+        content = 'var sql = "SELECT * FROM Users WHERE UserId = 1";'
+        result = recognizer.recognize(Path("Repo.cs"), content)
+        table_edges = [
+            e for e in result.edges
+            if e.target.startswith("table:") and "Users" in e.target
+        ]
+        assert len(table_edges) == 0
+
+    def test_join_table_reference(self, recognizer):
+        """JOIN tbXxx in a C# string emits a reads edge."""
+        content = '''
+var sql = "SELECT s.*, f.FolderName FROM tbSecret s JOIN tbFolder f ON s.FolderId = f.FolderId";
+'''
+        result = recognizer.recognize(Path("Repo.cs"), content)
+        table_targets = {
+            e.target for e in result.edges
+            if e.type == EdgeType.READS and e.target.startswith("table:tb")
+        }
+        assert "table:tbSecret" in table_targets or "table:tbFolder" in table_targets
