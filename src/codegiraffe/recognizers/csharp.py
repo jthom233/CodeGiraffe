@@ -79,6 +79,67 @@ _CS_USING_STMT_RE = re.compile(r'using\s+([\w.]+)\s*;', re.MULTILINE)
 _CS_NAMESPACE_DECL_RE = re.compile(r'namespace\s+([\w.]+)', re.MULTILINE)
 _CS_CLASS_INHERITANCE_RE = re.compile(r'class\s+(\w+)(?:<[^>]*>)?\s*:\s*([\w\s,.<>]+?)(?:\s*\{|\s*where)')
 
+# Matches a public constructor with at least one parameter of any type.
+# Group 1: class name (from constructor name), Group 2: parameter list text.
+_CS_CTOR_PARAMS_RE = re.compile(
+    r'public\s+(\w+)\s*\(([^)]+)\)',
+    re.MULTILINE,
+)
+
+# Matches a static class modifier: "static class ClassName"
+_CS_STATIC_CLASS_RE = re.compile(r'\bstatic\s+(?:\w+\s+)*class\s+(\w+)', re.MULTILINE)
+
+# Class name noise suffixes that indicate DTOs, models, and other non-DI types.
+_CS_NOISE_SUFFIXES_REGEX = (
+    "Dto", "ViewModel", "Model", "Args", "EventArgs",
+    "Exception", "Attribute", "Extensions", "Constants",
+    "Config", "Options", "Settings",
+)
+
+# Base names that are already captured by dedicated patterns.
+_CS_ALREADY_CAPTURED_BASES = frozenset({
+    "Hub", "ControllerBase", "Controller", "ApiController",
+    "BackgroundService", "IHostedService",
+    "IRequestHandler", "INotificationHandler", "ICommandHandler",
+})
+
+
+def _cs_regex_infer_kind(class_name: str) -> str:
+    """Infer a descriptive ``kind`` string from a C# class name suffix."""
+    name_lower = class_name.lower()
+    suffix_map = (
+        ("repository", "repository"),
+        ("repo", "repository"),
+        ("handler", "handler"),
+        ("provider", "provider"),
+        ("validator", "validator"),
+        ("factory", "factory"),
+        ("manager", "manager"),
+        ("processor", "processor"),
+        ("consumer", "consumer"),
+        ("publisher", "publisher"),
+        ("dispatcher", "dispatcher"),
+        ("resolver", "resolver"),
+        ("sender", "sender"),
+        ("reader", "reader"),
+        ("writer", "writer"),
+        ("builder", "builder"),
+        ("middleware", "middleware"),
+        ("interceptor", "interceptor"),
+        ("observer", "observer"),
+        ("decorator", "decorator"),
+        ("store", "store"),
+        ("cache", "cache"),
+        ("client", "client"),
+        ("gateway", "gateway"),
+        ("adapter", "adapter"),
+        ("connector", "connector"),
+    )
+    for suffix, kind in suffix_map:
+        if name_lower.endswith(suffix):
+            return kind
+    return "service"
+
 # ---------------------------------------------------------------------------
 # Recognizer
 # ---------------------------------------------------------------------------
@@ -95,6 +156,12 @@ class CSharpRecognizer:
         - SignalR hubs (``Hub``)               -> ``service`` nodes (kind=signalr_hub)
         - MediatR handlers                     -> ``worker`` nodes
         - DI registrations                     -> ``service`` nodes
+        - Classes implementing interfaces      -> ``service`` nodes (filtered)
+        - Classes with DI constructor params   -> ``service`` nodes (filtered)
+        - Classes inheriting non-trivial bases -> ``service`` nodes (filtered)
+
+    Noise filtering: skips static classes, DTO/model suffixes, and classes
+    already captured by dedicated recognizers (Hub, Controller, etc.).
     """
 
     def __init__(self) -> None:
@@ -330,6 +397,113 @@ class CSharpRecognizer:
                         metadata={"class_name": service_name, "registration": "di"},
                     )
                 )
+
+        # --- DI-injectable service detection ---
+        # Collect static class names so we can filter them out.
+        static_class_names: set[str] = {
+            m.group(1) for m in _CS_STATIC_CLASS_RE.finditer(content)
+        }
+
+        # Collect constructor DI parameters: class name -> set of interface types injected.
+        ctor_iface_params: dict[str, set[str]] = {}
+        for m in _CS_CTOR_PARAMS_RE.finditer(content):
+            ctor_cls = m.group(1)
+            params_text = m.group(2)
+            iface_params = {
+                t.group(1) for t in re.finditer(r'\b(I[A-Z]\w*)\b', params_text)
+            }
+            if iface_params:
+                ctor_iface_params.setdefault(ctor_cls, set()).update(iface_params)
+
+        for match in _CS_CLASS_INHERITANCE_RE.finditer(content):
+            cls_name = match.group(1)
+
+            # Skip if already captured by another recognizer in this file.
+            if cls_name in captured_class_names:
+                continue
+
+            # Skip noise-suffix classes.
+            if cls_name.endswith(_CS_NOISE_SUFFIXES_REGEX):
+                continue
+
+            # Skip static classes.
+            if cls_name in static_class_names:
+                continue
+
+            # Parse base names from the inheritance clause.
+            raw_bases_str = match.group(2)
+            raw_bases = [b.strip() for b in raw_bases_str.split(",")]
+            base_names = {
+                re.sub(r"<.*", "", b).strip()
+                for b in raw_bases if b.strip()
+            }
+
+            # Criterion a: implements at least one interface (I + uppercase)
+            implements_interface = any(
+                b and len(b) >= 2 and b[0] == "I" and b[1].isupper()
+                for b in base_names
+            )
+
+            # Criterion c: inherits from a non-trivial, non-framework base class
+            inherits_base = any(
+                b and b[0].isupper()
+                and not (len(b) >= 2 and b[0] == "I" and b[1].isupper())
+                and b not in _CS_ALREADY_CAPTURED_BASES
+                for b in base_names
+            )
+
+            # Skip base classes already handled by dedicated patterns
+            if base_names & _CS_ALREADY_CAPTURED_BASES and not implements_interface:
+                continue
+
+            if not (implements_interface or inherits_base):
+                continue
+
+            captured_class_names.add(cls_name)
+            kind = _cs_regex_infer_kind(cls_name)
+            metadata: dict[str, object] = {"class_name": cls_name, "kind": kind}
+            if implements_interface:
+                iface_bases = [
+                    b for b in base_names
+                    if b and len(b) >= 2 and b[0] == "I" and b[1].isupper()
+                ]
+                metadata["implements"] = iface_bases
+            node_id = f"service:{cls_name}"
+            nodes.append(
+                Node(
+                    id=node_id,
+                    type=NodeType.SERVICE,
+                    label=cls_name,
+                    file_path=rel_path,
+                    metadata=metadata,
+                )
+            )
+
+        # Also emit service nodes for classes that only satisfy criterion b
+        # (DI constructor) but have no inheritance clause caught by the regex above.
+        for ctor_cls, iface_params in ctor_iface_params.items():
+            if ctor_cls in captured_class_names:
+                continue
+            if ctor_cls.endswith(_CS_NOISE_SUFFIXES_REGEX):
+                continue
+            if ctor_cls in static_class_names:
+                continue
+            captured_class_names.add(ctor_cls)
+            kind = _cs_regex_infer_kind(ctor_cls)
+            node_id = f"service:{ctor_cls}"
+            nodes.append(
+                Node(
+                    id=node_id,
+                    type=NodeType.SERVICE,
+                    label=ctor_cls,
+                    file_path=rel_path,
+                    metadata={
+                        "class_name": ctor_cls,
+                        "kind": kind,
+                        "di_dependencies": list(iface_params),
+                    },
+                )
+            )
 
         # --- Edge inference: endpoint -> database_table ---
         if endpoint_ids and table_ids:

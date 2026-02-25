@@ -2253,3 +2253,396 @@ class TestScanProjectWithLua:
         assert any("addon" in nid for nid in ids)
         # service node from table-as-class pattern
         assert "service:MyAddon" in ids
+
+
+# ---------------------------------------------------------------------------
+# DI-aware C# service detection (regex recognizer)
+# ---------------------------------------------------------------------------
+
+
+class TestCSharpDIServiceDetection:
+    """Tests for the DI-aware filtered class detection added to CSharpRecognizer."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return CSharpRecognizer()
+
+    def test_interface_implementing_class_emits_service(self, recognizer):
+        """class Foo : IFoo should produce a service node."""
+        content = '''
+public class SecretProvider : ISecretProvider {
+    public string GetSecret(string key) => "";
+}
+'''
+        result = recognizer.recognize(Path("Services/SecretProvider.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:SecretProvider" in ids
+        node = next(n for n in result.nodes if n.id == "service:SecretProvider")
+        assert node.metadata.get("kind") == "provider"
+        assert "ISecretProvider" in node.metadata.get("implements", [])
+
+    def test_di_constructor_class_emits_service(self, recognizer):
+        """class Foo with constructor taking IBar, IBaz should produce a service node."""
+        content = '''
+public class OrderProcessor {
+    public OrderProcessor(IOrderRepository repo, ILogger<OrderProcessor> logger) {
+        _repo = repo;
+        _logger = logger;
+    }
+    public void Process(int orderId) { }
+}
+'''
+        result = recognizer.recognize(Path("Services/OrderProcessor.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:OrderProcessor" in ids
+        node = next(n for n in result.nodes if n.id == "service:OrderProcessor")
+        di_deps = node.metadata.get("di_dependencies", [])
+        assert any("IOrderRepository" in d for d in di_deps)
+
+    def test_non_trivial_base_class_emits_service(self, recognizer):
+        """class Foo : SomeBase should produce a service node when base is non-framework."""
+        content = '''
+public class SpecialHandler : BaseHandler {
+    public void Handle() { }
+}
+'''
+        result = recognizer.recognize(Path("Handlers/SpecialHandler.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:SpecialHandler" in ids
+        node = next(n for n in result.nodes if n.id == "service:SpecialHandler")
+        assert node.metadata.get("kind") == "handler"
+
+    def test_dto_suffix_filtered_out(self, recognizer):
+        """Classes ending in Dto must NOT produce a service node."""
+        content = '''
+public class CreateOrderDto : IDto {
+    public int CustomerId { get; set; }
+    public decimal Amount { get; set; }
+}
+'''
+        result = recognizer.recognize(Path("Models/CreateOrderDto.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:CreateOrderDto" not in ids
+
+    def test_viewmodel_suffix_filtered_out(self, recognizer):
+        """Classes ending in ViewModel must NOT produce a service node."""
+        content = '''
+public class OrderViewModel : BaseViewModel {
+    public int Id { get; set; }
+    public string Name { get; set; }
+}
+'''
+        result = recognizer.recognize(Path("ViewModels/OrderViewModel.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:OrderViewModel" not in ids
+
+    def test_model_suffix_filtered_out(self, recognizer):
+        """Classes ending in Model must NOT produce a service node."""
+        content = '''
+public class UserModel : IModel {
+    public int Id { get; set; }
+}
+'''
+        result = recognizer.recognize(Path("Models/UserModel.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:UserModel" not in ids
+
+    def test_exception_suffix_filtered_out(self, recognizer):
+        """Classes ending in Exception must NOT produce a service node."""
+        content = '''
+public class SecretNotFoundException : ApplicationException {
+    public SecretNotFoundException(string key) : base($"Secret {key} not found") { }
+}
+'''
+        result = recognizer.recognize(Path("Exceptions/SecretNotFoundException.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:SecretNotFoundException" not in ids
+
+    def test_attribute_suffix_filtered_out(self, recognizer):
+        """Classes ending in Attribute must NOT produce a service node."""
+        content = '''
+public class ValidateModelAttribute : ActionFilterAttribute {
+    public override void OnActionExecuting(ActionExecutingContext context) { }
+}
+'''
+        result = recognizer.recognize(Path("Filters/ValidateModelAttribute.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:ValidateModelAttribute" not in ids
+
+    def test_static_class_filtered_out(self, recognizer):
+        """Static classes must NOT produce a service node."""
+        content = '''
+public static class StringExtensions {
+    public static string ToSnakeCase(this string s) => s;
+}
+'''
+        result = recognizer.recognize(Path("Utils/StringExtensions.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:StringExtensions" not in ids
+
+    def test_plain_class_no_inheritance_no_di_filtered(self, recognizer):
+        """A plain class with no inheritance and no DI ctor must NOT produce a service node."""
+        content = '''
+internal class DataHelper {
+    public string FormatDate(DateTime dt) => dt.ToString();
+}
+'''
+        result = recognizer.recognize(Path("Helpers/DataHelper.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:DataHelper" not in ids
+
+    def test_hub_not_duplicated_by_di_detector(self, recognizer):
+        """SignalR hubs already captured by dedicated pattern must NOT be duplicated."""
+        content = '''
+public class ChatHub : Hub<IChatClient> {
+    public async Task Send(string msg) { }
+}
+'''
+        result = recognizer.recognize(Path("Hubs/ChatHub.cs"), content)
+        service_nodes = [n for n in result.nodes if n.id == "service:ChatHub"]
+        assert len(service_nodes) == 1
+
+    def test_controller_base_not_emitted_as_di_service(self, recognizer):
+        """ControllerBase is in _CS_ALREADY_CAPTURED_BASES — the DI detector must not create a node for it.
+
+        The regex recognizer does NOT produce a service node for ``ControllerBase`` subclasses
+        unless [ApiController] is present. This test verifies the DI detector also doesn't
+        emit one (ControllerBase is in the skip-list for non-interface bases).
+        """
+        content = '''
+public class OrdersController : ControllerBase {
+    [HttpGet("/api/orders")]
+    public IActionResult Get() => Ok();
+}
+'''
+        result = recognizer.recognize(Path("Controllers/OrdersController.cs"), content)
+        service_nodes = [n for n in result.nodes if "service:OrdersController" in n.id]
+        # The regex recognizer only detects controllers via [ApiController] attribute,
+        # not via ControllerBase inheritance alone. ControllerBase is in the skip list.
+        assert len(service_nodes) == 0
+
+    def test_kind_inference_repository(self, recognizer):
+        """Classes ending in Repository should have kind=repository."""
+        content = '''
+public class UserRepository : IUserRepository {
+    public User GetById(int id) => null;
+}
+'''
+        result = recognizer.recognize(Path("Repositories/UserRepository.cs"), content)
+        node = next((n for n in result.nodes if n.id == "service:UserRepository"), None)
+        assert node is not None
+        assert node.metadata.get("kind") == "repository"
+
+    def test_kind_inference_handler(self, recognizer):
+        """Classes ending in Handler should have kind=handler (non-MediatR)."""
+        content = '''
+public class AuthenticationHandler : BaseHandler, IAuthenticationHandler {
+    public void Authenticate() { }
+}
+'''
+        result = recognizer.recognize(Path("Auth/AuthenticationHandler.cs"), content)
+        node = next((n for n in result.nodes if n.id == "service:AuthenticationHandler"), None)
+        assert node is not None
+        assert node.metadata.get("kind") == "handler"
+
+    def test_kind_inference_validator(self, recognizer):
+        """Classes ending in Validator should have kind=validator."""
+        content = '''
+public class CreateOrderValidator : IValidator<CreateOrderCommand> {
+    public bool Validate(CreateOrderCommand cmd) => true;
+}
+'''
+        result = recognizer.recognize(Path("Validators/CreateOrderValidator.cs"), content)
+        node = next((n for n in result.nodes if n.id == "service:CreateOrderValidator"), None)
+        assert node is not None
+        assert node.metadata.get("kind") == "validator"
+
+    def test_multiple_interface_implements_all_recorded(self, recognizer):
+        """class Foo : IFoo, IBar should capture all interface names in metadata."""
+        content = '''
+public class SecretEngine : ISecretEngine, IDisposable {
+    public string Retrieve(string key) => "";
+    public void Dispose() { }
+}
+'''
+        result = recognizer.recognize(Path("Engine/SecretEngine.cs"), content)
+        node = next((n for n in result.nodes if n.id == "service:SecretEngine"), None)
+        assert node is not None
+        implements = node.metadata.get("implements", [])
+        assert "ISecretEngine" in implements
+
+    def test_args_suffix_filtered_out(self, recognizer):
+        """Classes ending in Args must NOT produce a service node."""
+        content = '''
+public class SecretRetrievalArgs : IArgs {
+    public string SecretName { get; set; }
+}
+'''
+        result = recognizer.recognize(Path("Args/SecretRetrievalArgs.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:SecretRetrievalArgs" not in ids
+
+
+# ---------------------------------------------------------------------------
+# DI-aware C# service detection (AST recognizer)
+# ---------------------------------------------------------------------------
+
+
+try:
+    from codegiraffe.ast_scanner import HAS_TS_CSHARP
+    _has_ts_csharp_for_di = HAS_TS_CSHARP
+except ImportError:
+    _has_ts_csharp_for_di = False
+
+requires_ts_csharp_di = pytest.mark.skipif(
+    not _has_ts_csharp_for_di,
+    reason="tree-sitter-c-sharp not installed",
+)
+
+
+@requires_ts_csharp_di
+class TestCSharpASTDIServiceDetection:
+    """Tests for the DI-aware filtered class detection in CSharpASTRecognizer."""
+
+    @pytest.fixture
+    def recognizer(self):
+        from codegiraffe.ast_scanner import CSharpASTRecognizer
+        return CSharpASTRecognizer()
+
+    def test_interface_implementing_class_emits_service(self, recognizer):
+        """class Foo : IFoo should produce a service node via AST recognizer."""
+        content = '''
+public class SecretProvider : ISecretProvider {
+    public string GetSecret(string key) { return ""; }
+}
+'''
+        result = recognizer.recognize(Path("Services/SecretProvider.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:SecretProvider" in ids
+        node = next(n for n in result.nodes if n.id == "service:SecretProvider")
+        assert node.metadata.get("kind") == "provider"
+
+    def test_di_constructor_emits_service(self, recognizer):
+        """A constructor with IXxx parameters should trigger DI service node emission."""
+        content = '''
+public class OrderProcessor {
+    private readonly IOrderRepository _repo;
+
+    public OrderProcessor(IOrderRepository repo, ILogger<OrderProcessor> logger) {
+        _repo = repo;
+    }
+
+    public void Process(int id) { }
+}
+'''
+        result = recognizer.recognize(Path("Services/OrderProcessor.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:OrderProcessor" in ids
+        node = next(n for n in result.nodes if n.id == "service:OrderProcessor")
+        di_deps = node.metadata.get("di_dependencies", [])
+        assert any("IOrderRepository" in d for d in di_deps)
+
+    def test_non_trivial_base_class_emits_service(self, recognizer):
+        """class Foo : SomeBase (non-framework) should produce a service node."""
+        content = '''
+public class CachingRepository : BaseRepository {
+    public object Find(int id) { return null; }
+}
+'''
+        result = recognizer.recognize(Path("Repositories/CachingRepository.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:CachingRepository" in ids
+        node = next(n for n in result.nodes if n.id == "service:CachingRepository")
+        assert node.metadata.get("kind") == "repository"
+
+    def test_dto_suffix_filtered_out(self, recognizer):
+        """Classes ending in Dto must NOT produce a service node via AST recognizer."""
+        content = '''
+public class CreateOrderDto : IDto {
+    public int CustomerId { get; set; }
+}
+'''
+        result = recognizer.recognize(Path("Models/CreateOrderDto.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:CreateOrderDto" not in ids
+
+    def test_viewmodel_suffix_filtered_out(self, recognizer):
+        """Classes ending in ViewModel must NOT produce a service node via AST recognizer."""
+        content = '''
+public class OrderViewModel : BaseViewModel {
+    public int Id { get; set; }
+}
+'''
+        result = recognizer.recognize(Path("ViewModels/OrderViewModel.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:OrderViewModel" not in ids
+
+    def test_exception_suffix_filtered_out(self, recognizer):
+        """Classes ending in Exception must NOT produce a service node via AST recognizer."""
+        content = '''
+public class NotFoundException : ApplicationException {
+    public NotFoundException(string msg) : base(msg) { }
+}
+'''
+        result = recognizer.recognize(Path("Exceptions/NotFoundException.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:NotFoundException" not in ids
+
+    def test_static_class_filtered_out(self, recognizer):
+        """Static classes must NOT produce a service node via AST recognizer."""
+        content = '''
+public static class StringExtensions : IStringExtensions {
+    public static string Slugify(this string s) { return s.ToLower(); }
+}
+'''
+        result = recognizer.recognize(Path("Utils/StringExtensions.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:StringExtensions" not in ids
+
+    def test_plain_class_no_inheritance_no_di_filtered(self, recognizer):
+        """A plain class with no inheritance and no DI must NOT produce a service node."""
+        content = '''
+internal class DataHelper {
+    public string FormatDate(DateTime dt) { return dt.ToString(); }
+}
+'''
+        result = recognizer.recognize(Path("Helpers/DataHelper.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:DataHelper" not in ids
+
+    def test_hub_not_duplicated_by_di_detector(self, recognizer):
+        """SignalR hubs captured by Pass 1 must NOT be duplicated by Pass 2."""
+        content = '''
+public class ChatHub : Hub<IChatClient> {
+    public async System.Threading.Tasks.Task Send(string msg) { }
+}
+'''
+        result = recognizer.recognize(Path("Hubs/ChatHub.cs"), content)
+        service_nodes = [n for n in result.nodes if n.id == "service:ChatHub"]
+        assert len(service_nodes) == 1
+
+    def test_kind_inference_repository(self, recognizer):
+        """Classes ending in Repository should have kind=repository via AST recognizer."""
+        content = '''
+public class UserRepository : IUserRepository {
+    public object GetById(int id) { return null; }
+}
+'''
+        result = recognizer.recognize(Path("Repositories/UserRepository.cs"), content)
+        node = next((n for n in result.nodes if n.id == "service:UserRepository"), None)
+        assert node is not None
+        assert node.metadata.get("kind") == "repository"
+
+    def test_implements_metadata_recorded(self, recognizer):
+        """Implemented interfaces should appear in node metadata."""
+        content = '''
+public class SecretEngine : ISecretEngine, IDisposable {
+    public string Retrieve(string key) { return ""; }
+    public void Dispose() { }
+}
+'''
+        result = recognizer.recognize(Path("Engine/SecretEngine.cs"), content)
+        node = next((n for n in result.nodes if n.id == "service:SecretEngine"), None)
+        assert node is not None
+        implements = node.metadata.get("implements", [])
+        assert "ISecretEngine" in implements

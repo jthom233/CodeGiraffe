@@ -1140,6 +1140,26 @@ _CS_CLASS_QUERY = """
   (base_list) @bases)
 """
 
+# Matches class declarations WITH bases (any class that inherits/implements)
+_CS_CLASS_WITH_BASES_QUERY = """
+(class_declaration
+  name: (identifier) @class_name
+  (base_list) @bases)
+"""
+
+# Matches any class declaration (used to find constructor parameters)
+_CS_CLASS_ANY_QUERY = """
+(class_declaration
+  name: (identifier) @class_name)
+"""
+
+# Matches constructor declarations with parameters
+_CS_CONSTRUCTOR_QUERY = """
+(constructor_declaration
+  name: (identifier) @ctor_name
+  parameters: (parameter_list) @params)
+"""
+
 
 _CS_INTERFACE_QUERY = """
 (interface_declaration
@@ -1186,6 +1206,67 @@ _CS_AST_BUILTINS = frozenset({
     "JsonSerializer", "JsonDocument", "JsonElement",
 })
 
+# Class name suffixes that indicate noise (DTOs, models, exceptions, etc.).
+# Classes ending in these are skipped by the DI-aware class recognizer.
+_CS_NOISE_SUFFIXES = (
+    "Dto", "ViewModel", "Model", "Args", "EventArgs",
+    "Exception", "Attribute", "Extensions", "Constants",
+    "Config", "Options", "Settings",
+)
+
+# Base class names that signal framework patterns already captured elsewhere,
+# or that should not produce *additional* service nodes via this path.
+_CS_ALREADY_CAPTURED_BASES = frozenset({
+    "Hub", "ControllerBase", "Controller", "ApiController",
+    "BackgroundService", "IHostedService",
+    "IRequestHandler", "INotificationHandler", "ICommandHandler",
+})
+
+
+def _cs_infer_kind(class_name: str) -> str:
+    """Infer a descriptive ``kind`` string from a C# class name suffix.
+
+    Returns one of: ``"repository"``, ``"handler"``, ``"provider"``,
+    ``"validator"``, ``"factory"``, ``"manager"``, ``"processor"``,
+    ``"consumer"``, ``"publisher"``, ``"dispatcher"``, ``"resolver"``,
+    ``"sender"``, ``"reader"``, ``"writer"``, ``"builder"``,
+    ``"middleware"``, ``"interceptor"``, ``"observer"``, ``"decorator"``,
+    or the generic ``"service"`` fallback.
+    """
+    name_lower = class_name.lower()
+    suffix_map = (
+        ("repository", "repository"),
+        ("repo", "repository"),
+        ("handler", "handler"),
+        ("provider", "provider"),
+        ("validator", "validator"),
+        ("factory", "factory"),
+        ("manager", "manager"),
+        ("processor", "processor"),
+        ("consumer", "consumer"),
+        ("publisher", "publisher"),
+        ("dispatcher", "dispatcher"),
+        ("resolver", "resolver"),
+        ("sender", "sender"),
+        ("reader", "reader"),
+        ("writer", "writer"),
+        ("builder", "builder"),
+        ("middleware", "middleware"),
+        ("interceptor", "interceptor"),
+        ("observer", "observer"),
+        ("decorator", "decorator"),
+        ("store", "store"),
+        ("cache", "cache"),
+        ("client", "client"),
+        ("gateway", "gateway"),
+        ("adapter", "adapter"),
+        ("connector", "connector"),
+    )
+    for suffix, kind in suffix_map:
+        if name_lower.endswith(suffix):
+            return kind
+    return "service"
+
 _CS_HTTP_ATTR_NAMES = frozenset({
     "HttpGet", "HttpPost", "HttpPut", "HttpDelete", "HttpPatch",
 })
@@ -1208,6 +1289,14 @@ class CSharpASTRecognizer:
         - ``class X : BackgroundService``           -> ``worker`` (background) nodes
         - ``class X : IHostedService``              -> ``worker`` (hosted) nodes
         - ``class X : ControllerBase`` / ``[ApiController]`` -> ``service`` (controller)
+        - ``class X : IFoo``                        -> ``service`` node (implements interface)
+        - ``class X(IFoo foo, IBar bar)``           -> ``service`` node (injects DI deps)
+        - ``class X : SomeBase``                    -> ``service`` node (non-trivial base class)
+
+    Filtered out (not emitted as service nodes):
+        - Classes ending in noise suffixes (Dto, ViewModel, Model, Args, Exception, etc.)
+        - Static classes
+        - Classes with no inheritance and no DI constructor
 
     Inferred structured data (graph edges):
         - ``using X.Y.Z;``              -> :class:`ImportInfo`
@@ -1565,14 +1654,24 @@ class CSharpASTRecognizer:
     ) -> None:
         """Detect architecturally significant class declarations.
 
-        Detects:
+        Pass 1 — Known framework patterns (high-confidence):
         - class X : Hub / Hub<T>          -> service (signalr_hub)
         - class X : IRequestHandler<T>    -> worker (mediatr)
         - class X : BackgroundService     -> worker (background)
         - class X : IHostedService        -> worker (hosted)
         - class X : ControllerBase        -> service (controller)
 
-        No generic class-to-service fallback.
+        Pass 2 — DI-injectable services (filtered heuristic):
+        Emits a ``service`` node when a class meets ANY of these criteria
+        and is NOT already captured, is NOT static, and does NOT carry a
+        noise suffix (Dto, ViewModel, Model, Args, etc.):
+
+        a) Implements at least one interface (base name starts with ``I`` +
+           uppercase letter, e.g. ``IFoo``)
+        b) Has a non-trivial constructor with at least one interface-typed
+           parameter (``IXxx`` naming convention)
+        c) Inherits from a non-framework base class (base name does not
+           start with ``I`` yet also is not in the already-captured set)
         """
         hub_bases = {"Hub"}
         mediatr_bases = {"IRequestHandler", "INotificationHandler", "ICommandHandler"}
@@ -1580,6 +1679,7 @@ class CSharpASTRecognizer:
         hosted_bases = {"IHostedService"}
         controller_bases = {"ControllerBase", "Controller"}
 
+        # --- Pass 1: well-known framework patterns ---
         for _pat, caps in _query_matches(self._language, _CS_CLASS_QUERY, tree.root_node):
             name_nodes = caps.get("class_name", [])
             bases_nodes = caps.get("bases", [])
@@ -1632,6 +1732,143 @@ class CSharpASTRecognizer:
                         label=cls_name, file_path=rel,
                         metadata={"class_name": cls_name, "kind": "controller"},
                     ))
+
+        # --- Pass 2: DI-injectable service detection ---
+        # Build a map of constructor parameters per class for efficient lookup.
+        # Key: class name, Value: set of interface-typed parameter type names.
+        ctor_iface_params: dict[str, set[str]] = {}
+        for _pat, caps in _query_matches(
+            self._language, _CS_CONSTRUCTOR_QUERY, tree.root_node
+        ):
+            name_nodes = caps.get("ctor_name", [])
+            params_nodes = caps.get("params", [])
+            if not name_nodes:
+                continue
+            ctor_cls = _text(name_nodes[0])
+            params_text = _text(params_nodes[0]) if params_nodes else ""
+            # Extract type names from parameter list: look for IUppercase identifiers
+            iface_params: set[str] = set()
+            for type_match in re.finditer(r'\b(I[A-Z]\w*)\b', params_text):
+                iface_params.add(type_match.group(1))
+            if iface_params:
+                ctor_iface_params.setdefault(ctor_cls, set()).update(iface_params)
+
+        # For Pass 2, build a map of {class_name -> base_list_text} from the with-bases query.
+        # Classes WITHOUT a base list won't appear in _CS_CLASS_QUERY but can still qualify
+        # via criterion b (DI constructor). We handle those separately after this loop.
+        seen_in_pass2: set[str] = set()
+
+        for _pat, caps in _query_matches(self._language, _CS_CLASS_QUERY, tree.root_node):
+            name_nodes = caps.get("class_name", [])
+            bases_nodes = caps.get("bases", [])
+            if not name_nodes:
+                continue
+            cls_name = _text(name_nodes[0])
+            seen_in_pass2.add(cls_name)
+
+            # Skip if already emitted by Pass 1 or by _find_attributes
+            if cls_name in captured_class_names:
+                continue
+
+            # Skip noise suffixes (DTOs, models, exceptions, etc.)
+            if cls_name.endswith(_CS_NOISE_SUFFIXES):
+                continue
+
+            # Skip static classes: check the class_declaration node for "static" modifier
+            class_node = name_nodes[0].parent
+            is_static = False
+            if class_node is not None:
+                for child in class_node.children:
+                    if child.type == "modifier" and _text(child) == "static":
+                        is_static = True
+                        break
+            if is_static:
+                continue
+
+            bases_text = _text(bases_nodes[0]) if bases_nodes else ""
+            raw_bases = [b.strip() for b in bases_text.lstrip(":").split(",")]
+            base_names = {re.sub(r"<.*", "", b).strip() for b in raw_bases if b.strip()}
+
+            # Criterion a: implements at least one interface (I + uppercase)
+            implements_interface = any(
+                b and len(b) >= 2 and b[0] == "I" and b[1].isupper()
+                for b in base_names
+            )
+
+            # Criterion b: constructor injects at least one interface-typed dependency
+            injects_di = cls_name in ctor_iface_params
+
+            # Criterion c: inherits from a non-trivial, non-framework base class
+            # (base name does not look like an interface and is not already captured)
+            inherits_base = any(
+                b and b[0].isupper() and not (len(b) >= 2 and b[0] == "I" and b[1].isupper())
+                and b not in _CS_ALREADY_CAPTURED_BASES
+                for b in base_names
+            )
+
+            if not (implements_interface or injects_di or inherits_base):
+                continue
+
+            # Emit service node
+            captured_class_names.add(cls_name)
+            kind = _cs_infer_kind(cls_name)
+            metadata: dict[str, object] = {"class_name": cls_name, "kind": kind}
+            if injects_di:
+                metadata["di_dependencies"] = list(ctor_iface_params[cls_name])
+            if implements_interface:
+                iface_bases = [
+                    b for b in base_names
+                    if b and len(b) >= 2 and b[0] == "I" and b[1].isupper()
+                ]
+                metadata["implements"] = iface_bases
+            nodes.append(Node(
+                id=f"service:{cls_name}", type=NodeType.SERVICE,
+                label=cls_name, file_path=rel,
+                metadata=metadata,
+            ))
+
+        # Pass 2b: Classes with NO inheritance but with DI constructors (criterion b only).
+        # _CS_CLASS_QUERY only matches classes that have a base_list; for plain classes that
+        # only qualify via their constructor parameters we must scan _CS_CLASS_ANY_QUERY.
+        for _pat, caps in _query_matches(self._language, _CS_CLASS_ANY_QUERY, tree.root_node):
+            name_nodes = caps.get("class_name", [])
+            if not name_nodes:
+                continue
+            cls_name = _text(name_nodes[0])
+
+            # Skip classes already handled in Pass 1 or the base-list loop above.
+            if cls_name in captured_class_names or cls_name in seen_in_pass2:
+                continue
+
+            # Only criterion b applies here (no base list).
+            if cls_name not in ctor_iface_params:
+                continue
+
+            # Apply the same noise and static filters.
+            if cls_name.endswith(_CS_NOISE_SUFFIXES):
+                continue
+
+            class_node = name_nodes[0].parent
+            is_static = False
+            if class_node is not None:
+                for child in class_node.children:
+                    if child.type == "modifier" and _text(child) == "static":
+                        is_static = True
+                        break
+            if is_static:
+                continue
+
+            captured_class_names.add(cls_name)
+            kind = _cs_infer_kind(cls_name)
+            nodes.append(Node(
+                id=f"service:{cls_name}", type=NodeType.SERVICE,
+                label=cls_name, file_path=rel,
+                metadata={
+                    "class_name": cls_name,
+                    "kind": kind,
+                    "di_dependencies": list(ctor_iface_params[cls_name]),
+                },
+            ))
 
     # -----------------------------------------------------------------------
     # Structured data (graph edge inputs)
