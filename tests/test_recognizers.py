@@ -1333,7 +1333,7 @@ public class NotificationHub : Hub {
         """[HttpGet] endpoints must carry http_method: GET in metadata."""
         content = '[HttpGet("users")]\npublic IActionResult GetUsers() { return Ok(); }'
         result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
-        node = next((n for n in result.nodes if n.id == "endpoint:users"), None)
+        node = next((n for n in result.nodes if n.id == "endpoint:/users"), None)
         assert node is not None
         assert node.metadata.get("http_method") == "GET"
 
@@ -1341,7 +1341,7 @@ public class NotificationHub : Hub {
         """[HttpPost] endpoints must carry http_method: POST in metadata."""
         content = '[HttpPost("users")]\npublic IActionResult CreateUser() { return Created(); }'
         result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
-        node = next((n for n in result.nodes if n.id == "endpoint:users"), None)
+        node = next((n for n in result.nodes if n.id == "endpoint:/users"), None)
         assert node is not None
         assert node.metadata.get("http_method") == "POST"
 
@@ -1349,7 +1349,7 @@ public class NotificationHub : Hub {
         """[HttpPut] endpoints must carry http_method: PUT in metadata."""
         content = '[HttpPut("users/{id}")]\npublic IActionResult UpdateUser(int id) { return Ok(); }'
         result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
-        node = next((n for n in result.nodes if n.id == "endpoint:users/{id}"), None)
+        node = next((n for n in result.nodes if n.id == "endpoint:/users/{id}"), None)
         assert node is not None
         assert node.metadata.get("http_method") == "PUT"
 
@@ -1357,7 +1357,7 @@ public class NotificationHub : Hub {
         """[HttpDelete] endpoints must carry http_method: DELETE in metadata."""
         content = '[HttpDelete("users/{id}")]\npublic IActionResult DeleteUser(int id) { return NoContent(); }'
         result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
-        node = next((n for n in result.nodes if n.id == "endpoint:users/{id}"), None)
+        node = next((n for n in result.nodes if n.id == "endpoint:/users/{id}"), None)
         assert node is not None
         assert node.metadata.get("http_method") == "DELETE"
 
@@ -1365,7 +1365,7 @@ public class NotificationHub : Hub {
         """[HttpPatch] endpoints must carry http_method: PATCH in metadata."""
         content = '[HttpPatch("users/{id}")]\npublic IActionResult PatchUser(int id) { return Ok(); }'
         result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
-        node = next((n for n in result.nodes if n.id == "endpoint:users/{id}"), None)
+        node = next((n for n in result.nodes if n.id == "endpoint:/users/{id}"), None)
         assert node is not None
         assert node.metadata.get("http_method") == "PATCH"
 

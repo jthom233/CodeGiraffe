@@ -1692,7 +1692,8 @@ def validate_contracts(graph: ArchGraph) -> dict[str, Any]:
 
 
 def detect_drift(
-    graph: ArchGraph, project_path: str, git_depth: int = 10
+    graph: ArchGraph, project_path: str, git_depth: int = 10,
+    scanner_mode: str = "hybrid",
 ) -> list[dict[str, str]]:
     """Compare the current graph against a fresh scan of *project_path*.
 
@@ -1708,6 +1709,10 @@ def detect_drift(
     git_depth:
         How many recent commits to check for git-detected file renames.
         Defaults to 10.
+    scanner_mode:
+        Scanner registry to use: ``"hybrid"`` (default), ``"ast"``, or
+        ``"regex"``.  Should match the mode used when the graph was built
+        so that AST-discovered nodes are not falsely reported as drift.
 
     Returns a list of drift records, each a dict with:
     - ``type``: one of ``"missing_in_code"``, ``"missing_in_graph"``,
@@ -1722,7 +1727,20 @@ def detect_drift(
     # scanner module to be developed independently.
     from codegiraffe.scanner import scan_project  # type: ignore[import-untyped]
 
-    scanned_result = scan_project(project_path)
+    # Select scanner registry matching the mode used at init time so that
+    # AST-discovered nodes are not falsely reported as missing_in_code.
+    registry = None
+    if scanner_mode == "ast":
+        from codegiraffe.ast_scanner import get_ast_registry
+        registry = get_ast_registry()
+    elif scanner_mode == "hybrid":
+        try:
+            from codegiraffe.ast_scanner import get_hybrid_registry
+            registry = get_hybrid_registry()
+        except ImportError:
+            registry = None  # falls back to default regex registry
+
+    scanned_result = scan_project(project_path, registry=registry)
     scanned_ids: set[str] = {node.id for node in scanned_result.nodes}
 
     # Build lookup maps for node objects (used by _enhanced_similarity)

@@ -469,15 +469,33 @@ public IActionResult GetUsers() { return Ok(); }
         ep_nodes = [n for n in result.nodes if n.type == NodeType.ENDPOINT]
         assert len(ep_nodes) >= 1
 
-    def test_route_attribute(self, recognizer):
-        """[Route("api/[controller]")] should produce an endpoint node."""
+    def test_route_attribute_class_level_skipped(self, recognizer):
+        """Class-level [Route("api/[controller]")] should NOT produce an endpoint node (it's a runtime prefix)."""
         content = '''
 [Route("api/[controller]")]
 public class ProductsController : ControllerBase { }
 '''
         result = recognizer.recognize(Path("Controllers/ProductsController.cs"), content)
+        ep_nodes = [n for n in result.nodes if n.type == NodeType.ENDPOINT]
+        assert len(ep_nodes) == 0
+
+    def test_route_composition(self, recognizer):
+        """Class-level [Route] should compose with method-level [HttpGet] to produce a full route."""
+        content = '''
+[Route("api/v1/analytics")]
+[ApiController]
+public class AnalyticsController : ControllerBase {
+    [HttpGet("dashboard")]
+    public IActionResult GetDashboard() { return Ok(); }
+
+    [HttpGet]
+    public IActionResult GetAll() { return Ok(); }
+}
+'''
+        result = recognizer.recognize(Path("Controllers/AnalyticsController.cs"), content)
         ids = {n.id for n in result.nodes}
-        assert "endpoint:api/[controller]" in ids
+        assert "endpoint:/api/v1/analytics/dashboard" in ids
+        assert "endpoint:/api/v1/analytics" in ids
 
     def test_table_attribute(self, recognizer):
         """[Table("Users")] should produce a database_table node."""
