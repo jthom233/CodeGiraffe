@@ -28,6 +28,7 @@ from codegiraffe.query import (
     map_files_to_nodes,
     order_tasks,
     query_by_node,
+    query_by_text,
     query_by_type,
     suggest_tests,
     validate_changes,
@@ -217,23 +218,34 @@ def codegiraffe_query(
     project_path: str,
     node_id: str | None = None,
     node_type: str | None = None,
+    query: str | None = None,
     depth: int = 2,
 ) -> str:
-    """Query the architecture graph by node ID or node type.
+    """Query the architecture graph by node ID, node type, or free-text search.
 
     Provide *node_id* to extract a subgraph centered on that node (up to
     *depth* hops), or *node_type* to retrieve all nodes of that type with
-    their direct edges. Returns the subgraph as formatted JSON.
+    their direct edges.
+
+    Use *query* for case-insensitive substring search across node IDs, labels,
+    and metadata values (e.g. class_name, kind).  You may combine *query* with
+    *node_type* to search within a specific type.  Results are capped at 50
+    nodes.
+
+    *node_id* takes precedence over *query* which takes precedence over
+    *node_type* alone.  Returns the subgraph as formatted JSON.
     """
     try:
         graph = _ensure_graph(project_path)
 
         if node_id is not None:
             subgraph = query_by_node(graph, node_id, depth)
+        elif query is not None:
+            subgraph = query_by_text(graph, query, node_type=node_type)
         elif node_type is not None:
             subgraph = query_by_type(graph, node_type)
         else:
-            return "Error: provide either node_id or node_type"
+            return "Error: provide either node_id, node_type, or query"
 
         return subgraph.model_dump_json(indent=2)
     except Exception as exc:
@@ -538,7 +550,8 @@ def codegiraffe_hotspots(
 @mcp.tool()
 def codegiraffe_blast_radius(
     project_path: str,
-    node_id: str,
+    node_id: str | None = None,
+    query: str | None = None,
     include_upstream: bool = False,
     max_depth: int | None = None,
 ) -> str:
@@ -548,14 +561,44 @@ def codegiraffe_blast_radius(
     ranked by severity (direct, transitive, indirect), plus any circular
     dependencies and hotspots in the impact zone.
 
+    Provide *node_id* for an exact lookup, or *query* to find a matching node
+    by case-insensitive substring search across node IDs, labels, and metadata.
+    When *query* matches multiple nodes the best match (first result) is used
+    and the others are listed so you can refine.
+
     Returns a human-readable markdown impact report.
     """
     try:
         graph = _ensure_graph(project_path)
+
+        if node_id is not None:
+            target_id = node_id
+            other_matches: list[str] = []
+        elif query is not None:
+            # Find nodes matching the query
+            matches_data = query_by_text(graph, query)
+            matched_ids = list(matches_data.nodes.keys())
+            if not matched_ids:
+                return f"No nodes found matching query '{query}'."
+            target_id = matched_ids[0]
+            other_matches = matched_ids[1:]
+        else:
+            return "Error: provide either node_id or query"
+
         blast = compute_blast_radius(
-            graph, node_id, include_upstream=include_upstream, max_depth=max_depth
+            graph, target_id, include_upstream=include_upstream, max_depth=max_depth
         )
-        return generate_impact_summary(blast, graph)
+        report = generate_impact_summary(blast, graph)
+
+        if other_matches:
+            note = (
+                "\n\n---\n**Note:** The query also matched these other nodes; "
+                "re-run with a more specific query or use `node_id` to target one:\n"
+                + "\n".join(f"- `{nid}`" for nid in other_matches)
+            )
+            report = report + note
+
+        return report
     except ValueError as exc:
         return str(exc)
     except Exception as exc:
