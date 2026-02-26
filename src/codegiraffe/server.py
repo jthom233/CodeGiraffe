@@ -1472,6 +1472,7 @@ def codegiraffe_coverage(
         with _graph_lock:
             graph = _ensure_graph(project_path)
             map_coverage_to_nodes(graph, coverage_data)
+            _storage.save(project_path, graph.to_data())
 
             lines = ["## Coverage Mapping Report", ""]
             lines.append(f"**Format:** {fmt}")

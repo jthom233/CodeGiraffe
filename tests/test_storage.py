@@ -171,3 +171,85 @@ class TestCreatesDirectory:
         storage.save(project, graph_data)  # Should not raise
 
         assert storage.exists(project)
+
+
+# ---------------------------------------------------------------------------
+# US2: Atomic JSON writes
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicJSONWrite:
+    """JSONStorage.save() is atomic — interrupted save leaves the original file intact."""
+
+    def test_original_file_survives_interrupted_save(self, storage, graph_data, tmp_path, monkeypatch):
+        """Monkeypatching os.replace to raise leaves the original file readable."""
+        import codegiraffe.storage as _storage_module
+
+        project = str(tmp_path)
+        # First save — creates the original file
+        storage.save(project, graph_data)
+
+        graph_b = GraphData(
+            nodes={
+                "mod:changed": Node(id="mod:changed", type="module", label="changed"),
+            },
+            edges=[],
+            project_path=project,
+        )
+
+        def raise_oserror(src, dst):
+            raise OSError("Simulated crash mid-save")
+
+        monkeypatch.setattr(_storage_module.os, "replace", raise_oserror)
+
+        with pytest.raises(OSError):
+            storage.save(project, graph_b)
+
+        # Original file must still be loadable
+        reloaded = storage.load(project)
+        assert reloaded is not None
+        assert "endpoint:/api/users" in reloaded.nodes
+
+    def test_normal_save_replaces_file_atomically(self, storage, graph_data, tmp_path):
+        """Save graph A then graph B; load returns graph B; no .tmp files remain."""
+        project = str(tmp_path)
+        storage.save(project, graph_data)
+
+        graph_b = GraphData(
+            nodes={
+                "mod:new": Node(id="mod:new", type="module", label="new"),
+            },
+            edges=[],
+            project_path=project,
+        )
+        storage.save(project, graph_b)
+
+        loaded = storage.load(project)
+        assert loaded is not None
+        assert "mod:new" in loaded.nodes
+        assert "endpoint:/api/users" not in loaded.nodes
+
+        # No .tmp files should remain
+        from codegiraffe.storage import STORAGE_DIR
+        cg_dir = tmp_path / STORAGE_DIR
+        tmp_files = list(cg_dir.glob("*.tmp"))
+        assert tmp_files == [], f"Unexpected .tmp files: {tmp_files}"
+
+    def test_first_save_leaves_no_corrupt_file_on_failure(self, storage, graph_data, tmp_path, monkeypatch):
+        """On a fresh directory, interrupted save leaves no corrupt graph.json."""
+        import codegiraffe.storage as _storage_module
+        from codegiraffe.storage import STORAGE_DIR, GRAPH_FILENAME
+
+        project = str(tmp_path)
+
+        def raise_oserror(src, dst):
+            raise OSError("Simulated crash")
+
+        monkeypatch.setattr(_storage_module.os, "replace", raise_oserror)
+
+        with pytest.raises(OSError):
+            storage.save(project, graph_data)
+
+        # graph.json must NOT exist — clean failure
+        graph_file = tmp_path / STORAGE_DIR / GRAPH_FILENAME
+        assert not graph_file.exists(), "graph.json must not exist after a failed first save"

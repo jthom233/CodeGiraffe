@@ -357,3 +357,115 @@ class TestSQLiteStorageCreatesDirectory:
         storage.save(project, graph_data)  # Should not raise
 
         assert storage.exists(project)
+
+
+# ---------------------------------------------------------------------------
+# US1: Confidence persistence
+# ---------------------------------------------------------------------------
+
+
+class TestSQLiteConfidencePersistence:
+    """Edge.confidence round-trips through SQLite with zero data loss."""
+
+    def test_confidence_survives_round_trip(self, storage, tmp_path):
+        """Save edges with distinct confidence values; reload; verify exact match."""
+        project = str(tmp_path)
+        data = GraphData(
+            nodes={
+                "mod:a": Node(id="mod:a", type="module", label="a"),
+                "mod:b": Node(id="mod:b", type="module", label="b"),
+                "mod:c": Node(id="mod:c", type="module", label="c"),
+                "mod:d": Node(id="mod:d", type="module", label="d"),
+            },
+            edges=[
+                Edge(source="mod:a", target="mod:b", type="imports", confidence=0.5),
+                Edge(source="mod:b", target="mod:c", type="imports", confidence=0.7),
+                Edge(source="mod:c", target="mod:d", type="imports", confidence=0.9),
+            ],
+            project_path=project,
+        )
+        storage.save(project, data)
+        loaded = storage.load(project)
+
+        assert loaded is not None
+        assert len(loaded.edges) == 3
+        by_source = {e.source: e for e in loaded.edges}
+        assert by_source["mod:a"].confidence == pytest.approx(0.5)
+        assert by_source["mod:b"].confidence == pytest.approx(0.7)
+        assert by_source["mod:c"].confidence == pytest.approx(0.9)
+
+    def test_default_confidence_is_1_0(self, storage, tmp_path):
+        """Edge with default confidence=1.0 round-trips correctly."""
+        project = str(tmp_path)
+        data = GraphData(
+            nodes={
+                "mod:x": Node(id="mod:x", type="module", label="x"),
+                "mod:y": Node(id="mod:y", type="module", label="y"),
+            },
+            edges=[
+                Edge(source="mod:x", target="mod:y", type="imports", confidence=1.0),
+            ],
+            project_path=project,
+        )
+        storage.save(project, data)
+        loaded = storage.load(project)
+
+        assert loaded is not None
+        assert len(loaded.edges) == 1
+        assert loaded.edges[0].confidence == pytest.approx(1.0)
+
+    def test_old_database_without_confidence_column(self, tmp_path):
+        """Databases created without the confidence column load edges as confidence=1.0."""
+        import sqlite3 as _sqlite3
+        from codegiraffe.sqlite_storage import STORAGE_DIR, DB_FILENAME
+
+        # Manually create a DB with the old schema (no confidence column)
+        db_dir = tmp_path / STORAGE_DIR
+        db_dir.mkdir(parents=True)
+        db_path = db_dir / DB_FILENAME
+
+        conn = _sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE nodes (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                file_path TEXT DEFAULT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                manual INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                type TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                manual INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(source, target, type)
+            );
+        """)
+        conn.execute("INSERT INTO graph_meta VALUES ('project_path', ?)", (str(tmp_path),))
+        conn.execute("INSERT INTO graph_meta VALUES ('last_scan', '')")
+        conn.execute("INSERT INTO graph_meta VALUES ('schema_version', '1')")
+        conn.execute(
+            "INSERT INTO nodes (id, type, label, metadata, manual) VALUES (?, ?, ?, '{}', 0)",
+            ("mod:a", "module", "a"),
+        )
+        conn.execute(
+            "INSERT INTO nodes (id, type, label, metadata, manual) VALUES (?, ?, ?, '{}', 0)",
+            ("mod:b", "module", "b"),
+        )
+        conn.execute(
+            "INSERT INTO edges (source, target, type, metadata, manual) VALUES (?, ?, ?, '{}', 0)",
+            ("mod:a", "mod:b", "imports"),
+        )
+        conn.commit()
+        conn.close()
+
+        storage = SQLiteStorage()
+        loaded = storage.load(str(tmp_path))
+
+        assert loaded is not None
+        assert len(loaded.edges) == 1
+        assert loaded.edges[0].confidence == pytest.approx(1.0)

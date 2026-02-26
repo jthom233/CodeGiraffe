@@ -664,3 +664,104 @@ class TestCypherWriteRejection:
         """run_cypher() raises ValueError with 'read-only' for write queries."""
         with pytest.raises(ValueError, match="read-only"):
             storage.run_cypher("MATCH (n) DETACH DELETE n")
+
+
+# ---------------------------------------------------------------------------
+# US1: Confidence persistence in Neo4j
+# ---------------------------------------------------------------------------
+
+
+class TestNeo4jConfidencePersistence:
+    """Edge.confidence round-trips through Neo4j with zero data loss."""
+
+    def test_confidence_survives_round_trip(self, storage, mock_driver):
+        """edge_params passed to tx.run includes 'confidence'; load returns correct values."""
+        _, session, tx = mock_driver
+
+        # Build graph with a non-default confidence edge
+        data = GraphData(
+            nodes={
+                "mod:a": Node(id="mod:a", type="module", label="a"),
+                "mod:b": Node(id="mod:b", type="module", label="b"),
+            },
+            edges=[
+                Edge(source="mod:a", target="mod:b", type="imports", confidence=0.7),
+            ],
+            project_path="/tmp/test",
+        )
+
+        storage.save("/tmp/test", data)
+
+        # Inspect what was passed to the edge batch Cypher call
+        all_calls = tx.run.call_args_list
+        edge_call = None
+        for call in all_calls:
+            query = call[0][0] if call[0] else ""
+            if "UNWIND" in query and "edge" in query.lower():
+                edge_call = call
+                break
+
+        assert edge_call is not None, "Expected an edge UNWIND Cypher call"
+        # The edges= keyword arg should contain confidence
+        kwargs = edge_call[1] if edge_call[1] else {}
+        args = edge_call[0]
+        # edges param passed as keyword arg
+        edges_param = kwargs.get("edges") or (args[1] if len(args) > 1 else None)
+        assert edges_param is not None, "Expected edges parameter in Cypher call"
+        assert len(edges_param) == 1
+        assert "confidence" in edges_param[0], (
+            "edge_params dict must include 'confidence' key"
+        )
+        assert edges_param[0]["confidence"] == pytest.approx(0.7)
+
+    def test_load_missing_confidence_defaults_to_1_0(self, storage, mock_driver):
+        """Simulate a Neo4j record with no confidence property; loaded Edge.confidence == 1.0."""
+        _, session, _ = mock_driver
+
+        # exists check returns True
+        exists_record = MagicMock()
+        exists_record.__getitem__ = MagicMock(return_value=True)
+        exists_result = MagicMock()
+        exists_result.single.return_value = exists_record
+
+        # meta query
+        meta_record = MagicMock()
+        meta_record.data.return_value = {
+            "meta": {
+                "project_path": "/tmp/test",
+                "last_scan": "",
+                "schema_version": "1",
+            }
+        }
+        meta_result = MagicMock()
+        meta_result.single.return_value = meta_record
+
+        # nodes query — empty
+        nodes_result = MagicMock()
+        nodes_result.__iter__ = MagicMock(return_value=iter([]))
+
+        # edges query — record WITHOUT confidence property
+        edge_record = MagicMock()
+        edge_record.data.return_value = {
+            "source": "mod:a",
+            "target": "mod:b",
+            "type": "imports",
+            "metadata": "{}",
+            "manual": False,
+            # NOTE: no "confidence" key — simulates old data
+        }
+        edges_result = MagicMock()
+        edges_result.__iter__ = MagicMock(return_value=iter([edge_record]))
+
+        session.run.side_effect = [
+            exists_result,
+            meta_result,
+            nodes_result,
+            edges_result,
+        ]
+
+        loaded = storage.load("/tmp/test")
+
+        assert loaded is not None
+        assert len(loaded.edges) == 1
+        assert loaded.edges[0].confidence == pytest.approx(1.0)

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Protocol
 
@@ -79,19 +81,34 @@ class JSONStorage:
             return None
 
     def save(self, project_path: str, data: GraphData) -> None:
-        """Serialize graph data to disk.
+        """Serialize graph data to disk atomically.
 
         Creates the ``.codegiraffe`` directory if it doesn't already exist.
-        Writes atomically-enough for single-user CLI usage (write + flush).
+        Writes to a temporary file in the same directory, then atomically
+        renames it over the target with ``os.replace()``.  This ensures that
+        a crash or power loss mid-write leaves the previous file intact.
         """
         path = self._graph_path(project_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         payload = data.model_dump(mode="json")
-        path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        content = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                delete=False,
+                suffix=".tmp",
+            ) as tmp:
+                tmp.write(content)
+                tmp_path = Path(tmp.name)
+            os.replace(tmp_path, path)
+        except Exception:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            raise
 
     def exists(self, project_path: str) -> bool:
         """Check whether the graph JSON file exists on disk."""

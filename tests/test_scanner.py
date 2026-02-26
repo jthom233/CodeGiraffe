@@ -758,3 +758,122 @@ class TestInheritanceDetection:
             e for e in implements_edges
             if e.source == "service:User"
         ]) == 0
+
+
+# ---------------------------------------------------------------------------
+# US4: Per-model __tablename__ detection
+# ---------------------------------------------------------------------------
+
+
+class TestTableNamePerModelClass:
+    """Each SQLAlchemy model class in a multi-model file gets its own __tablename__."""
+
+    def test_two_models_get_distinct_table_names(self):
+        """Two models with different __tablename__ values produce two distinct table nodes."""
+        source = """
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+
+class Order(Base):
+    __tablename__ = 'orders'
+    id = Column(Integer, primary_key=True)
+"""
+        recognizer = PythonRecognizer()
+        result = recognizer.recognize(Path("models.py"), source)
+
+        table_nodes = [n for n in result.nodes if n.type == "database_table"]
+        assert len(table_nodes) == 2, (
+            f"Expected 2 table nodes, got {len(table_nodes)}: "
+            f"{[n.metadata for n in table_nodes]}"
+        )
+
+        table_names = {n.metadata.get("table_name") for n in table_nodes}
+        assert "users" in table_names, (
+            f"Expected 'users' in table names, got: {table_names}"
+        )
+        assert "orders" in table_names, (
+            f"Expected 'orders' in table names, got: {table_names}"
+        )
+
+    def test_first_model_explicit_second_model_default(self):
+        """First model has explicit __tablename__; second defaults to lowercased class name."""
+        source = """
+class Product(Base):
+    __tablename__ = 'products'
+    id = Column(Integer, primary_key=True)
+
+class Invoice(Base):
+    id = Column(Integer, primary_key=True)
+"""
+        recognizer = PythonRecognizer()
+        result = recognizer.recognize(Path("models.py"), source)
+
+        table_nodes = [n for n in result.nodes if n.type == "database_table"]
+        assert len(table_nodes) == 2, (
+            f"Expected 2 table nodes, got {len(table_nodes)}"
+        )
+
+        by_class = {n.metadata.get("class_name"): n for n in table_nodes}
+        assert by_class["Product"].metadata.get("table_name") == "products", (
+            f"Product should have table_name='products', got: {by_class['Product'].metadata}"
+        )
+        assert by_class["Invoice"].metadata.get("table_name") == "invoice", (
+            f"Invoice should have table_name='invoice' (default), got: {by_class['Invoice'].metadata}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# US5: Edge deduplication idempotency
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeDeduplicationIdempotency:
+    """Scanning an unchanged project twice produces an identical edge count."""
+
+    def test_double_scan_produces_same_edge_count(self, tmp_path):
+        """Scan a multi-file project twice; edge counts must be identical."""
+        # Create a small multi-file project with an endpoint and a SQLAlchemy model
+        (tmp_path / "app.py").write_text(
+            "from flask import Flask\n"
+            "app = Flask(__name__)\n"
+            "\n"
+            "@app.route('/items')\n"
+            "def list_items():\n"
+            "    return Item.query.all()\n"
+        )
+        (tmp_path / "models.py").write_text(
+            "from flask_sqlalchemy import SQLAlchemy\n"
+            "db = SQLAlchemy()\n"
+            "\n"
+            "class Item(db.Model):\n"
+            "    __tablename__ = 'items'\n"
+            "    id = db.Column(db.Integer, primary_key=True)\n"
+        )
+
+        result1 = scan_project(str(tmp_path))
+        edge_count_1 = len(result1.edges)
+
+        result2 = scan_project(str(tmp_path))
+        edge_count_2 = len(result2.edges)
+
+        assert edge_count_1 == edge_count_2, (
+            f"Double scan produced different edge counts: "
+            f"first={edge_count_1}, second={edge_count_2}"
+        )
+
+    def test_dedup_key_types_are_consistent(self):
+        """StrEnum dedup keys: EdgeType.READS and 'reads' both find the same set entry."""
+        from codegiraffe.graph import Edge
+
+        edges = [
+            Edge(source="ep:/a", target="table:b", type="reads"),
+        ]
+        existing_edges = {(e.source, e.target, str(e.type)) for e in edges}
+
+        # Both string and StrEnum forms must be found
+        assert ("ep:/a", "table:b", "reads") in existing_edges
+        assert ("ep:/a", "table:b", EdgeType.READS) in existing_edges, (
+            "StrEnum EdgeType.READS must equal 'reads' for set lookup"
+        )
+        assert ("ep:/a", "table:b", EdgeType.READS.value) in existing_edges
