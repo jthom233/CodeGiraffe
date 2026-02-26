@@ -7,6 +7,7 @@ codegiraffe_sync are updated to call compute_layout() and persist the result.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +16,9 @@ import codegiraffe.server as server_module
 from codegiraffe.server import (
     codegiraffe_init,
     codegiraffe_sync,
+    codegiraffe_coverage,
 )
+from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 from codegiraffe.storage import JSONStorage
 from codegiraffe.versioning import VersionStore
 from codegiraffe.federation import GraphFederation
@@ -176,4 +179,71 @@ class TestLayoutIntegration:
         assert len(graph_data.layout) > 0, (
             f"Expected non-empty layout (grid fallback) when fa2 is unavailable, "
             f"got: {graph_data.layout!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# US3: Coverage annotation persistence
+# ---------------------------------------------------------------------------
+
+
+class TestCoverageAnnotationPersistence:
+    """codegiraffe_coverage must save the annotated graph to storage."""
+
+    def test_coverage_annotations_persist_to_storage(self, tmp_path):
+        """After codegiraffe_coverage, reloading from storage shows _test_coverage metadata."""
+        project = str(tmp_path)
+
+        # Build a graph with one module node whose file_path matches a coverage entry
+        node = Node(
+            id="mod:app",
+            type="module",
+            label="app",
+            file_path="app.py",
+        )
+        data = GraphData(
+            nodes={"mod:app": node},
+            edges=[],
+            project_path=project,
+        )
+
+        # Initialize server globals
+        storage = JSONStorage()
+        storage.save(project, data)
+        server_module._storage = storage
+        server_module._graph = ArchGraph(data)
+
+        # Write a minimal coverage.py JSON report matching app.py
+        coverage_report = {
+            "meta": {"version": "7.0"},
+            "files": {
+                "app.py": {"summary": {"percent_covered": 75.0}},
+            },
+        }
+        coverage_path = str(tmp_path / "coverage.json")
+        (tmp_path / "coverage.json").write_text(json.dumps(coverage_report), encoding="utf-8")
+
+        # Call the coverage tool
+        result = codegiraffe_coverage(
+            project_path=project,
+            coverage_path=coverage_path,
+            format="coverage_py",
+        )
+
+        assert "Annotated nodes" in result, (
+            f"Expected 'Annotated nodes' in result, got: {result!r}"
+        )
+
+        # Reload from storage — annotations must be persisted
+        reloaded = storage.load(project)
+        assert reloaded is not None
+
+        mod_node = reloaded.nodes.get("mod:app")
+        assert mod_node is not None, "mod:app node must exist in reloaded graph"
+        coverage_val = mod_node.metadata.get("_test_coverage")
+        assert coverage_val is not None, (
+            "mod:app must have _test_coverage metadata after codegiraffe_coverage"
+        )
+        assert abs(coverage_val - 75.0) < 0.01, (
+            f"Expected coverage 75.0, got {coverage_val}"
         )

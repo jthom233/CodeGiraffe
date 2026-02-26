@@ -204,7 +204,8 @@ class Neo4jStorage:
                 edges_result = session.run(
                     f"MATCH (a:`{label}`)-[r]->(b:`{label}`) "
                     f"RETURN a.id AS source, b.id AS target, "
-                    f"r.type AS type, r.metadata AS metadata, r.manual AS manual"
+                    f"r.type AS type, r.metadata AS metadata, r.manual AS manual, "
+                    f"r.confidence AS confidence"
                 )
                 edges: list[Edge] = []
                 for record in edges_result:
@@ -222,6 +223,7 @@ class Neo4jStorage:
                             type=props["type"],
                             metadata=metadata,
                             manual=bool(props.get("manual", False)),
+                            confidence=float(props.get("confidence") or 1.0),
                         )
                     )
 
@@ -294,6 +296,7 @@ class Neo4jStorage:
                         "type": edge.type,
                         "metadata": json.dumps(edge.metadata),
                         "manual": edge.manual,
+                        "confidence": edge.confidence,
                     }
                     for edge in data.edges
                 ]
@@ -305,7 +308,8 @@ class Neo4jStorage:
                         f"CREATE (a)-[r:RELATES_TO]->(b) "
                         f"SET r.type = edge.type, "
                         f"    r.metadata = edge.metadata, "
-                        f"    r.manual = edge.manual",
+                        f"    r.manual = edge.manual, "
+                        f"    r.confidence = edge.confidence",
                         edges=edge_params,
                     )
 

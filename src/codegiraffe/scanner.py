@@ -818,8 +818,14 @@ class PythonRecognizer:
         # --- Database tables (SQLAlchemy) ---
         for match in _SQLALCHEMY_MODEL_RE.finditer(cleaned):
             class_name = match.group(1)
-            # Try to find __tablename__ in the cleaned content
-            tablename_match = _TABLENAME_RE.search(cleaned)
+            # Scope __tablename__ search to this class's body only.
+            # The class body starts at the current match and ends just before
+            # the next class definition (or end of file).
+            class_body_start = match.start()
+            next_class = _SQLALCHEMY_MODEL_RE.search(cleaned, match.end())
+            class_body_end = next_class.start() if next_class else len(cleaned)
+            class_slice = cleaned[class_body_start:class_body_end]
+            tablename_match = _TABLENAME_RE.search(class_slice)
             table_name = tablename_match.group(1) if tablename_match else class_name.lower()
             node_id = f"table:{table_name}"
             nodes.append(
@@ -915,7 +921,7 @@ class PythonRecognizer:
                         Edge(
                             source=ep_id,
                             target=tbl_id,
-                            type=EdgeType.READS,
+                            type=EdgeType.READS.value,
                             metadata={"inferred": True},
                         )
                     )
@@ -1009,7 +1015,7 @@ def _infer_cross_file_edges(
             endpoint_by_file.setdefault(node.file_path, []).append(node.id)
 
     # Table node ids that were already connected by same-file inference
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     # For each file containing endpoints, check for model references
     for fpath_str, ep_ids in endpoint_by_file.items():
@@ -1021,13 +1027,13 @@ def _infer_cross_file_edges(
         for class_name, table_id in table_class_to_id.items():
             if re.search(rf"\b{re.escape(class_name)}\b", content):
                 for ep_id in ep_ids:
-                    edge_key = (ep_id, table_id, EdgeType.READS)
+                    edge_key = (ep_id, table_id, EdgeType.READS.value)
                     if edge_key not in existing_edges:
                         result.edges.append(
                             Edge(
                                 source=ep_id,
                                 target=table_id,
-                                type=EdgeType.READS,
+                                type=EdgeType.READS.value,
                                 metadata={"inferred": True, "cross_file": True},
                             )
                         )
@@ -1054,7 +1060,7 @@ def _infer_inheritance_edges(
     External base classes (e.g., ``BaseModel`` from Pydantic) that are not
     defined in any project file are silently skipped.
     """
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     for fpath, content in file_contents.items():
         # Use cleaned content (strip docstrings/comments)
@@ -1121,7 +1127,7 @@ def _infer_import_edges_universal(
         if node.type == NodeType.MODULE.value and node.file_path:
             file_to_mod_id[node.file_path] = node.id
 
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     for rel_path, file_result in per_file_results.items():
         rel_path_str = rel_path.as_posix() if hasattr(rel_path, "as_posix") else str(rel_path)
@@ -1163,7 +1169,7 @@ def _infer_inheritance_edges_universal(
             class_name = node.metadata.get("class_name") or node.metadata.get("struct_name") or node.label
             class_registry[class_name] = node.id
 
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     for rel_path, file_result in per_file_results.items():
         for impl in file_result.implementations:
@@ -1206,7 +1212,7 @@ def _infer_api_contracts(result: ScanResult) -> None:
     edges is created.
     """
     existing_node_ids = {n.id for n in result.nodes}
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     # Collect endpoint nodes and extract their paths
     endpoints: list[tuple[Node, str]] = []
@@ -1293,7 +1299,7 @@ def _infer_event_contracts(result: ScanResult) -> None:
     edge it is treated as the producer; otherwise the first node is used.
     """
     existing_node_ids = {n.id for n in result.nodes}
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     # Group event nodes by label
     event_groups: dict[str, list[Node]] = {}
@@ -1390,7 +1396,7 @@ def _infer_config_contracts(result: ScanResult) -> None:
     node.
     """
     existing_node_ids = {n.id for n in result.nodes}
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     env_vars: dict[str, Node] = {}
     for node in result.nodes:
@@ -1472,7 +1478,7 @@ def _infer_data_contracts(result: ScanResult) -> None:
     and they are *different* nodes, a data contract is created.
     """
     existing_node_ids = {n.id for n in result.nodes}
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     tables: dict[str, Node] = {}
     for node in result.nodes:
@@ -1585,7 +1591,7 @@ def _infer_interface_satisfaction(result: ScanResult) -> None:
     if not result.interfaces or not result.method_sets:
         return
 
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     # Build method sets per struct: struct_name -> set of method names
     struct_methods: dict[str, set[str]] = {}
@@ -1643,7 +1649,7 @@ def _infer_call_edges(result: ScanResult) -> None:
     if not result.calls:
         return
 
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
     existing_node_ids = {n.id for n in result.nodes}
 
     # Build a language map for all nodes keyed by node id
@@ -1863,7 +1869,7 @@ def _infer_decision_edges(result: ScanResult, markers: list[dict]) -> None:
         return
 
     existing_node_ids = {n.id for n in result.nodes}
-    existing_edges = {(e.source, e.target, e.type) for e in result.edges}
+    existing_edges = {(e.source, e.target, str(e.type)) for e in result.edges}
 
     # Build per-file module lookup: file_path -> module node_id
     file_to_module: dict[str, str] = {}

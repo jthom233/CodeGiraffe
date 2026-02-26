@@ -55,6 +55,7 @@ class SQLiteStorage:
                 type TEXT NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}',
                 manual INTEGER NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL DEFAULT 1.0,
                 UNIQUE(source, target, type)
             );
             CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
@@ -63,6 +64,15 @@ class SQLiteStorage:
             CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
             CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(type);
         """)
+        # Migration guard: add confidence column to existing databases that predate it.
+        existing_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(edges)")
+        }
+        if "confidence" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE edges ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0"
+            )
+            conn.commit()
 
     def load(self, project_path: str) -> GraphData | None:
         """Load graph data from the SQLite database.
@@ -105,9 +115,9 @@ class SQLiteStorage:
             # Load edges
             edges: list[Edge] = []
             for row in conn.execute(
-                "SELECT source, target, type, metadata, manual FROM edges"
+                "SELECT source, target, type, metadata, manual, confidence FROM edges"
             ):
-                source, target, etype, metadata_json, manual = row
+                source, target, etype, metadata_json, manual, confidence = row
                 edges.append(
                     Edge(
                         source=source,
@@ -115,6 +125,7 @@ class SQLiteStorage:
                         type=etype,
                         metadata=json.loads(metadata_json),
                         manual=bool(manual),
+                        confidence=float(confidence) if confidence is not None else 1.0,
                     )
                 )
 
@@ -178,14 +189,16 @@ class SQLiteStorage:
             # Save edges
             for edge in data.edges:
                 conn.execute(
-                    "INSERT OR IGNORE INTO edges (source, target, type, metadata, manual) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO edges "
+                    "(source, target, type, metadata, manual, confidence) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         edge.source,
                         edge.target,
                         edge.type,
                         json.dumps(edge.metadata),
                         int(edge.manual),
+                        edge.confidence,
                     ),
                 )
 
