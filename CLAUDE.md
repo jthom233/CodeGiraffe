@@ -1,16 +1,14 @@
 # Code Giraffe Development Guidelines
 
 ## Active Technologies
-- **Version**: 0.14.0
+- **Version**: 0.16.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - **MCP Tools**: 40 tools in server.py
-- **Storage**: JSON files + SQLite + Neo4j (optional, all via StorageBackend protocol)
-- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (1452+ tests)
+- **Storage**: JSON files (atomic writes) + SQLite + Neo4j (optional, all via StorageBackend protocol)
+- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (1703+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
-- Python 3.11+ + NetworkX >= 3.0, Pydantic v2, FastMCP (mcp[cli] >= 1.2.0) (032-graph-correctness)
-- JSON files (primary), SQLite (secondary), Neo4j (optional) (032-graph-correctness)
 
 ## Project Structure
 
@@ -53,7 +51,7 @@ src/codegiraffe/          # Main package
     ├── php.py
     └── ruby.py
 
-tests/                    # 1452+ tests
+tests/                    # 1703+ tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 
@@ -114,6 +112,17 @@ python src/codegiraffe/server.py
 - When iterating edges directly on the NetworkX graph, always use `edges(data=True, keys=False)` to get 3-tuples
 - `codegiraffe_cypher` rejects write operations (CREATE, MERGE, DELETE, SET, REMOVE, DROP, DETACH, CALL) before execution
 - Thread safety: `_graph_lock` (RLock) in `server.py` protects all `_graph` and `_storage` access across MCP tools and the dashboard thread
+- All storage backends (JSON, SQLite, Neo4j) persist `Edge.confidence` on round-trip; old files without confidence default to 1.0
+- JSON storage uses atomic writes (`tempfile` + `os.replace()`) — crash-safe, no partial writes
+- Scanner uses `os.walk(topdown=True)` with directory pruning (not `rglob`); supports parallel file scanning via `ThreadPoolExecutor`
+- `_scan_single_file()` is the shared per-file scan helper used by both `scan_project` and `sync_files`
+- `betweenness_centrality` results are cached on `ArchGraph` with dirty-flag invalidation on mutations
+- Scanner skips symlinks that resolve outside the project root (symlink boundary protection)
+- All `subprocess.run()` calls use `GIT_COMMAND_TIMEOUT` (30s) from `git_utils.py`; raises `GitTimeoutError` on expiration
+- Dashboard validates project paths against `_initialized_project_paths` allowlist (normalized with `Path.resolve()`)
+- Depth/scope parameters are capped: `MAX_QUERY_DEPTH=20`, `MAX_BLAST_DEPTH=20`, `MAX_COUPLING_DEPTH=500`
+- Domain management uses 4 focused tools: `codegiraffe_list_domains`, `codegiraffe_infer_domains`, `codegiraffe_add_domain`, `codegiraffe_remove_domain`
+- Agent coordination lifecycle: `codegiraffe_claim` → `codegiraffe_update_agent_status` → `codegiraffe_release`
 
 ## Constitution
 
@@ -125,7 +134,11 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
-- v0.16.0: API & DX Improvements — split `codegiraffe_domains` into 4 focused tools (`codegiraffe_list_domains`, `codegiraffe_infer_domains`, `codegiraffe_add_domain`, `codegiraffe_remove_domain`); removed `codegiraffe_restore` stub; added `codegiraffe_release`; renamed `codegiraffe_status` → `codegiraffe_update_agent_status`; 40 MCP tools total; 1646+ tests
-- v0.15.0: Graph Correctness — `nx.MultiDiGraph` migration (multi-edges preserved), Cypher write-rejection, `threading.RLock` concurrency protection; 4 new `ArchGraph` helpers; 1600+ tests
+- v0.16.0: Major reliability & performance release — 5 phases of improvements:
+  - **Graph Correctness**: `nx.MultiDiGraph` migration (multi-edges preserved), Cypher write-rejection, `threading.RLock` concurrency protection, 4 new `ArchGraph` edge helpers
+  - **Data Integrity**: Confidence persistence in SQLite/Neo4j, atomic JSON writes (`tempfile` + `os.replace`), coverage annotation persistence, per-class `__tablename__` scoping fix, edge dedup type normalization
+  - **Performance**: Betweenness centrality caching, `os.walk` directory pruning (replaces `rglob`), linear-time `ScanResult.merge`, shared `_scan_single_file` helper, `ThreadPoolExecutor` parallel scanning, O(1) call-edge index
+  - **API & DX**: Split `codegiraffe_domains` into 4 focused tools, removed `codegiraffe_restore` stub, added `codegiraffe_release`, renamed `codegiraffe_status` → `codegiraffe_update_agent_status`; 40 MCP tools total
+  - **Security Hardening**: Dashboard path allowlist with normalization, symlink boundary protection, `GIT_COMMAND_TIMEOUT=30s` on all subprocess calls, XSS escaping in dashboard, depth parameter caps, test fixture consolidation; 1703+ tests
 - v0.14.0: Sigma.js v3 dashboard — WebGL renderer, server-side ForceAtlas2 layout, 33k-node interactive visualization
 - v0.13.0: Advanced Analysis -- `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan`; `codegiraffe_dashboard` tool for one-click web dashboard launch; 37 MCP tools total; 1339+ tests
