@@ -1081,112 +1081,148 @@ def codegiraffe_annotate(
 
 
 # ---------------------------------------------------------------------------
-# Domain model abstraction (v0.13.0 / US11)
+# Domain model abstraction (v0.13.0 / US11, split into 4 tools in v0.16.0)
 # ---------------------------------------------------------------------------
-
-_VALID_DOMAIN_ACTIONS = {"list", "infer", "add", "remove"}
 
 
 @mcp.tool()
-def codegiraffe_domains(
-    project_path: str,
-    action: str = "list",
-    name: str = "",
-    node_ids: str = "",
-) -> str:
-    """Manage business domain groupings in the architecture graph.
+def codegiraffe_list_domains(project_path: str) -> str:
+    """List all business domain groupings defined in the architecture graph.
 
-    Domains cluster related nodes (services, modules, endpoints, etc.) by
-    business capability, making blast-radius and context queries domain-aware.
-
-    Actions:
-
-    - ``list`` -- Show all defined domains with member counts.
-    - ``infer`` -- Auto-cluster nodes by directory structure or ID prefix and
-      add the inferred domains to the graph (only clusters with 2+ members).
-    - ``add`` -- Create a manual domain named *name* with the nodes listed in
-      *node_ids* (comma-separated).  Manual domains survive rescans.
-    - ``remove`` -- Delete the domain named *name* and its belongs_to edges.
+    Shows all domains with member counts and whether they were manually created
+    or auto-inferred. Domains cluster related nodes (services, modules,
+    endpoints, etc.) by business capability.
 
     Parameters
     ----------
     project_path:
         Root directory of the project (must be initialised with
         codegiraffe_init first).
-    action:
-        One of list, infer, add, remove.
-    name:
-        Domain name -- required for add and remove.
-    node_ids:
-        Comma-separated node IDs -- required for add.
     """
     try:
-        if action not in _VALID_DOMAIN_ACTIONS:
-            return (
-                f"Error: invalid action '{action}'. "
-                f"Must be one of: {', '.join(sorted(_VALID_DOMAIN_ACTIONS))}"
-            )
-
         with _graph_lock:
             graph = _ensure_graph(project_path)
-
-            if action == "list":
-                domains = _list_domains(graph)
-                if not domains:
-                    return "No domains defined. Use action='infer' or action='add' to create domains."
-                lines = ["Domains:"]
-                for d in domains:
-                    manual_tag = " [manual]" if d.get("manual") else ""
-                    lines.append(f"  {d['name']}{manual_tag}: {d['node_count']} member(s)")
-                return "\n".join(lines)
-
-            elif action == "infer":
-                inferred = _infer_domains(graph)
-                if not inferred:
-                    return (
-                        "No meaningful domain clusters found. "
-                        "Ensure the project has been scanned (codegiraffe_init) and "
-                        "nodes have file_path metadata or typed IDs."
-                    )
-                added: list[str] = []
-                for domain in inferred:
-                    _add_domain(graph, domain["name"], domain["node_ids"])
-                    added.append(f"  {domain['name']}: {domain['node_count']} member(s)")
-                _storage.save(project_path, graph.to_data())
-                return "Inferred and added domains:\n" + "\n".join(added)
-
-            elif action == "add":
-                if not name:
-                    return "Error: 'name' is required for action='add'"
-                member_ids = [n.strip() for n in node_ids.split(",") if n.strip()]
-                if not member_ids:
-                    return "Error: 'node_ids' must be a non-empty comma-separated list for action='add'"
-                warnings: list[str] = []
-                for nid in member_ids:
-                    if nid not in graph.graph:
-                        warnings.append(f"Warning: node '{nid}' not found in graph")
-                _add_domain(graph, name, member_ids)
-                _storage.save(project_path, graph.to_data())
-                lines = [f"Added domain '{name}' with {len(member_ids)} member(s)."]
-                if warnings:
-                    lines.append("")
-                    lines.extend(warnings)
-                return "\n".join(lines)
-
-            elif action == "remove":
-                if not name:
-                    return "Error: 'name' is required for action='remove'"
-                domain_id = f"domain:{name}"
-                if domain_id not in graph.graph:
-                    return f"Domain '{name}' not found in graph."
-                _remove_domain(graph, name)
-                _storage.save(project_path, graph.to_data())
-                return f"Removed domain '{name}'."
-
-            return "Error: unknown action"  # pragma: no cover
-
+            domains = _list_domains(graph)
+            if not domains:
+                return (
+                    "No domains defined. Use codegiraffe_infer_domains or "
+                    "codegiraffe_add_domain to create domains."
+                )
+            lines = ["Domains:"]
+            for d in domains:
+                manual_tag = " [manual]" if d.get("manual") else ""
+                lines.append(f"  {d['name']}{manual_tag}: {d['node_count']} member(s)")
+            return "\n".join(lines)
     except Exception as exc:
-        return f"Error managing domains: {exc}"
+        return f"Error listing domains: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_infer_domains(project_path: str) -> str:
+    """Auto-infer business domain groupings from graph structure.
+
+    Clusters nodes by directory structure or ID prefix, then adds the
+    inferred domains to the graph. Only clusters with 2+ members are added.
+    Manual domains already in the graph are preserved.
+
+    Parameters
+    ----------
+    project_path:
+        Root directory of the project (must be initialised with
+        codegiraffe_init first).
+    """
+    try:
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
+            inferred = _infer_domains(graph)
+            if not inferred:
+                return (
+                    "No meaningful domain clusters found. "
+                    "Ensure the project has been scanned (codegiraffe_init) and "
+                    "nodes have file_path metadata or typed IDs."
+                )
+            added: list[str] = []
+            for domain in inferred:
+                _add_domain(graph, domain["name"], domain["node_ids"])
+                added.append(f"  {domain['name']}: {domain['node_count']} member(s)")
+            _storage.save(project_path, graph.to_data())
+            return "Inferred and added domains:\n" + "\n".join(added)
+    except Exception as exc:
+        return f"Error inferring domains: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_add_domain(
+    project_path: str,
+    name: str,
+    node_ids: str,
+) -> str:
+    """Create a named business domain with specified member nodes.
+
+    Manual domains survive rescans and can be used to group any nodes
+    (services, modules, endpoints, etc.) by business capability.
+
+    Parameters
+    ----------
+    project_path:
+        Root directory of the project (must be initialised with
+        codegiraffe_init first).
+    name:
+        Domain name (e.g. 'payments', 'auth', 'notifications').
+    node_ids:
+        Comma-separated node IDs to include in the domain.
+    """
+    try:
+        if not name:
+            return "Error: 'name' is required"
+        member_ids = [n.strip() for n in node_ids.split(",") if n.strip()]
+        if not member_ids:
+            return "Error: 'node_ids' must be a non-empty comma-separated list"
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
+            warnings: list[str] = []
+            for nid in member_ids:
+                if nid not in graph.graph:
+                    warnings.append(f"Warning: node '{nid}' not found in graph")
+            _add_domain(graph, name, member_ids)
+            _storage.save(project_path, graph.to_data())
+            lines = [f"Added domain '{name}' with {len(member_ids)} member(s)."]
+            if warnings:
+                lines.append("")
+                lines.extend(warnings)
+            return "\n".join(lines)
+    except Exception as exc:
+        return f"Error adding domain: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_remove_domain(project_path: str, name: str) -> str:
+    """Remove a business domain and its membership edges from the graph.
+
+    Deletes the domain node and all ``belongs_to`` edges connecting members
+    to the domain. Member nodes themselves are not deleted.
+
+    Parameters
+    ----------
+    project_path:
+        Root directory of the project (must be initialised with
+        codegiraffe_init first).
+    name:
+        Name of the domain to remove.
+    """
+    try:
+        if not name:
+            return "Error: 'name' is required"
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
+            domain_id = f"domain:{name}"
+            if domain_id not in graph.graph:
+                return f"Domain '{name}' not found in graph."
+            _remove_domain(graph, name)
+            _storage.save(project_path, graph.to_data())
+            return f"Removed domain '{name}'."
+    except Exception as exc:
+        return f"Error removing domain: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -1916,7 +1952,29 @@ def codegiraffe_claim(
 
 
 @mcp.tool()
-def codegiraffe_status(
+def codegiraffe_release(project_path: str, agent_id: str) -> str:
+    """Release an agent's claim on graph nodes.
+
+    Removes the agent's active claim, freeing all claimed nodes so other
+    agents can work on them. Agents should call this when they finish their
+    task or when they need to abandon a claim.
+
+    Parameters
+    ----------
+    project_path:
+        Root directory of the project.
+    agent_id:
+        The agent releasing its claim.
+    """
+    try:
+        result = _coordinator.release(project_path, agent_id)
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Error releasing claim: {exc}"
+
+
+@mcp.tool()
+def codegiraffe_update_agent_status(
     project_path: str,
     agent_id: str,
     status: str,
@@ -2024,36 +2082,6 @@ def codegiraffe_snapshot(project_path: str, message: str = "Manual snapshot") ->
         )
     except Exception as exc:
         return f"Error creating snapshot: {exc}"
-
-
-@mcp.tool()
-def codegiraffe_restore(project_path: str, version_id: int) -> str:
-    """Restore the architecture graph to a specific version.
-
-    Warning: This operation is currently limited because only diffs (not
-    full snapshots) are stored. A pre-restore backup snapshot is created
-    automatically before attempting the restore.
-    """
-    try:
-        # Snapshot current state before restore attempt
-        graph = _ensure_graph(project_path)
-        current_data = graph.to_data()
-        _version_store.add_version(
-            project_path, current_data, current_data,
-            f"Pre-restore backup (before restoring to v{version_id})",
-        )
-
-        version = _version_store.get_version(project_path, version_id)
-        if version is None:
-            return f"Error: version {version_id} not found"
-
-        return (
-            "Error: restore requires full snapshot storage (not yet supported "
-            "— only diffs are stored). A backup snapshot of the current state "
-            "has been saved."
-        )
-    except Exception as exc:
-        return f"Error restoring version: {exc}"
 
 
 # ---------------------------------------------------------------------------

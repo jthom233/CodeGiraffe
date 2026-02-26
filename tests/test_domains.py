@@ -595,100 +595,95 @@ class TestDomainPersistence:
 
 
 class TestDomainContractTool:
-    """T068 — Contract test: codegiraffe_domains tool signature."""
+    """T068 — Contract tests: split domain tools (codegiraffe_domains was replaced in v0.16.0)."""
 
-    def test_codegiraffe_domains_function_exists(self):
-        """codegiraffe_domains function is importable from server module."""
+    def test_codegiraffe_domains_removed(self):
+        """codegiraffe_domains has been replaced by 4 focused tools."""
         from codegiraffe import server
-        assert hasattr(server, "codegiraffe_domains")
+        assert not hasattr(server, "codegiraffe_domains"), (
+            "codegiraffe_domains was split into codegiraffe_list_domains, "
+            "codegiraffe_infer_domains, codegiraffe_add_domain, codegiraffe_remove_domain"
+        )
 
-    def test_codegiraffe_domains_accepts_project_path(self):
-        """codegiraffe_domains accepts project_path parameter."""
+    def test_codegiraffe_list_domains_function_exists(self):
+        """codegiraffe_list_domains function is importable from server module."""
+        from codegiraffe import server
+        assert hasattr(server, "codegiraffe_list_domains")
+
+    def test_codegiraffe_list_domains_accepts_project_path(self):
+        """codegiraffe_list_domains accepts project_path parameter."""
         import inspect
         from codegiraffe import server
 
-        sig = inspect.signature(server.codegiraffe_domains)
+        sig = inspect.signature(server.codegiraffe_list_domains)
         assert "project_path" in sig.parameters
 
-    def test_codegiraffe_domains_accepts_action(self):
-        """codegiraffe_domains accepts action parameter."""
+    def test_codegiraffe_infer_domains_function_exists(self):
+        """codegiraffe_infer_domains function is importable from server module."""
+        from codegiraffe import server
+        assert hasattr(server, "codegiraffe_infer_domains")
+
+    def test_codegiraffe_add_domain_function_exists(self):
+        """codegiraffe_add_domain function is importable from server module."""
+        from codegiraffe import server
+        assert hasattr(server, "codegiraffe_add_domain")
+
+    def test_codegiraffe_add_domain_accepts_name(self):
+        """codegiraffe_add_domain accepts name parameter."""
         import inspect
         from codegiraffe import server
 
-        sig = inspect.signature(server.codegiraffe_domains)
-        assert "action" in sig.parameters
-
-    def test_codegiraffe_domains_accepts_name(self):
-        """codegiraffe_domains accepts name parameter."""
-        import inspect
-        from codegiraffe import server
-
-        sig = inspect.signature(server.codegiraffe_domains)
+        sig = inspect.signature(server.codegiraffe_add_domain)
         assert "name" in sig.parameters
 
-    def test_codegiraffe_domains_accepts_node_ids(self):
-        """codegiraffe_domains accepts node_ids parameter."""
+    def test_codegiraffe_add_domain_accepts_node_ids(self):
+        """codegiraffe_add_domain accepts node_ids parameter."""
         import inspect
         from codegiraffe import server
 
-        sig = inspect.signature(server.codegiraffe_domains)
+        sig = inspect.signature(server.codegiraffe_add_domain)
         assert "node_ids" in sig.parameters
 
-    def test_codegiraffe_domains_returns_string(self, tmp_path):
-        """codegiraffe_domains returns a string (even for an uninitialized project)."""
-        from codegiraffe.server import codegiraffe_domains
+    def test_codegiraffe_remove_domain_function_exists(self):
+        """codegiraffe_remove_domain function is importable from server module."""
+        from codegiraffe import server
+        assert hasattr(server, "codegiraffe_remove_domain")
 
-        result = codegiraffe_domains(
-            project_path=str(tmp_path),
-            action="list",
-        )
+    def test_codegiraffe_list_domains_returns_string(self, tmp_path):
+        """codegiraffe_list_domains returns a string (even for an uninitialized project)."""
+        from codegiraffe.server import codegiraffe_list_domains
+
+        result = codegiraffe_list_domains(project_path=str(tmp_path))
 
         assert isinstance(result, str)
 
-    def test_codegiraffe_domains_list_action_uninitialised(self, tmp_path):
-        """list action returns an error or empty message for un-initialised project."""
-        from codegiraffe.server import codegiraffe_domains
+    def test_codegiraffe_list_domains_uninitialised(self, tmp_path):
+        """list_domains returns an error or empty message for un-initialised project."""
+        from codegiraffe.server import codegiraffe_list_domains
 
-        result = codegiraffe_domains(
-            project_path=str(tmp_path),
-            action="list",
-        )
+        result = codegiraffe_list_domains(project_path=str(tmp_path))
 
         # Must be a string — either an error message or empty list message
         assert isinstance(result, str)
 
-    def test_codegiraffe_domains_invalid_action_returns_error(self, tmp_path):
-        """Invalid action returns an error string."""
-        from codegiraffe.server import codegiraffe_domains
-
-        result = codegiraffe_domains(
-            project_path=str(tmp_path),
-            action="explode",
-        )
-
-        assert "error" in result.lower() or "invalid" in result.lower()
-
 
 class TestDomainInferAction:
-    """T068 — infer action creates domain nodes from directory structure."""
+    """T068 — infer/add/remove domain tools create domain nodes from directory structure."""
 
-    def test_infer_action_returns_string(self, tmp_path):
-        """infer action returns a descriptive string."""
-        from codegiraffe.server import codegiraffe_domains, codegiraffe_init
+    def test_infer_domains_returns_string(self, tmp_path):
+        """codegiraffe_infer_domains returns a descriptive string."""
+        from codegiraffe.server import codegiraffe_infer_domains, codegiraffe_init
 
         # First init a real project
         codegiraffe_init(project_path=str(tmp_path))
 
-        result = codegiraffe_domains(
-            project_path=str(tmp_path),
-            action="infer",
-        )
+        result = codegiraffe_infer_domains(project_path=str(tmp_path))
 
         assert isinstance(result, str)
 
-    def test_add_action_creates_domain(self, tmp_path):
-        """add action creates a named domain with node_ids."""
-        from codegiraffe.server import codegiraffe_domains, codegiraffe_init
+    def test_add_domain_creates_domain(self, tmp_path):
+        """codegiraffe_add_domain creates a named domain with node_ids."""
+        from codegiraffe.server import codegiraffe_add_domain, codegiraffe_init
         from codegiraffe.server import _ensure_graph
 
         # Init with a Python file to get at least one node
@@ -705,9 +700,8 @@ class TestDomainInferAction:
 
         node_id = nodes[0]
 
-        result = codegiraffe_domains(
+        result = codegiraffe_add_domain(
             project_path=str(tmp_path),
-            action="add",
             name="test-domain",
             node_ids=node_id,
         )
@@ -715,9 +709,13 @@ class TestDomainInferAction:
         assert isinstance(result, str)
         assert "error" not in result.lower() or "test-domain" in result
 
-    def test_remove_action_removes_domain(self, tmp_path):
-        """remove action removes a previously added domain."""
-        from codegiraffe.server import codegiraffe_domains, codegiraffe_init
+    def test_remove_domain_removes_domain(self, tmp_path):
+        """codegiraffe_remove_domain removes a previously added domain."""
+        from codegiraffe.server import (
+            codegiraffe_add_domain,
+            codegiraffe_init,
+            codegiraffe_remove_domain,
+        )
         from codegiraffe.server import _ensure_graph
 
         src = tmp_path / "service.py"
@@ -731,15 +729,13 @@ class TestDomainInferAction:
 
         node_id = nodes[0]
         # Add then remove
-        codegiraffe_domains(
+        codegiraffe_add_domain(
             project_path=str(tmp_path),
-            action="add",
             name="temp-domain",
             node_ids=node_id,
         )
-        result = codegiraffe_domains(
+        result = codegiraffe_remove_domain(
             project_path=str(tmp_path),
-            action="remove",
             name="temp-domain",
         )
 

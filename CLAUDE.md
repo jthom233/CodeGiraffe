@@ -4,6 +4,7 @@
 - **Version**: 0.14.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
+- **MCP Tools**: 40 tools in server.py
 - **Storage**: JSON files + SQLite + Neo4j (optional, all via StorageBackend protocol)
 - **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (1452+ tests)
 - **Package Management**: uv
@@ -124,6 +125,7 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
+- v0.16.0: API & DX Improvements — split `codegiraffe_domains` into 4 focused tools (`codegiraffe_list_domains`, `codegiraffe_infer_domains`, `codegiraffe_add_domain`, `codegiraffe_remove_domain`); removed `codegiraffe_restore` stub; added `codegiraffe_release`; renamed `codegiraffe_status` → `codegiraffe_update_agent_status`; 40 MCP tools total; 1646+ tests
 - v0.15.0: Graph Correctness — `nx.MultiDiGraph` migration (multi-edges preserved), Cypher write-rejection, `threading.RLock` concurrency protection; 4 new `ArchGraph` helpers; 1600+ tests
 - v0.14.0: Sigma.js v3 dashboard — WebGL renderer, server-side ForceAtlas2 layout, 33k-node interactive visualization
 - v0.13.0: Advanced Analysis -- `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan`; `codegiraffe_dashboard` tool for one-click web dashboard launch; 37 MCP tools total; 1339+ tests
