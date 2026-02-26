@@ -15,7 +15,7 @@ Scan a project and bootstrap the architecture knowledge graph.
 | `project_path` | `str` | — | yes | Root directory of the project to scan |
 | `rescan` | `bool` | `false` | no | Re-scan while preserving manual annotations |
 | `backend` | `str` | `"json"` | no | Storage backend: `"json"`, `"sqlite"`, or `"neo4j"` |
-| `scanner_mode` | `str` | `"regex"` | no | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
+| `scanner_mode` | `str` | `"hybrid"` | no | Scanner mode: `"hybrid"` (default, regex + AST with fallback), `"regex"`, or `"ast"` (tree-sitter only) |
 | `include_tests` | `bool` | `false` | no | Include test files in the scan (excluded by default) |
 
 **Example:**
@@ -104,7 +104,7 @@ Incrementally sync specific changed files without a full rescan. Faster than `co
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `file_paths` | `str` | — | yes | Comma-separated or JSON array string of absolute or relative file paths to sync |
-| `scanner_mode` | `str` | `"regex"` | no | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
+| `scanner_mode` | `str` | `"hybrid"` | no | Scanner mode: `"hybrid"` (default, regex + AST with fallback), `"regex"`, or `"ast"` (tree-sitter only) |
 
 **Example:**
 ```

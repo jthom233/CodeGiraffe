@@ -54,7 +54,7 @@ claude mcp add codegiraffe -- /path/to/CodeGiraffe/.venv/Scripts/python.exe /pat
 
 See [Getting Started](docs/getting-started.md) for Claude Desktop setup, optional dependencies (embeddings, Neo4j, AST scanning), and a first-scan walkthrough.
 
-## MCP Tools (37)
+## MCP Tools (40)
 
 | Category | Tools | Description |
 |---|---|---|
@@ -62,10 +62,10 @@ See [Getting Started](docs/getting-started.md) for Claude Desktop setup, optiona
 | [Context & Analysis](docs/tools/context-and-analysis.md) | 6 | Intelligent context retrieval, hotspots, patterns, blast radius, risk, cycles |
 | [Contracts](docs/tools/contracts.md) | 3 | Cross-system contract modeling and validation |
 | [Change Impact](docs/tools/change-impact.md) | 5 | Change validation, test suggestions, file coupling, PR diffing, coverage |
-| [Coordination](docs/tools/coordination.md) | 3 | Multi-agent claim/status coordination |
-| [Versioning](docs/tools/versioning.md) | 4 | Schema evolution, history, snapshots, restore |
+| [Coordination](docs/tools/coordination.md) | 4 | Multi-agent claim/release/status coordination |
+| [Versioning](docs/tools/versioning.md) | 3 | Schema evolution, history, snapshots |
 | [Federation](docs/tools/federation.md) | 4 | Cross-repo federation, namespaced queries, Cypher |
-| [Planning](docs/tools/planning.md) | 4 | Annotation, domains, task ordering, migration planning |
+| [Planning](docs/tools/planning.md) | 7 | Domains (list, infer, add, remove), task ordering, migration planning |
 
 See the [full tool reference](docs/tools/README.md) for parameter tables and examples.
 
@@ -94,7 +94,7 @@ python -m pytest tests/ -v
 
 > **Windows note:** Replace `source .venv/bin/activate` with the appropriate activate command for your shell (see [Quick Start](#quick-start)).
 
-1452+ tests covering all subsystems. See [Roadmap](docs/roadmap.md) for version history (v0.2.0–v0.14.0).
+1703+ tests covering all subsystems. See [Roadmap](docs/roadmap.md) for version history (v0.2.0–v0.16.0).
 
 ## License
 

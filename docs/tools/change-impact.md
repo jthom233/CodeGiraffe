@@ -106,7 +106,7 @@ Compare graph architecture at two git refs to detect structural changes. Useful 
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `base_ref` | `str` | — | yes | Base git ref (branch, tag, or commit) |
 | `head_ref` | `str` | `"HEAD"` | no | Head git ref to compare against |
-| `scanner_mode` | `str` | `"regex"` | no | Scanner mode: `"regex"` (default) or `"ast"` (tree-sitter) |
+| `scanner_mode` | `str` | `"hybrid"` | no | Scanner mode: `"hybrid"` (default, regex + AST with fallback), `"regex"`, or `"ast"` (tree-sitter only) |
 
 **Example:**
 ```

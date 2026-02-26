@@ -141,6 +141,51 @@ Complete version history and future plans for Code Giraffe.
 
 ---
 
+## v0.15.0 — Graph Correctness (completed)
+
+- [x] Migrated `ArchGraph` from `nx.DiGraph` to `nx.MultiDiGraph` — multiple edge types between the same node pair now coexist
+- [x] 4 new edge helpers: `get_edge_between()`, `get_typed_edge()`, `get_all_edges_between()`, `iter_edges()`
+- [x] `codegiraffe_cypher` rejects write operations (CREATE, MERGE, DELETE, SET, REMOVE, DROP, DETACH, CALL) before execution
+- [x] `threading.RLock` protects all shared `_graph` and `_storage` access across MCP tools and dashboard thread
+- [x] 1600+ tests
+
+---
+
+## v0.16.0 — Reliability, Performance & Security (completed)
+
+### Data Integrity
+- [x] Confidence persistence in SQLite and Neo4j backends (with migration guard for existing DBs)
+- [x] Atomic JSON writes (`tempfile` + `os.replace()`) — crash-safe, no partial writes
+- [x] `codegiraffe_coverage` now saves annotations to storage
+- [x] Per-class `__tablename__` scoping fix in scanner
+- [x] Edge deduplication key type normalization
+
+### Performance
+- [x] Betweenness centrality caching with dirty-flag invalidation on graph mutations
+- [x] `os.walk(topdown=True)` directory pruning replaces `rglob("*")` — ignored directories never entered
+- [x] Linear-time `ScanResult.merge()` via incremental dict-based dedup
+- [x] Shared `_scan_single_file()` helper for `scan_project` and `sync_files`
+- [x] `ThreadPoolExecutor`-based parallel file scanning
+- [x] O(1) call-edge index replacing O(N) linear scan
+
+### API & Developer Experience
+- [x] Split `codegiraffe_domains` into 4 focused tools: `codegiraffe_list_domains`, `codegiraffe_infer_domains`, `codegiraffe_add_domain`, `codegiraffe_remove_domain`
+- [x] Removed `codegiraffe_restore` (permanently-failing stub)
+- [x] Added `codegiraffe_release` tool for explicit agent claim cleanup
+- [x] Renamed `codegiraffe_status` → `codegiraffe_update_agent_status`
+- [x] 40 MCP tools total
+
+### Security Hardening
+- [x] Dashboard path allowlist with `Path.resolve()` normalization
+- [x] Symlink boundary protection in scanner
+- [x] `GIT_COMMAND_TIMEOUT=30s` on all `subprocess.run()` calls with `GitTimeoutError`
+- [x] XSS escaping for graph-derived content in dashboard
+- [x] Parameter caps: `MAX_QUERY_DEPTH=20`, `MAX_BLAST_DEPTH=20`, `MAX_COUPLING_DEPTH=500`
+- [x] Test fixture consolidation: shared `reset_server_state` (autouse) + git helpers
+- [x] 1703+ tests
+
+---
+
 ## Future
 
 - [ ] Publish to PyPI

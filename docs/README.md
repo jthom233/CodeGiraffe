@@ -17,15 +17,15 @@
 
 ## Tool Reference
 
-- **[Tool Index](tools/README.md)** — Master table of all 37 MCP tools
+- **[Tool Index](tools/README.md)** — Master table of all 40 MCP tools
 
 | Category | Tools | Page |
 |---|---|---|
-| Core | 7 | [core.md](tools/core.md) |
+| Core | 8 | [core.md](tools/core.md) |
 | Context & Analysis | 6 | [context-and-analysis.md](tools/context-and-analysis.md) |
 | Contracts | 3 | [contracts.md](tools/contracts.md) |
 | Change Impact | 5 | [change-impact.md](tools/change-impact.md) |
-| Coordination | 3 | [coordination.md](tools/coordination.md) |
-| Versioning | 4 | [versioning.md](tools/versioning.md) |
+| Coordination | 4 | [coordination.md](tools/coordination.md) |
+| Versioning | 3 | [versioning.md](tools/versioning.md) |
 | Federation | 4 | [federation.md](tools/federation.md) |
-| Planning | 4 | [planning.md](tools/planning.md) |
+| Planning | 7 | [planning.md](tools/planning.md) |

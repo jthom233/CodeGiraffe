@@ -10,7 +10,7 @@ This page covers the internal module layout of Code Giraffe, the graph data mode
 
 ```
 src/codegiraffe/
-├── server.py            # FastMCP server + 37 MCP tool definitions
+├── server.py            # FastMCP server + 40 MCP tool definitions
 ├── graph.py             # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph engine
 ├── storage.py           # StorageBackend protocol + JSON file implementation
 ├── sqlite_storage.py    # SQLite storage backend for larger graphs
