@@ -686,3 +686,243 @@ class TestGraphDataLayoutField:
         }
         data = GraphData.model_validate(stored)
         assert data.layout == {}
+
+
+class TestMultiDiGraphMigration:
+    """Tests for MultiDiGraph migration — multiple edge types between same node pair."""
+
+    # T003
+    def test_multi_edge_types_preserved(self):
+        """Two edges between same (source, target) with different types must both exist."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="module:A", type=NodeType.MODULE, label="A"))
+        graph.add_node(Node(id="module:B", type=NodeType.MODULE, label="B"))
+
+        edge_contains = Edge(source="module:A", target="module:B", type=EdgeType.CONTAINS)
+        edge_imports = Edge(source="module:A", target="module:B", type=EdgeType.IMPORTS)
+
+        graph.add_edge(edge_contains)
+        graph.add_edge(edge_imports)
+
+        data = graph.to_data()
+        assert len(data.edges) == 2
+        edge_types = {e.type for e in data.edges}
+        assert EdgeType.CONTAINS in edge_types
+        assert EdgeType.IMPORTS in edge_types
+
+    # T004
+    def test_add_edge_same_type_is_idempotent(self):
+        """Adding the same edge type between same pair twice updates, does not duplicate."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="module:A", type=NodeType.MODULE, label="A"))
+        graph.add_node(Node(id="module:B", type=NodeType.MODULE, label="B"))
+
+        edge_v1 = Edge(
+            source="module:A",
+            target="module:B",
+            type=EdgeType.IMPORTS,
+            metadata={"version": 1},
+        )
+        edge_v2 = Edge(
+            source="module:A",
+            target="module:B",
+            type=EdgeType.IMPORTS,
+            metadata={"version": 2},
+        )
+
+        graph.add_edge(edge_v1)
+        graph.add_edge(edge_v2)
+
+        data = graph.to_data()
+        assert len(data.edges) == 1
+        assert data.edges[0].metadata == {"version": 2}
+
+    # T005
+    def test_to_data_returns_all_multi_edges(self):
+        """to_data() must return exact count when multiple edge types exist."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        graph.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        graph.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+
+        # A->B: two types
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.IMPORTS))
+        # B->C: one type
+        graph.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+        # A->C: one type
+        graph.add_edge(Edge(source="A", target="C", type=EdgeType.DEPENDS_ON))
+
+        data = graph.to_data()
+        assert len(data.edges) == 4
+
+    # T006
+    def test_get_subgraph_includes_all_edge_types(self):
+        """get_subgraph() must return all edge types within the subgraph."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="module:A", type=NodeType.MODULE, label="A"))
+        graph.add_node(Node(id="module:B", type=NodeType.MODULE, label="B"))
+        graph.add_node(Node(id="module:C", type=NodeType.MODULE, label="C"))
+
+        graph.add_edge(Edge(source="module:A", target="module:B", type=EdgeType.CONTAINS))
+        graph.add_edge(Edge(source="module:A", target="module:B", type=EdgeType.IMPORTS))
+        graph.add_edge(Edge(source="module:B", target="module:C", type=EdgeType.CALLS))
+
+        subgraph = graph.get_subgraph("module:A", depth=2)
+
+        edge_keys = {(e.source, e.target, e.type) for e in subgraph.edges}
+        assert ("module:A", "module:B", EdgeType.CONTAINS) in edge_keys
+        assert ("module:A", "module:B", EdgeType.IMPORTS) in edge_keys
+        assert ("module:B", "module:C", EdgeType.CALLS) in edge_keys
+
+    # T007
+    def test_get_edge_between_returns_any_edge(self):
+        """get_edge_between returns an Edge when edges exist, None when they don't."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        graph.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        graph.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+
+        result = graph.get_edge_between("A", "B")
+        assert result is not None
+        assert isinstance(result, Edge)
+        assert result.source == "A"
+        assert result.target == "B"
+
+        # Non-existent pair
+        assert graph.get_edge_between("A", "C") is None
+        # Non-existent node
+        assert graph.get_edge_between("A", "nonexistent") is None
+
+    # T008
+    def test_get_typed_edge_returns_specific_type(self):
+        """get_typed_edge returns the correct typed edge, None for non-existent type."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="A", type=NodeType.MODULE, label="A"))
+        graph.add_node(Node(id="B", type=NodeType.MODULE, label="B"))
+
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.CONTAINS))
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.IMPORTS))
+
+        contains_edge = graph.get_typed_edge("A", "B", EdgeType.CONTAINS)
+        assert contains_edge is not None
+        assert contains_edge.type == EdgeType.CONTAINS
+
+        imports_edge = graph.get_typed_edge("A", "B", EdgeType.IMPORTS)
+        assert imports_edge is not None
+        assert imports_edge.type == EdgeType.IMPORTS
+
+        # Type that doesn't exist between this pair
+        assert graph.get_typed_edge("A", "B", EdgeType.CALLS) is None
+        # Non-existent node
+        assert graph.get_typed_edge("A", "nonexistent", EdgeType.CALLS) is None
+
+    # T009
+    def test_get_all_edges_between(self):
+        """get_all_edges_between returns all edges for a pair, empty list for no edges."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="A", type=NodeType.MODULE, label="A"))
+        graph.add_node(Node(id="B", type=NodeType.MODULE, label="B"))
+        graph.add_node(Node(id="C", type=NodeType.MODULE, label="C"))
+
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.CONTAINS))
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.IMPORTS))
+        graph.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+
+        edges_ab = graph.get_all_edges_between("A", "B")
+        assert len(edges_ab) == 2
+        types_ab = {e.type for e in edges_ab}
+        assert EdgeType.CONTAINS in types_ab
+        assert EdgeType.IMPORTS in types_ab
+
+        # Only one edge between B and C
+        edges_bc = graph.get_all_edges_between("B", "C")
+        assert len(edges_bc) == 1
+
+        # No edge between A and C
+        edges_ac = graph.get_all_edges_between("A", "C")
+        assert edges_ac == []
+
+        # Non-existent node
+        assert graph.get_all_edges_between("A", "nonexistent") == []
+
+    # T010
+    def test_iter_edges_yields_all(self):
+        """iter_edges() yields every Edge in the graph."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="A", type=NodeType.SERVICE, label="A"))
+        graph.add_node(Node(id="B", type=NodeType.SERVICE, label="B"))
+        graph.add_node(Node(id="C", type=NodeType.SERVICE, label="C"))
+
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.IMPORTS))
+        graph.add_edge(Edge(source="B", target="C", type=EdgeType.CALLS))
+
+        all_edges = list(graph.iter_edges())
+        assert len(all_edges) == 3
+        for e in all_edges:
+            assert isinstance(e, Edge)
+
+    # T011
+    def test_merge_manual_annotations_preserves_multi_edges(self):
+        """merge_manual_annotations keeps both manual and scanned edges between same pair."""
+        # New graph has a scanned "contains" edge A->B
+        new_graph = ArchGraph()
+        new_graph.add_node(Node(id="module:A", type=NodeType.MODULE, label="A"))
+        new_graph.add_node(Node(id="module:B", type=NodeType.MODULE, label="B"))
+        new_graph.add_edge(
+            Edge(source="module:A", target="module:B", type=EdgeType.CONTAINS, manual=False)
+        )
+
+        # Old data had a manual "custom" edge A->B
+        old_data = GraphData(
+            nodes={
+                "module:A": Node(id="module:A", type=NodeType.MODULE, label="A"),
+                "module:B": Node(id="module:B", type=NodeType.MODULE, label="B"),
+            },
+            edges=[
+                Edge(
+                    source="module:A",
+                    target="module:B",
+                    type=EdgeType.CALLS,
+                    manual=True,
+                ),
+            ],
+        )
+
+        new_graph.merge_manual_annotations(old_data)
+        data = new_graph.to_data()
+
+        # Both edges must exist: the scanned "contains" and the manual "calls"
+        assert len(data.edges) == 2
+        edge_types = {e.type for e in data.edges}
+        assert EdgeType.CONTAINS in edge_types
+        assert EdgeType.CALLS in edge_types
+
+        # The manual edge must be flagged
+        manual_edges = [e for e in data.edges if e.manual]
+        assert len(manual_edges) == 1
+        assert manual_edges[0].type == EdgeType.CALLS
+
+    # T012
+    def test_legacy_single_edge_format_loads(self):
+        """GraphData with single edges per pair (old format) loads correctly."""
+        legacy_data = GraphData(
+            nodes={
+                "module:X": Node(id="module:X", type=NodeType.MODULE, label="X"),
+                "module:Y": Node(id="module:Y", type=NodeType.MODULE, label="Y"),
+            },
+            edges=[
+                Edge(source="module:X", target="module:Y", type=EdgeType.IMPORTS),
+            ],
+        )
+
+        graph = ArchGraph(legacy_data)
+        data = graph.to_data()
+
+        assert len(data.edges) == 1
+        assert data.edges[0].source == "module:X"
+        assert data.edges[0].target == "module:Y"
+        assert data.edges[0].type == EdgeType.IMPORTS

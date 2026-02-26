@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from codegiraffe.graph import Edge, GraphData, Node
@@ -30,6 +31,22 @@ except ImportError:
 def is_available() -> bool:
     """Check whether the neo4j driver is installed."""
     return HAS_NEO4J
+
+
+_CYPHER_WRITE_KEYWORDS = frozenset(
+    {"CREATE", "MERGE", "DELETE", "SET", "REMOVE", "DROP", "DETACH", "CALL"}
+)
+
+
+def _is_read_only_cypher(query: str) -> bool:
+    """Check if a Cypher query contains only read operations.
+
+    Extracts all word tokens from the query (case-insensitive) and checks
+    for the presence of any known write keyword.  Returns ``True`` when no
+    write keywords are found (i.e. the query is considered safe to run).
+    """
+    tokens = set(re.findall(r"\b[A-Za-z]+\b", query.upper()))
+    return not tokens.intersection(_CYPHER_WRITE_KEYWORDS)
 
 
 # Environment variable names for connection configuration
@@ -317,6 +334,11 @@ class Neo4jStorage:
         list[dict]
             Each dict is a row from the Cypher result set.
         """
+        if not _is_read_only_cypher(query):
+            raise ValueError(
+                "Query rejected: only read-only Cypher queries are permitted. "
+                "Blocked keywords: CREATE, MERGE, DELETE, SET, REMOVE, DROP, DETACH, CALL"
+            )
         driver = self._get_driver()
         with driver.session() as session:
             result = session.run(query)
