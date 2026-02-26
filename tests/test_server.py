@@ -20,27 +20,11 @@ from codegiraffe.server import (
 )
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 from codegiraffe.storage import JSONStorage
-from codegiraffe.versioning import VersionStore
-from codegiraffe.federation import GraphFederation
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def reset_server_state():
-    """Reset server module globals before each test to avoid cross-test pollution."""
-    server_module._graph = None
-    server_module._storage = JSONStorage()
-    server_module._version_store = VersionStore()
-    server_module._federation = GraphFederation()
-    yield
-    server_module._graph = None
-    server_module._storage = JSONStorage()
-    server_module._version_store = VersionStore()
-    server_module._federation = GraphFederation()
 
 
 @pytest.fixture

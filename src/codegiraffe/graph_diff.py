@@ -12,6 +12,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any
 
+from codegiraffe.git_utils import GIT_COMMAND_TIMEOUT, GitTimeoutError
 from codegiraffe.graph import ArchGraph, GraphData, Node
 from codegiraffe.scanner import scan_project
 from codegiraffe.schema import NodeType
@@ -125,13 +126,19 @@ def build_graph_at_ref(
     """
     with tempfile.TemporaryDirectory(prefix="codegiraffe-worktree-") as tmpdir:
         # Create the worktree at the given ref
-        add_result = subprocess.run(
-            ["git", "worktree", "add", tmpdir, ref],
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            cwd=project_path,
-        )
+        try:
+            add_result = subprocess.run(
+                ["git", "worktree", "add", tmpdir, ref],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                cwd=project_path,
+                timeout=GIT_COMMAND_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitTimeoutError(
+                f"git worktree add timed out after {GIT_COMMAND_TIMEOUT}s for ref {ref!r}"
+            ) from exc
         if add_result.returncode != 0:
             raise RuntimeError(
                 f"git worktree add failed for ref {ref!r}: {add_result.stderr.strip()}"
@@ -164,13 +171,19 @@ def build_graph_at_ref(
             graph = ArchGraph(data)
         finally:
             # Always clean up the worktree, even on scan failure
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", tmpdir],
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-                cwd=project_path,
-            )
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", tmpdir],
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    cwd=project_path,
+                    timeout=GIT_COMMAND_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise GitTimeoutError(
+                    f"git worktree remove timed out after {GIT_COMMAND_TIMEOUT}s"
+                ) from exc
 
     return graph
 
