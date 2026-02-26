@@ -231,9 +231,12 @@ class DashboardServer:
                     last_scan=datetime.now(timezone.utc).isoformat(),
                 )
                 graph = ArchGraph(data)
-                storage.save(project_path, graph.to_data())
-                srv._graph = graph
-                srv._storage = storage
+                # Atomically replace _graph and _storage under the server's lock
+                # so the MCP-tool thread never sees a torn state.
+                with srv._graph_lock:
+                    storage.save(project_path, graph.to_data())
+                    srv._graph = graph
+                    srv._storage = storage
                 final = graph.to_data()
                 return JSONResponse({
                     "status": "ok",

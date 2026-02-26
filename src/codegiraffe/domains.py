@@ -203,8 +203,9 @@ def list_domains(graph: ArchGraph) -> list[dict[str, Any]]:
         member_count = 0
         member_ids: list[str] = []
         for predecessor in graph.graph.predecessors(nid):
-            edge_data = graph.graph.get_edge_data(predecessor, nid)
-            if edge_data and edge_data.get("key") == EdgeType.BELONGS_TO:
+            # MultiDiGraph: use key= to check for the specific edge type
+            edge_data = graph.graph.get_edge_data(predecessor, nid, key=EdgeType.BELONGS_TO)
+            if edge_data is not None:
                 member_count += 1
                 member_ids.append(predecessor)
 
@@ -241,8 +242,9 @@ def get_domain_membership(graph: ArchGraph) -> dict[str, str]:
             continue
 
         for predecessor in graph.graph.predecessors(nid):
-            edge_data = graph.graph.get_edge_data(predecessor, nid)
-            if edge_data and edge_data.get("key") == EdgeType.BELONGS_TO:
+            # MultiDiGraph: use key= to check for the specific edge type
+            edge_data = graph.graph.get_edge_data(predecessor, nid, key=EdgeType.BELONGS_TO)
+            if edge_data is not None:
                 membership[predecessor] = node.label
 
     return membership

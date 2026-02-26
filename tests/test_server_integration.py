@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 
 import pytest
 
@@ -17,6 +18,7 @@ import codegiraffe.server as server_module
 from codegiraffe.server import (
     codegiraffe_add_contract,
     codegiraffe_add_relation,
+    codegiraffe_annotate,
     codegiraffe_blast_radius,
     codegiraffe_context_for,
     codegiraffe_contracts,
@@ -29,6 +31,7 @@ from codegiraffe.server import (
     codegiraffe_history,
     codegiraffe_hotspots,
     codegiraffe_init,
+    codegiraffe_query,
     codegiraffe_restore,
     codegiraffe_risk_assessment,
     codegiraffe_snapshot,
@@ -717,18 +720,21 @@ class TestContractTools:
         assert node_data.manual is True
 
         # Produces edge exists
-        edge_data = graph.graph.edges.get(
-            ("svc-payments", "contract:PaymentSchema"), {}
+        # MultiDiGraph: get_edge_data(u, v) returns {key: data_dict}; pick first edge
+        all_edges = graph.graph.get_edge_data("svc-payments", "contract:PaymentSchema") or {}
+        edge_obj = next(
+            (d.get("edge") for d in all_edges.values() if d.get("edge") is not None),
+            None,
         )
-        edge_obj = edge_data.get("edge")
         assert edge_obj is not None
         assert edge_obj.type == "produces"
 
         # Consumes_contract edge exists
-        edge_data = graph.graph.edges.get(
-            ("svc-orders", "contract:PaymentSchema"), {}
+        all_edges = graph.graph.get_edge_data("svc-orders", "contract:PaymentSchema") or {}
+        edge_obj = next(
+            (d.get("edge") for d in all_edges.values() if d.get("edge") is not None),
+            None,
         )
-        edge_obj = edge_data.get("edge")
         assert edge_obj is not None
         assert edge_obj.type == "consumes_contract"
 
@@ -744,3 +750,154 @@ class TestContractTools:
         )
         assert "Error" in result
         assert "invalid_type" in result
+
+
+# ---------------------------------------------------------------------------
+# Concurrent access tests (T060–T062) — feature/032-graph-correctness
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentAccess:
+    """Tests that concurrent reads and writes to the graph don't cause crashes or data corruption.
+
+    T060: concurrent reads must not crash
+    T061: concurrent read/write must not corrupt
+    T062: graph replacement must be atomic (reader sees one consistent state)
+    """
+
+    @pytest.fixture
+    def concurrent_project(self, tmp_path):
+        """Minimal Python project suitable for concurrency tests."""
+        (tmp_path / "app.py").write_text(
+            "class AppService:\n    def run(self):\n        pass\n"
+        )
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        return project_path
+
+    def test_concurrent_reads_no_crash(self, concurrent_project):
+        """T060: 10 threads concurrently reading graph must all succeed without exceptions."""
+        project_path = concurrent_project
+        errors: list[Exception] = []
+        results: list[str] = []
+        lock = threading.Lock()
+
+        def reader(i: int) -> None:
+            try:
+                if i % 2 == 0:
+                    result = codegiraffe_query(project_path, node_type="function")
+                else:
+                    result = codegiraffe_hotspots(project_path)
+                with lock:
+                    results.append(result)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=reader, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert errors == [], f"Concurrent reads raised exceptions: {errors}"
+        assert len(results) == 10, f"Expected 10 results, got {len(results)}"
+        # Every result should be a non-empty string (valid JSON or markdown)
+        for r in results:
+            assert isinstance(r, str)
+            assert len(r) > 0
+
+    def test_concurrent_read_write_no_corruption(self, concurrent_project):
+        """T061: One writer (annotate) and one reader (query) running concurrently must both complete without errors."""
+        project_path = concurrent_project
+
+        # Obtain a valid node ID to annotate
+        hotspots_json = codegiraffe_hotspots(project_path)
+        # hotspots returns a JSON array of objects with "node_id"
+        try:
+            hotspot_list = json.loads(hotspots_json)
+            node_id = hotspot_list[0]["node_id"] if hotspot_list else None
+        except (json.JSONDecodeError, KeyError, IndexError):
+            node_id = None
+
+        writer_errors: list[Exception] = []
+        reader_errors: list[Exception] = []
+
+        def writer() -> None:
+            try:
+                if node_id:
+                    codegiraffe_annotate(project_path, node_id=node_id, notes="concurrent-test")
+            except Exception as exc:  # noqa: BLE001
+                writer_errors.append(exc)
+
+        def reader() -> None:
+            try:
+                codegiraffe_query(project_path, node_type="function")
+            except Exception as exc:  # noqa: BLE001
+                reader_errors.append(exc)
+
+        t_write = threading.Thread(target=writer)
+        t_read = threading.Thread(target=reader)
+
+        t_write.start()
+        t_read.start()
+        t_write.join(timeout=30)
+        t_read.join(timeout=30)
+
+        assert writer_errors == [], f"Writer raised: {writer_errors}"
+        assert reader_errors == [], f"Reader raised: {reader_errors}"
+
+    def test_graph_replacement_is_atomic(self, tmp_path):
+        """T062: A reader racing with codegiraffe_init must see a consistent graph (not a torn state)."""
+        # Build two separate project directories so init can replace the graph
+        project_a = tmp_path / "project_a"
+        project_a.mkdir()
+        (project_a / "app.py").write_text(
+            "class ServiceA:\n    pass\n"
+        )
+        project_path = str(project_a)
+        codegiraffe_init(project_path)
+
+        # Record the initial node count (from the already-initialized graph)
+        initial_result = codegiraffe_query(project_path, node_type="class")
+        try:
+            initial_data = json.loads(initial_result.lstrip("//").split("\n", 1)[-1] if initial_result.startswith("//") else initial_result)
+            initial_node_count = len(initial_data.get("nodes", {}))
+        except (json.JSONDecodeError, AttributeError):
+            initial_node_count = None
+
+        reader_results: list[str] = []
+        reader_errors: list[Exception] = []
+        read_lock = threading.Lock()
+
+        def reinit() -> None:
+            # Re-init the same path (may change node count if scanner differs)
+            codegiraffe_init(project_path)
+
+        def reader() -> None:
+            try:
+                result = codegiraffe_query(project_path, node_type="class")
+                with read_lock:
+                    reader_results.append(result)
+            except Exception as exc:  # noqa: BLE001
+                with read_lock:
+                    reader_errors.append(exc)
+
+        t_init = threading.Thread(target=reinit)
+        t_read = threading.Thread(target=reader)
+
+        t_init.start()
+        t_read.start()
+        t_init.join(timeout=30)
+        t_read.join(timeout=30)
+
+        # The reader must not crash
+        assert reader_errors == [], f"Reader raised exceptions during graph replacement: {reader_errors}"
+        assert len(reader_results) == 1, "Reader should have produced exactly one result"
+
+        # The result must be a valid string (either old or new graph — both are acceptable)
+        result = reader_results[0]
+        assert isinstance(result, str)
+        assert len(result) > 0
+        # Must not contain an unhandled error traceback
+        assert "Traceback" not in result

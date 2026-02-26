@@ -2392,9 +2392,9 @@ def sync_files(
         #   - manual edges (any direction): RESTORE after node re-add
         #   - internal (both endpoints in file): REMOVE (will be re-inferred)
 
-        edges_to_remove_keys: list[tuple[str, str]] = []
+        edges_to_remove_keys: list[tuple[str, str, str]] = []
 
-        for u, v, edge_data in list(graph.graph.edges(data=True)):
+        for u, v, edge_data in list(graph.graph.edges(data=True, keys=False)):
             edge = edge_data.get("edge")
             if edge is None:
                 continue
@@ -2412,15 +2412,15 @@ def sync_files(
 
             if source_in_file:
                 # Outgoing from file node (includes internal edges) — remove
-                edges_to_remove_keys.append((u, v))
+                edges_to_remove_keys.append((u, v, edge.type))
             elif target_in_file and not source_in_file:
                 # Incoming from a non-synced file — preserve per spec
                 all_edges_to_restore.append(edge)
 
         # Remove outgoing non-manual edges explicitly
-        for u, v in edges_to_remove_keys:
-            if graph.graph.has_edge(u, v):
-                graph.graph.remove_edge(u, v)
+        for u, v, etype in edges_to_remove_keys:
+            if graph.graph.has_edge(u, v, key=etype):
+                graph.graph.remove_edge(u, v, key=etype)
                 removed_edges += 1
 
         # Remove nodes (NetworkX also removes any still-attached incident edges)
@@ -2536,7 +2536,7 @@ def sync_files(
 
     # Existing edge set for deduplication
     existing_edge_keys: set[tuple[str, str, str]] = set()
-    for u, v, edge_data in graph.graph.edges(data=True):
+    for u, v, edge_data in graph.graph.edges(data=True, keys=False):
         e = edge_data.get("edge")
         if e is not None:
             existing_edge_keys.add((u, v, e.type))
@@ -2570,7 +2570,7 @@ def sync_files(
             node = attrs.get("node")
             if node is not None:
                 full_result.nodes.append(node)
-        for u, v, edge_data in graph.graph.edges(data=True):
+        for u, v, edge_data in graph.graph.edges(data=True, keys=False):
             edge = edge_data.get("edge")
             if edge is not None:
                 full_result.edges.append(edge)
@@ -2618,7 +2618,7 @@ def sync_files(
                 and n.file_path not in rel_paths
             ),
             "edges": sum(
-                1 for u, v, ed in graph.graph.edges(data=True)
+                1 for u, v, ed in graph.graph.edges(data=True, keys=False)
                 if (e := ed.get("edge")) is not None
                 and (sn := graph.graph.nodes.get(u, {}).get("node")) is not None
                 and sn.file_path not in rel_paths

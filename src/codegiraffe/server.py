@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from urllib.parse import quote as _url_quote
 
@@ -64,6 +65,10 @@ _graph: ArchGraph | None = None
 _coordinator = CoordinationStore()
 _version_store = VersionStore()
 _federation = GraphFederation()
+# Reentrant lock protecting _graph and _storage from concurrent read/write races.
+# RLock is used so that _ensure_graph (which acquires the lock) can be called
+# safely from within other locked sections in write tools.
+_graph_lock = threading.RLock()
 
 
 def _get_storage(backend: str = "json"):
@@ -85,23 +90,27 @@ def _ensure_graph(project_path: str) -> ArchGraph:
     On the first call for a given project the graph is loaded from disk and
     cached in the module-level ``_graph`` variable.  Subsequent calls reuse
     the cached instance unless the project path changes.
+
+    Thread-safe: acquires ``_graph_lock`` (RLock) for the entire body so that
+    concurrent callers see a consistent ``_graph`` reference.
     """
     global _graph  # noqa: PLW0603
 
-    if _graph is not None:
-        data = _graph.to_data()
-        if data.project_path == project_path:
-            return _graph
+    with _graph_lock:
+        if _graph is not None:
+            data = _graph.to_data()
+            if data.project_path == project_path:
+                return _graph
 
-    stored = _storage.load(project_path)
-    if stored is None:
-        raise RuntimeError(
-            f"No architecture graph found for '{project_path}'. "
-            "Run codegiraffe_init first."
-        )
+        stored = _storage.load(project_path)
+        if stored is None:
+            raise RuntimeError(
+                f"No architecture graph found for '{project_path}'. "
+                "Run codegiraffe_init first."
+            )
 
-    _graph = ArchGraph(stored)
-    return _graph
+        _graph = ArchGraph(stored)
+        return _graph
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +147,13 @@ def codegiraffe_init(
     global _graph, _storage  # noqa: PLW0603
 
     try:
-        _storage = _get_storage(backend)
-        # Preserve manual annotations when rescanning
+        new_storage = _get_storage(backend)
+
+        # Preserve manual annotations when rescanning (read outside lock — storage
+        # load is idempotent and safe to do before acquiring the write lock).
         old_data: GraphData | None = None
         if rescan:
-            old_data = _storage.load(project_path)
+            old_data = new_storage.load(project_path)
 
         # Select scanner registry based on mode
         registry = None
@@ -157,7 +168,7 @@ def codegiraffe_init(
             except ImportError:
                 registry = None  # falls back to default regex registry
 
-        # Scan the project
+        # Scan the project (slow — do NOT hold the lock during scanning)
         result = scan_project(project_path, registry=registry, include_tests=include_tests)
 
         # Build graph data from scan results
@@ -185,11 +196,13 @@ def codegiraffe_init(
         except Exception:
             pass  # never fail init if layout computation errors
 
-        # Persist and cache
-        _storage.save(project_path, data)
-        _graph = graph
+        # Atomically persist and replace the cached graph under the lock.
+        with _graph_lock:
+            new_storage.save(project_path, data)
+            _storage = new_storage
+            _graph = graph
 
-        # Auto-version after init/rescan
+        # Auto-version after init/rescan (outside lock — version store has its own safety)
         prev_data = old_data if old_data is not None else GraphData()
         _version_store.add_version(
             project_path, prev_data, graph.to_data(),
@@ -296,49 +309,50 @@ def codegiraffe_add_relation(
     automated re-scans. *metadata* is a JSON string of extra key/value pairs.
     """
     try:
-        graph = _ensure_graph(project_path)
-
-        # Parse metadata JSON
+        # Parse metadata JSON before acquiring the lock (pure CPU, no shared state)
         try:
             meta = json.loads(metadata)
         except json.JSONDecodeError:
             return "Error: metadata is not valid JSON"
 
-        # Auto-create source node if missing
-        if source not in graph.graph:
-            graph.add_node(
-                Node(
-                    id=source,
-                    type=source_type,
-                    label=source,
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
+
+            # Auto-create source node if missing
+            if source not in graph.graph:
+                graph.add_node(
+                    Node(
+                        id=source,
+                        type=source_type,
+                        label=source,
+                        manual=True,
+                    )
+                )
+
+            # Auto-create target node if missing
+            if target not in graph.graph:
+                graph.add_node(
+                    Node(
+                        id=target,
+                        type=target_type,
+                        label=target,
+                        manual=True,
+                    )
+                )
+
+            # Add the manual edge
+            graph.add_edge(
+                Edge(
+                    source=source,
+                    target=target,
+                    type=relation_type,
+                    metadata=meta,
                     manual=True,
                 )
             )
 
-        # Auto-create target node if missing
-        if target not in graph.graph:
-            graph.add_node(
-                Node(
-                    id=target,
-                    type=target_type,
-                    label=target,
-                    manual=True,
-                )
-            )
-
-        # Add the manual edge
-        graph.add_edge(
-            Edge(
-                source=source,
-                target=target,
-                type=relation_type,
-                metadata=meta,
-                manual=True,
-            )
-        )
-
-        # Persist
-        _storage.save(project_path, graph.to_data())
+            # Persist
+            _storage.save(project_path, graph.to_data())
 
         return (
             f"Added manual relation: {source} --[{relation_type}]--> {target}"
@@ -722,8 +736,12 @@ def codegiraffe_cycles(project_path: str, max_cycles: int = 20) -> str:
             for j in range(len(cycle)):
                 src = cycle[j]
                 tgt = cycle[(j + 1) % len(cycle)]
-                edge_data = graph.graph.edges.get((src, tgt), {})
-                edge_obj = edge_data.get("edge")
+                # MultiDiGraph: get_edge_data returns {key: data_dict}; pick first edge found
+                all_edges = graph.graph.get_edge_data(src, tgt) or {}
+                edge_obj = next(
+                    (d.get("edge") for d in all_edges.values() if d.get("edge") is not None),
+                    None,
+                )
                 if edge_obj:
                     edge_types.append(f"{src} --[{edge_obj.type}]--> {tgt}")
             if edge_types:
@@ -897,16 +915,13 @@ def codegiraffe_add_contract(
                 f"Must be one of: {', '.join(sorted(VALID_CONTRACT_TYPES))}"
             )
 
-        graph = _ensure_graph(project_path)
-
-        # Parse metadata JSON
+        # Parse metadata JSON before acquiring lock (pure CPU, no shared state)
         try:
             extra_meta = json.loads(metadata)
         except json.JSONDecodeError:
             return "Error: metadata is not valid JSON"
 
         consumer_list = [c.strip() for c in consumers.split(",") if c.strip()]
-
         contract_id = f"contract:{name}"
 
         # Build contract metadata
@@ -919,47 +934,51 @@ def codegiraffe_add_contract(
             **extra_meta,
         }
 
-        # Create contract node
-        graph.add_node(
-            Node(
-                id=contract_id,
-                type="contract",
-                label=name,
-                metadata=contract_meta,
-                manual=True,
-            )
-        )
-
-        # Collect warnings for missing nodes
         warnings: list[str] = []
 
-        # Create produces edge: producer -> contract
-        if producer not in graph.graph:
-            warnings.append(f"Warning: producer '{producer}' not found in graph")
-        graph.add_edge(
-            Edge(
-                source=producer,
-                target=contract_id,
-                type="produces",
-                manual=True,
-            )
-        )
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
 
-        # Create consumes_contract edges: consumer -> contract
-        for cid in consumer_list:
-            if cid not in graph.graph:
-                warnings.append(f"Warning: consumer '{cid}' not found in graph")
-            graph.add_edge(
-                Edge(
-                    source=cid,
-                    target=contract_id,
-                    type="consumes_contract",
+            # Create contract node
+            graph.add_node(
+                Node(
+                    id=contract_id,
+                    type="contract",
+                    label=name,
+                    metadata=contract_meta,
                     manual=True,
                 )
             )
 
-        # Persist
-        _storage.save(project_path, graph.to_data())
+            # Collect warnings for missing nodes
+
+            # Create produces edge: producer -> contract
+            if producer not in graph.graph:
+                warnings.append(f"Warning: producer '{producer}' not found in graph")
+            graph.add_edge(
+                Edge(
+                    source=producer,
+                    target=contract_id,
+                    type="produces",
+                    manual=True,
+                )
+            )
+
+            # Create consumes_contract edges: consumer -> contract
+            for cid in consumer_list:
+                if cid not in graph.graph:
+                    warnings.append(f"Warning: consumer '{cid}' not found in graph")
+                graph.add_edge(
+                    Edge(
+                        source=cid,
+                        target=contract_id,
+                        type="consumes_contract",
+                        manual=True,
+                    )
+                )
+
+            # Persist
+            _storage.save(project_path, graph.to_data())
 
         result_lines = [
             f"Added contract '{name}' ({contract_type}): "
@@ -1025,27 +1044,26 @@ def codegiraffe_annotate(
                 f"Must be one of: {', '.join(sorted(_VALID_STABILITY_VALUES))}"
             )
 
-        graph = _ensure_graph(project_path)
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
 
-        if node_id not in graph.graph:
-            candidates = list(graph.graph.nodes)
-            msg = f"Error: node '{node_id}' not found in graph."
-            return msg
+            if node_id not in graph.graph:
+                return f"Error: node '{node_id}' not found in graph."
 
-        node = graph.graph.nodes[node_id].get("node")
-        if node is None:
-            return f"Error: node '{node_id}' has no data."
+            node = graph.graph.nodes[node_id].get("node")
+            if node is None:
+                return f"Error: node '{node_id}' has no data."
 
-        # Apply annotations — only update fields that were provided
-        if owner is not None:
-            node.metadata["owner"] = owner
-        if stability is not None:
-            node.metadata["stability"] = stability
-        if notes is not None:
-            node.metadata["notes"] = notes
+            # Apply annotations — only update fields that were provided
+            if owner is not None:
+                node.metadata["owner"] = owner
+            if stability is not None:
+                node.metadata["stability"] = stability
+            if notes is not None:
+                node.metadata["notes"] = notes
 
-        # Persist updated graph
-        _storage.save(project_path, graph.to_data())
+            # Persist updated graph
+            _storage.save(project_path, graph.to_data())
 
         updated_fields = [
             f
@@ -1109,62 +1127,63 @@ def codegiraffe_domains(
                 f"Must be one of: {', '.join(sorted(_VALID_DOMAIN_ACTIONS))}"
             )
 
-        graph = _ensure_graph(project_path)
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
 
-        if action == "list":
-            domains = _list_domains(graph)
-            if not domains:
-                return "No domains defined. Use action='infer' or action='add' to create domains."
-            lines = ["Domains:"]
-            for d in domains:
-                manual_tag = " [manual]" if d.get("manual") else ""
-                lines.append(f"  {d['name']}{manual_tag}: {d['node_count']} member(s)")
-            return "\n".join(lines)
+            if action == "list":
+                domains = _list_domains(graph)
+                if not domains:
+                    return "No domains defined. Use action='infer' or action='add' to create domains."
+                lines = ["Domains:"]
+                for d in domains:
+                    manual_tag = " [manual]" if d.get("manual") else ""
+                    lines.append(f"  {d['name']}{manual_tag}: {d['node_count']} member(s)")
+                return "\n".join(lines)
 
-        elif action == "infer":
-            inferred = _infer_domains(graph)
-            if not inferred:
-                return (
-                    "No meaningful domain clusters found. "
-                    "Ensure the project has been scanned (codegiraffe_init) and "
-                    "nodes have file_path metadata or typed IDs."
-                )
-            added: list[str] = []
-            for domain in inferred:
-                _add_domain(graph, domain["name"], domain["node_ids"])
-                added.append(f"  {domain['name']}: {domain['node_count']} member(s)")
-            _storage.save(project_path, graph.to_data())
-            return "Inferred and added domains:\n" + "\n".join(added)
+            elif action == "infer":
+                inferred = _infer_domains(graph)
+                if not inferred:
+                    return (
+                        "No meaningful domain clusters found. "
+                        "Ensure the project has been scanned (codegiraffe_init) and "
+                        "nodes have file_path metadata or typed IDs."
+                    )
+                added: list[str] = []
+                for domain in inferred:
+                    _add_domain(graph, domain["name"], domain["node_ids"])
+                    added.append(f"  {domain['name']}: {domain['node_count']} member(s)")
+                _storage.save(project_path, graph.to_data())
+                return "Inferred and added domains:\n" + "\n".join(added)
 
-        elif action == "add":
-            if not name:
-                return "Error: 'name' is required for action='add'"
-            member_ids = [n.strip() for n in node_ids.split(",") if n.strip()]
-            if not member_ids:
-                return "Error: 'node_ids' must be a non-empty comma-separated list for action='add'"
-            warnings: list[str] = []
-            for nid in member_ids:
-                if nid not in graph.graph:
-                    warnings.append(f"Warning: node '{nid}' not found in graph")
-            _add_domain(graph, name, member_ids)
-            _storage.save(project_path, graph.to_data())
-            lines = [f"Added domain '{name}' with {len(member_ids)} member(s)."]
-            if warnings:
-                lines.append("")
-                lines.extend(warnings)
-            return "\n".join(lines)
+            elif action == "add":
+                if not name:
+                    return "Error: 'name' is required for action='add'"
+                member_ids = [n.strip() for n in node_ids.split(",") if n.strip()]
+                if not member_ids:
+                    return "Error: 'node_ids' must be a non-empty comma-separated list for action='add'"
+                warnings: list[str] = []
+                for nid in member_ids:
+                    if nid not in graph.graph:
+                        warnings.append(f"Warning: node '{nid}' not found in graph")
+                _add_domain(graph, name, member_ids)
+                _storage.save(project_path, graph.to_data())
+                lines = [f"Added domain '{name}' with {len(member_ids)} member(s)."]
+                if warnings:
+                    lines.append("")
+                    lines.extend(warnings)
+                return "\n".join(lines)
 
-        elif action == "remove":
-            if not name:
-                return "Error: 'name' is required for action='remove'"
-            domain_id = f"domain:{name}"
-            if domain_id not in graph.graph:
-                return f"Domain '{name}' not found in graph."
-            _remove_domain(graph, name)
-            _storage.save(project_path, graph.to_data())
-            return f"Removed domain '{name}'."
+            elif action == "remove":
+                if not name:
+                    return "Error: 'name' is required for action='remove'"
+                domain_id = f"domain:{name}"
+                if domain_id not in graph.graph:
+                    return f"Domain '{name}' not found in graph."
+                _remove_domain(graph, name)
+                _storage.save(project_path, graph.to_data())
+                return f"Removed domain '{name}'."
 
-        return "Error: unknown action"  # pragma: no cover
+            return "Error: unknown action"  # pragma: no cover
 
     except Exception as exc:
         return f"Error managing domains: {exc}"
@@ -1418,11 +1437,6 @@ def codegiraffe_coverage(
 
     Returns a markdown summary of annotated nodes.
     """
-    try:
-        graph = _ensure_graph(project_path)
-    except Exception as exc:
-        return f"Error: {exc}"
-
     from codegiraffe.coverage_mapper import (  # noqa: PLC0415
         auto_detect_format,
         map_coverage_to_nodes,
@@ -1454,22 +1468,27 @@ def codegiraffe_coverage(
     except Exception as exc:
         return f"Error parsing coverage file: {exc}"
 
-    map_coverage_to_nodes(graph, coverage_data)
+    try:
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
+            map_coverage_to_nodes(graph, coverage_data)
 
-    lines = ["## Coverage Mapping Report", ""]
-    lines.append(f"**Format:** {fmt}")
-    lines.append(f"**Coverage file:** {coverage_path}")
-    lines.append(f"**Files in coverage data:** {len(coverage_data)}")
-    lines.append("")
+            lines = ["## Coverage Mapping Report", ""]
+            lines.append(f"**Format:** {fmt}")
+            lines.append(f"**Coverage file:** {coverage_path}")
+            lines.append(f"**Files in coverage data:** {len(coverage_data)}")
+            lines.append("")
 
-    annotated_nodes: list[tuple[str, str, float]] = []
-    for nid, attrs in graph.graph.nodes(data=True):
-        node = attrs.get("node")
-        if node is None:
-            continue
-        cov = node.metadata.get("_test_coverage")
-        if cov is not None:
-            annotated_nodes.append((nid, node.file_path or "", cov))
+            annotated_nodes: list[tuple[str, str, float]] = []
+            for nid, attrs in graph.graph.nodes(data=True):
+                node = attrs.get("node")
+                if node is None:
+                    continue
+                cov = node.metadata.get("_test_coverage")
+                if cov is not None:
+                    annotated_nodes.append((nid, node.file_path or "", cov))
+    except Exception as exc:
+        return f"Error: {exc}"
 
     if not annotated_nodes:
         lines.append("No graph nodes matched coverage data.")
@@ -1694,8 +1713,11 @@ def codegiraffe_sync(
     global _graph  # noqa: PLW0603
 
     try:
-        graph = _ensure_graph(project_path)
-        old_data = graph.to_data()
+        # Read old graph data under lock so the snapshot is consistent
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
+            old_data = graph.to_data()
+
         old_node_count = len(old_data.nodes)
         old_edge_count = len(old_data.edges)
 
@@ -1712,7 +1734,7 @@ def codegiraffe_sync(
             except ImportError:
                 registry = None  # falls back to default regex registry
 
-        # Re-scan
+        # Re-scan (slow — do NOT hold the lock during scanning)
         result = scan_project(project_path, registry=registry, include_tests=include_tests)
 
         # Build new graph from scan results
@@ -1739,11 +1761,12 @@ def codegiraffe_sync(
         except Exception:
             pass  # never fail sync if layout computation errors
 
-        # Persist and cache
-        _storage.save(project_path, data)
-        _graph = new_graph
+        # Atomically persist and replace the cached graph under the lock
+        with _graph_lock:
+            _storage.save(project_path, data)
+            _graph = new_graph
 
-        # Auto-version after sync
+        # Auto-version after sync (outside lock — version store has its own safety)
         _version_store.add_version(
             project_path, old_data, new_graph.to_data(), "Sync",
         )
@@ -1801,23 +1824,24 @@ def codegiraffe_sync_files(
     try:
         from codegiraffe.scanner import sync_files
 
-        # Parse file_paths: accept JSON array or comma-separated string
+        # Parse file_paths: accept JSON array or comma-separated string (no shared state)
         if file_paths.strip().startswith("["):
             paths = json.loads(file_paths)
         else:
             paths = [p.strip() for p in file_paths.split(",") if p.strip()]
 
-        graph = _ensure_graph(project_path)
+        with _graph_lock:
+            graph = _ensure_graph(project_path)
 
-        summary = sync_files(
-            graph=graph,
-            project_path=project_path,
-            file_paths=paths,
-            scanner_mode=scanner_mode,
-        )
+            summary = sync_files(
+                graph=graph,
+                project_path=project_path,
+                file_paths=paths,
+                scanner_mode=scanner_mode,
+            )
 
-        # Persist updated graph
-        _storage.save(project_path, graph.to_data())
+            # Persist updated graph
+            _storage.save(project_path, graph.to_data())
 
         return json.dumps(summary)
 
@@ -2126,6 +2150,10 @@ def codegiraffe_cypher(project_path: str, query: str) -> str:
     Requires Neo4j storage backend and the ``neo4j`` Python driver.
     Connection is configured via environment variables ``NEO4J_URI``,
     ``NEO4J_USER``, and ``NEO4J_PASSWORD``.
+
+    Write operations are rejected: queries containing the keywords CREATE,
+    MERGE, DELETE, SET, REMOVE, DROP, DETACH, or CALL will raise a
+    ``ValueError`` before reaching the database.
 
     Returns query results as a JSON array of row objects.
     """

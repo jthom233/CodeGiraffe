@@ -1,13 +1,13 @@
 """Graph data model for Code Giraffe architecture knowledge graph.
 
 Provides Pydantic models for serialization and an ArchGraph class
-that wraps a NetworkX DiGraph for querying and manipulation.
+that wraps a NetworkX MultiDiGraph for querying and manipulation.
 """
 
 from __future__ import annotations
 
 from collections import deque
-from typing import Any
+from typing import Any, Iterator
 
 import networkx as nx
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,14 +51,16 @@ class GraphData(BaseModel):
 
 
 class ArchGraph:
-    """Architecture knowledge graph backed by a NetworkX DiGraph.
+    """Architecture knowledge graph backed by a NetworkX MultiDiGraph.
 
-    Wraps a NetworkX DiGraph and provides domain-specific methods for
-    querying and manipulating the architecture graph.
+    Wraps a NetworkX MultiDiGraph and provides domain-specific methods for
+    querying and manipulating the architecture graph. Using MultiDiGraph
+    allows multiple edge types between the same (source, target) pair to
+    coexist without overwriting each other.
     """
 
     def __init__(self, data: GraphData | None = None) -> None:
-        self._graph = nx.DiGraph()
+        self._graph = nx.MultiDiGraph()
         self._data = data or GraphData()
         self._cached_data: GraphData | None = None
 
@@ -74,8 +76,8 @@ class ArchGraph:
                 )
 
     @property
-    def graph(self) -> nx.DiGraph:
-        """Access the underlying NetworkX DiGraph."""
+    def graph(self) -> nx.MultiDiGraph:
+        """Access the underlying NetworkX MultiDiGraph."""
         return self._graph
 
     def add_node(self, node: Node) -> None:
@@ -87,11 +89,14 @@ class ArchGraph:
         """Add an edge to the graph.
 
         If an edge with the same source, target, and type already exists,
-        it is updated with the new edge data.
+        it is updated with the new edge data. Different edge types between
+        the same pair are stored as separate edges (MultiDiGraph semantics).
         """
-        existing_edges = self._graph.get_edge_data(edge.source, edge.target)
-        if existing_edges and existing_edges.get("key") == edge.type:
-            self._graph[edge.source][edge.target]["edge"] = edge
+        # In MultiDiGraph, get_edge_data(u, v, key) returns the specific
+        # edge data dict for that key, or None if it doesn't exist.
+        existing = self._graph.get_edge_data(edge.source, edge.target, key=edge.type)
+        if existing is not None:
+            self._graph[edge.source][edge.target][edge.type]["edge"] = edge
         else:
             # Ensure both endpoints exist as graph nodes (even if bare)
             if edge.source not in self._graph:
@@ -143,7 +148,7 @@ class ArchGraph:
                 nodes[nid] = node_data
 
         edges: list[Edge] = []
-        for u, v, edge_data in self._graph.edges(data=True):
+        for u, v, edge_data in self._graph.edges(data=True, keys=False):
             if u in visited and v in visited:
                 edge_obj = edge_data.get("edge")
                 if edge_obj is not None:
@@ -239,7 +244,7 @@ class ArchGraph:
                 nodes[nid] = node
 
         edges: list[Edge] = []
-        for _, _, edge_data in self._graph.edges(data=True):
+        for _, _, edge_data in self._graph.edges(data=True, keys=False):
             edge_obj: Edge | None = edge_data.get("edge")
             if edge_obj is not None:
                 edges.append(edge_obj)
@@ -267,8 +272,63 @@ class ArchGraph:
         for edge in old_data.edges:
             if not edge.manual:
                 continue
-            # Check whether this exact manual edge already exists
-            existing = self._graph.get_edge_data(edge.source, edge.target)
-            if existing is None or existing.get("key") != edge.type:
+            # Check whether this exact manual edge (same source, target, type) already exists.
+            # In MultiDiGraph, get_edge_data with key= returns None if that specific
+            # typed edge is absent.
+            existing = self._graph.get_edge_data(edge.source, edge.target, key=edge.type)
+            if existing is None:
                 self.add_edge(edge)
         self._cached_data = None
+
+    def get_edge_between(self, source: str, target: str) -> Edge | None:
+        """Return any Edge between source and target, or None if no edges exist.
+
+        When multiple edge types exist between the pair, the first found is returned.
+        Use get_typed_edge() or get_all_edges_between() for precise access.
+        """
+        if source not in self._graph or target not in self._graph:
+            return None
+        edge_map = self._graph.get_edge_data(source, target)
+        if not edge_map:
+            return None
+        for edge_data in edge_map.values():
+            edge_obj: Edge | None = edge_data.get("edge")
+            if edge_obj is not None:
+                return edge_obj
+        return None
+
+    def get_typed_edge(self, source: str, target: str, edge_type: str) -> Edge | None:
+        """Return the Edge of a specific type between source and target, or None.
+
+        Performs an exact lookup by (source, target, edge_type) triple.
+        """
+        if source not in self._graph or target not in self._graph:
+            return None
+        edge_data = self._graph.get_edge_data(source, target, key=edge_type)
+        if edge_data is None:
+            return None
+        return edge_data.get("edge")
+
+    def get_all_edges_between(self, source: str, target: str) -> list[Edge]:
+        """Return all edges between source and target across all edge types.
+
+        Returns an empty list if no edges exist or if either node is absent.
+        """
+        if source not in self._graph or target not in self._graph:
+            return []
+        edge_map = self._graph.get_edge_data(source, target)
+        if not edge_map:
+            return []
+        result: list[Edge] = []
+        for edge_data in edge_map.values():
+            edge_obj: Edge | None = edge_data.get("edge")
+            if edge_obj is not None:
+                result.append(edge_obj)
+        return result
+
+    def iter_edges(self) -> Iterator[Edge]:
+        """Yield every Edge in the graph, across all node pairs and edge types."""
+        for _, _, edge_data in self._graph.edges(data=True, keys=False):
+            edge_obj: Edge | None = edge_data.get("edge")
+            if edge_obj is not None:
+                yield edge_obj

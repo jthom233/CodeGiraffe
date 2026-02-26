@@ -145,10 +145,12 @@ def _path_min_confidence(graph_nx: Any, path: list[str]) -> float:
     min_conf = 1.0
     for i in range(len(path) - 1):
         src, tgt = path[i], path[i + 1]
-        edge_data = graph_nx.edges.get((src, tgt), {})
-        edge_obj = edge_data.get("edge")
-        if edge_obj is not None:
-            min_conf = min(min_conf, edge_obj.confidence)
+        # MultiDiGraph: get_edge_data returns {key: data_dict} for all edges between pair
+        all_edge_data = graph_nx.get_edge_data(src, tgt) or {}
+        for edge_data in all_edge_data.values():
+            edge_obj = edge_data.get("edge")
+            if edge_obj is not None:
+                min_conf = min(min_conf, edge_obj.confidence)
     return min_conf
 
 
@@ -330,7 +332,7 @@ def _include_constraining_decisions(subgraph_nodes: set, graph: ArchGraph) -> se
 
     # Iterate over all edges in the graph looking for constrains edges whose
     # target is already in the subgraph
-    for src, tgt, data in graph.graph.edges(data=True):
+    for src, tgt, data in graph.graph.edges(data=True, keys=False):
         edge: Edge | None = data.get("edge")
         if edge is None:
             continue
@@ -824,7 +826,7 @@ def _apply_intent_strategy(
         # Add edges connecting newly added nodes
         all_node_ids = set(result.nodes.keys())
         existing_edge_keys = {(e.source, e.target, e.type) for e in result.edges}
-        for src, tgt, data in graph.graph.edges(data=True):
+        for src, tgt, data in graph.graph.edges(data=True, keys=False):
             if src in all_node_ids and tgt in all_node_ids:
                 edge_obj = data.get("edge")
                 if edge_obj is not None:
@@ -981,7 +983,7 @@ def _context_for_task_embeddings(
         if node_obj is not None:
             merged.nodes[nid] = node_obj
             # Include constrains edges for the newly added decision nodes
-            for src, tgt, data in graph.graph.edges(data=True):
+            for src, tgt, data in graph.graph.edges(data=True, keys=False):
                 if src == nid and tgt in merged.nodes:
                     edge_obj = data.get("edge")
                     if edge_obj is not None:
@@ -1062,7 +1064,7 @@ def _context_for_task_keywords(
         if node_obj is not None:
             merged.nodes[nid] = node_obj
             # Include constrains edges for the newly added decision nodes
-            for src, tgt, data in graph.graph.edges(data=True):
+            for src, tgt, data in graph.graph.edges(data=True, keys=False):
                 if src == nid and tgt in merged.nodes:
                     edge_obj = data.get("edge")
                     if edge_obj is not None:
@@ -1472,8 +1474,12 @@ def generate_impact_summary(blast_radius: dict[str, Any], graph: ArchGraph) -> s
         lines.append(f"### Direct Dependencies ({len(direct)})")
         lines.append("")
         for item in direct:
-            edge_data = graph.graph.edges.get((target_id, item["node_id"]), {})
-            edge_obj = edge_data.get("edge")
+            # MultiDiGraph: get_edge_data returns {key: data_dict}; pick first edge found
+            all_edges = graph.graph.get_edge_data(target_id, item["node_id"]) or {}
+            edge_obj = next(
+                (d.get("edge") for d in all_edges.values() if d.get("edge") is not None),
+                None,
+            )
             edge_type = edge_obj.type if edge_obj else "unknown"
             fp = f" [{item['file_path']}]" if item.get("file_path") else ""
             lines.append(
@@ -2133,8 +2139,12 @@ def validate_changes(
         # Find the edge type from a changed node to this impacted node
         edge_info = ""
         for changed_id in changed_node_ids:
-            edge_data = graph.graph.edges.get((changed_id, imp_id), {})
-            edge_obj = edge_data.get("edge")
+            # MultiDiGraph: get_edge_data returns {key: data_dict}; pick first edge found
+            all_edges = graph.graph.get_edge_data(changed_id, imp_id) or {}
+            edge_obj = next(
+                (d.get("edge") for d in all_edges.values() if d.get("edge") is not None),
+                None,
+            )
             if edge_obj:
                 edge_info = f" (via {edge_obj.type} edge)"
                 break
@@ -2426,15 +2436,22 @@ def file_coupling(
         edge_type = ""
         for na in nodes_a:
             for nb in nodes_b:
-                edge_data = graph.graph.edges.get((na, nb), {})
-                edge_obj = edge_data.get("edge")
+                # MultiDiGraph: get_edge_data returns {key: data_dict}; pick first edge found
+                all_edges_fwd = graph.graph.get_edge_data(na, nb) or {}
+                edge_obj = next(
+                    (d.get("edge") for d in all_edges_fwd.values() if d.get("edge") is not None),
+                    None,
+                )
                 if edge_obj:
                     in_graph = True
                     edge_type = edge_obj.type
                     break
                 # Check reverse direction too
-                edge_data = graph.graph.edges.get((nb, na), {})
-                edge_obj = edge_data.get("edge")
+                all_edges_rev = graph.graph.get_edge_data(nb, na) or {}
+                edge_obj = next(
+                    (d.get("edge") for d in all_edges_rev.values() if d.get("edge") is not None),
+                    None,
+                )
                 if edge_obj:
                     in_graph = True
                     edge_type = edge_obj.type
@@ -2562,8 +2579,17 @@ def order_tasks(graph: ArchGraph, tasks: list[dict]) -> dict:
                 continue
             for nj in nodes_j:
                 for ni in nodes_i:
-                    edge_data = graph.graph.edges.get((nj, ni), {})
-                    edge_obj = edge_data.get("edge")
+                    # MultiDiGraph: get_edge_data returns {key: data_dict}; check all edges
+                    all_edges = graph.graph.get_edge_data(nj, ni) or {}
+                    edge_obj = next(
+                        (
+                            d.get("edge")
+                            for d in all_edges.values()
+                            if d.get("edge") is not None
+                            and d["edge"].type == EdgeType.IMPORTS
+                        ),
+                        None,
+                    )
                     if edge_obj is not None and edge_obj.type == EdgeType.IMPORTS:
                         if not task_dep_graph.has_edge(i, j):
                             task_dep_graph.add_edge(i, j)

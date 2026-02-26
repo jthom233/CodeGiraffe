@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from codegiraffe.graph import Edge, GraphData, Node
-from codegiraffe.neo4j_storage import Neo4jStorage, is_available
+from codegiraffe.neo4j_storage import Neo4jStorage, _is_read_only_cypher, is_available
 from codegiraffe.schema import EdgeType, NodeType
 
 
@@ -603,3 +603,64 @@ class TestRoundTrip:
         # But should still delete and create meta
         assert any("DETACH DELETE" in q for q in all_queries)
         tx.commit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test: Cypher write rejection (T051–T054)
+# ---------------------------------------------------------------------------
+
+
+class TestCypherWriteRejection:
+    """_is_read_only_cypher() and run_cypher() enforce read-only access."""
+
+    # T051 ---------------------------------------------------------------
+    def test_rejects_write_keywords(self):
+        """_is_read_only_cypher() returns False for each write keyword."""
+        write_queries = [
+            "CREATE (n:Node) RETURN n",
+            "MERGE (n {id: 1}) RETURN n",
+            "MATCH (n) DELETE n",
+            "MATCH (n) SET n.foo = 1",
+            "MATCH (n) REMOVE n.foo",
+            "DROP INDEX ON :Node(id)",
+            "MATCH (n) DETACH DELETE n",
+            "CALL apoc.schema.assert()",
+        ]
+        for query in write_queries:
+            assert _is_read_only_cypher(query) is False, (
+                f"Expected rejection for query: {query!r}"
+            )
+
+    # T052 ---------------------------------------------------------------
+    def test_accepts_read_queries(self):
+        """_is_read_only_cypher() returns True for safe read queries."""
+        read_queries = [
+            "MATCH (n) RETURN n LIMIT 10",
+            "MATCH (n)-[r]->(m) WHERE n.type = 'module' RETURN n, r, m",
+            "MATCH (n) WITH n ORDER BY n.id RETURN n",
+            "OPTIONAL MATCH (n) RETURN count(n)",
+        ]
+        for query in read_queries:
+            assert _is_read_only_cypher(query) is True, (
+                f"Expected acceptance for query: {query!r}"
+            )
+
+    # T053 ---------------------------------------------------------------
+    def test_rejection_is_case_insensitive(self):
+        """_is_read_only_cypher() rejects write keywords in any casing."""
+        variants = [
+            "create (n) return n",
+            "Create (n) return n",
+            "CREATE (n) return n",
+            "cReAtE (n) return n",
+        ]
+        for query in variants:
+            assert _is_read_only_cypher(query) is False, (
+                f"Expected rejection for casing variant: {query!r}"
+            )
+
+    # T054 ---------------------------------------------------------------
+    def test_run_cypher_raises_on_write_query(self, storage, mock_driver):
+        """run_cypher() raises ValueError with 'read-only' for write queries."""
+        with pytest.raises(ValueError, match="read-only"):
+            storage.run_cypher("MATCH (n) DETACH DELETE n")
