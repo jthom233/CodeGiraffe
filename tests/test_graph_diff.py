@@ -7,7 +7,6 @@ T059: Git worktree integration and contract tests
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -16,6 +15,7 @@ import pytest
 
 from codegiraffe.graph import ArchGraph, Edge, Node
 from codegiraffe.schema import EdgeType, NodeType
+from tests.helpers import _GIT_ENV, _git, _init_repo, _commit_file
 
 
 # ---------------------------------------------------------------------------
@@ -36,41 +36,6 @@ def _get_compute_graph_diff():
 def _get_build_graph_at_ref():
     from codegiraffe.graph_diff import build_graph_at_ref
     return build_graph_at_ref
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-_GIT_ENV = {
-    **os.environ,
-    "GIT_AUTHOR_NAME": "Test Author",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_COMMITTER_NAME": "Test Author",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-}
-
-
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        capture_output=True,
-        text=True,
-        cwd=str(cwd),
-        env=_GIT_ENV,
-    )
-
-
-def _init_repo(tmp: Path) -> Path:
-    _git(tmp, "init")
-    _git(tmp, "checkout", "-b", "main")
-    return tmp
-
-
-def _commit_file(repo: Path, name: str, content: str, msg: str) -> None:
-    (repo / name).write_text(content)
-    _git(repo, "add", name)
-    _git(repo, "commit", "-m", msg)
 
 
 # ---------------------------------------------------------------------------

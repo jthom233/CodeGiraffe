@@ -20,6 +20,7 @@ import os
 import socket
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,9 @@ class DashboardServer:
                 return JSONResponse({"error": "project_path required"}, status_code=400)
 
             # Path allowlist check — reject paths not approved by codegiraffe_init.
-            if project_path not in srv._initialized_project_paths:
+            # Normalize via resolve() to prevent symlink/relative-path bypasses.
+            normalized_path = str(Path(project_path).resolve())
+            if normalized_path not in srv._initialized_project_paths:
                 return JSONResponse(
                     {"error": (
                         f"Path '{project_path}' is not in the initialized project allowlist. "

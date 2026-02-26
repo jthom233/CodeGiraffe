@@ -17,7 +17,6 @@ import codegiraffe.server as server_module
 from codegiraffe.graph import ArchGraph, Edge, Node
 from codegiraffe.query import order_tasks
 from codegiraffe.schema import EdgeType, NodeType
-from codegiraffe.storage import JSONStorage
 
 
 # ---------------------------------------------------------------------------
@@ -307,15 +306,6 @@ class TestParallelGroupsAndDependencyEdges:
 
 class TestOrderTasksTool:
     """Contract tests for the codegiraffe_order_tasks MCP tool."""
-
-    @pytest.fixture(autouse=True)
-    def reset_server_state(self):
-        """Reset server module globals before each test."""
-        server_module._graph = None
-        server_module._storage = JSONStorage()
-        yield
-        server_module._graph = None
-        server_module._storage = JSONStorage()
 
     def _build_and_cache_graph(self, project_path: str) -> None:
         """Build a small graph and persist it so _ensure_graph works."""

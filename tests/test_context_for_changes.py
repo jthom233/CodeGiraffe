@@ -15,22 +15,10 @@ import codegiraffe.server as server_module
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 from codegiraffe.schema import EdgeType, NodeType
 from codegiraffe.server import codegiraffe_context_for
-from codegiraffe.storage import JSONStorage
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def reset_server_state():
-    """Reset server module globals before each test."""
-    server_module._graph = None
-    server_module._storage = JSONStorage()
-    yield
-    server_module._graph = None
-    server_module._storage = JSONStorage()
 
 
 def _build_graph(project_path: str) -> ArchGraph:

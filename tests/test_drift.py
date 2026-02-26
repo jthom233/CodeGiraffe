@@ -215,10 +215,11 @@ class TestDetectGitRenames:
     @patch("codegiraffe.query.subprocess.run")
     def test_timeout(self, mock_run):
         import subprocess as sp
+        from codegiraffe.git_utils import GitTimeoutError
 
         mock_run.side_effect = sp.TimeoutExpired(cmd="git", timeout=10)
-        result = _detect_git_renames("/some/path")
-        assert result == {}
+        with pytest.raises(GitTimeoutError):
+            _detect_git_renames("/some/path")
 
     @patch("codegiraffe.query.subprocess.run")
     def test_custom_since(self, mock_run):

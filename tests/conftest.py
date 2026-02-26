@@ -8,12 +8,13 @@ from codegiraffe.schema import NodeType, EdgeType
 # Shared server-state reset fixture (US6 — fixture consolidation)
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def reset_server_state():
     """Reset server module globals before/after each test to avoid cross-test pollution.
 
     Defined here so all test modules can reference it via conftest discovery
-    instead of duplicating it locally.
+    instead of duplicating it locally. autouse=True ensures it runs for every
+    test without requiring explicit fixture declaration in each test file.
     """
     import codegiraffe.server as server_module
     from codegiraffe.storage import JSONStorage

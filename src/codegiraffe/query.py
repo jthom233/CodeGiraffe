@@ -20,7 +20,7 @@ from codegiraffe.diff_parser import (
     DiffFile,
     TestSuggestion,
 )
-from codegiraffe.git_utils import get_commit_file_history, is_git_repo
+from codegiraffe.git_utils import GIT_COMMAND_TIMEOUT, GitTimeoutError, get_commit_file_history, is_git_repo
 
 import networkx as nx
 
@@ -167,7 +167,12 @@ def _detect_git_renames(project_path: str, since: str | None = None) -> dict[str
         else:
             cmd.append("HEAD~10")  # Default: check last 10 commits
 
-        result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=GIT_COMMAND_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            raise GitTimeoutError(
+                f"git diff --name-status timed out after {GIT_COMMAND_TIMEOUT}s in {project_path}"
+            ) from exc
         if result.returncode != 0:
             return {}
 
@@ -179,7 +184,7 @@ def _detect_git_renames(project_path: str, since: str | None = None) -> dict[str
             if len(parts) >= 3 and parts[0].startswith("R"):
                 renames[parts[1]] = parts[2]
         return renames
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError):
         return {}
 
 

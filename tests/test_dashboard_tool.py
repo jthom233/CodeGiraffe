@@ -21,22 +21,9 @@ import pytest
 
 import codegiraffe.server as server_module
 from codegiraffe.server import codegiraffe_dashboard
-from codegiraffe.storage import JSONStorage
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def reset_server_state():
-    """Reset server module globals before and after each test."""
-    server_module._graph = None
-    server_module._storage = JSONStorage()
-    yield
-    server_module._graph = None
-    server_module._storage = JSONStorage()
 
 
 @pytest.fixture(autouse=True)

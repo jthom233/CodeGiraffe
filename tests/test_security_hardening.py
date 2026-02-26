@@ -527,6 +527,47 @@ class TestUS5ParameterBounds:
                 f"max_depth {captured_depth[0]} exceeds MAX_BLAST_DEPTH {srv.MAX_BLAST_DEPTH}"
             )
 
+    def test_blast_depth_none_is_clamped_to_max(self, tmp_path):
+        """codegiraffe_blast_radius with max_depth=None uses MAX_BLAST_DEPTH (not unlimited)."""
+        import codegiraffe.server as srv
+        from codegiraffe.server import codegiraffe_init, codegiraffe_blast_radius
+        from codegiraffe.storage import JSONStorage
+        from codegiraffe.versioning import VersionStore
+        from codegiraffe.federation import GraphFederation
+
+        srv._graph = None
+        srv._storage = JSONStorage()
+        srv._version_store = VersionStore()
+        srv._federation = GraphFederation()
+        srv._initialized_project_paths = set()
+
+        (tmp_path / "app.py").write_text("class Foo:\n    pass\n")
+        codegiraffe_init(str(tmp_path))
+
+        captured_depth: list = []
+        original_blast = __import__(
+            "codegiraffe.query", fromlist=["compute_blast_radius"]
+        ).compute_blast_radius
+
+        def mock_blast(graph, node_id, include_upstream=False, max_depth=None):
+            captured_depth.append(max_depth)
+            return original_blast(graph, node_id,
+                                  include_upstream=include_upstream,
+                                  max_depth=max_depth)
+
+        # Call with max_depth=None (the default) — must be clamped to MAX_BLAST_DEPTH
+        with patch("codegiraffe.server.compute_blast_radius", side_effect=mock_blast):
+            codegiraffe_blast_radius(str(tmp_path), node_id="mod:app", max_depth=None)
+
+        assert captured_depth, "compute_blast_radius was not called"
+        assert captured_depth[0] is not None, (
+            "max_depth=None must be replaced with MAX_BLAST_DEPTH before calling "
+            "compute_blast_radius; got None (unbounded traversal allowed)"
+        )
+        assert captured_depth[0] <= srv.MAX_BLAST_DEPTH, (
+            f"max_depth {captured_depth[0]} exceeds MAX_BLAST_DEPTH {srv.MAX_BLAST_DEPTH}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # US6 — Fixture consolidation (shared conftest)

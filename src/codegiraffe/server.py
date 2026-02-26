@@ -11,6 +11,7 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote as _url_quote
 
 import networkx as nx
@@ -226,7 +227,8 @@ def codegiraffe_init(
 
         # Register path in the allowlist so the dashboard /api/init endpoint
         # may rescan it without triggering a 403 path-traversal guard.
-        _initialized_project_paths.add(project_path)
+        # Normalize via resolve() so symlinks and relative components don't bypass the check.
+        _initialized_project_paths.add(str(Path(project_path).resolve()))
 
         # Lazily start the background dashboard server after a successful init.
         try:
@@ -631,7 +633,9 @@ def codegiraffe_blast_radius(
     """
     try:
         # Clamp max_depth to the configured maximum to prevent excessive traversal.
-        if max_depth is not None:
+        if max_depth is None:
+            max_depth = MAX_BLAST_DEPTH
+        else:
             max_depth = min(max_depth, MAX_BLAST_DEPTH)
 
         graph = _ensure_graph(project_path)
