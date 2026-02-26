@@ -16,7 +16,7 @@
 
 ```text
 src/codegiraffe/          # Main package
-├── server.py             # FastMCP server + 37 MCP tool definitions
+├── server.py             # FastMCP server + 40 MCP tool definitions
 ├── graph.py              # Pydantic models (Node, Edge, GraphData) + NetworkX ArchGraph
 ├── storage.py            # StorageBackend protocol + JSONStorage
 ├── sqlite_storage.py     # SQLiteStorage implementation

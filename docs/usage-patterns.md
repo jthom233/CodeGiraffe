@@ -115,10 +115,11 @@ See [Change Validation Tools](tools/change-impact.md) for the full reference on 
 When running multiple agents in parallel on the same codebase, use coordination tools to prevent conflicts:
 
 ```
-1. codegiraffe_agents()              --> See who is working where
-2. codegiraffe_claim(...)            --> Claim nodes before modifying them
-3. codegiraffe_status(..., "active") --> Keep claim alive while working
-4. codegiraffe_status(..., "done")   --> Release claims when finished
+1. codegiraffe_agents()                    --> See who is working where
+2. codegiraffe_claim(...)                  --> Claim nodes before modifying them
+3. codegiraffe_update_agent_status(..., "active") --> Keep claim alive while working
+4. codegiraffe_update_agent_status(..., "done")   --> Release claims when finished
+5. codegiraffe_release(...) [optional]     --> Manually release claims if needed
 ```
 
 **Example workflow:**
@@ -136,7 +137,7 @@ codegiraffe_claim(project_path="...", agent_id="agent-2",
 --> {"status": "conflict", "conflicting_agent": "agent-1", ...}
 
 # Agent 1 finishes and releases its claims
-codegiraffe_status(project_path="...", agent_id="agent-1", status="done")
+codegiraffe_update_agent_status(project_path="...", agent_id="agent-1", status="done")
 
 # Agent 2 can now claim successfully
 codegiraffe_claim(project_path="...", agent_id="agent-2",

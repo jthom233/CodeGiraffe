@@ -7,9 +7,10 @@ When multiple AI agents work on the same codebase simultaneously, Code Giraffe p
 ## How It Works
 
 1. **Claim** — Before modifying part of the architecture, an agent claims the relevant nodes using `codegiraffe_claim`. If another agent already holds a conflicting claim, the request fails with details about the conflict.
-2. **Status** — While working, agents update their status (`"active"`, `"blocked"`, `"done"`) using `codegiraffe_status`. Active updates refresh the claim TTL so it doesn't expire during long-running tasks.
-3. **Visibility** — Any agent can call `codegiraffe_agents` to see who is working on what, enabling informed coordination decisions.
-4. **Expiration** — Claims automatically expire after their TTL (default: 30 minutes) to prevent deadlocks from crashed or abandoned agents.
+2. **Status** — While working, agents update their status (`"active"`, `"blocked"`, `"done"`) using `codegiraffe_update_agent_status`. Active updates refresh the claim TTL so it doesn't expire during long-running tasks. When status is set to `"done"`, claims are automatically released.
+3. **Manual Release** — If an agent needs to release claims without completing (e.g., due to an error), call `codegiraffe_release` to immediately release them.
+4. **Visibility** — Any agent can call `codegiraffe_agents` to see who is working on what, enabling informed coordination decisions.
+5. **Expiration** — Claims automatically expire after their TTL (default: 30 minutes) to prevent deadlocks from crashed or abandoned agents.
 
 ## Example Workflow
 
@@ -30,7 +31,7 @@ codegiraffe_agents(project_path="...")
 --> Shows agent-1 is active on PaymentService
 
 # Agent 1 finishes and releases its claims
-codegiraffe_status(project_path="...", agent_id="agent-1", status="done")
+codegiraffe_update_agent_status(project_path="...", agent_id="agent-1", status="done")
 
 # Agent 2 can now claim successfully
 codegiraffe_claim(project_path="...", agent_id="agent-2",
@@ -68,7 +69,7 @@ codegiraffe_claim(
 
 ---
 
-### `codegiraffe_status`
+### `codegiraffe_update_agent_status`
 
 Update an agent's status and refresh its claim TTL.
 
@@ -83,12 +84,36 @@ Setting status to `"done"` releases the agent's claimed nodes. Setting status to
 
 **Example:**
 ```
-codegiraffe_status(
+codegiraffe_update_agent_status(
   project_path="/home/user/my-project",
   agent_id="agent-1",
   status="done"
 )
 --> {"agent_id": "agent-1", "status": "done", "released_nodes": [...]}
+```
+
+---
+
+### `codegiraffe_release`
+
+Manually release an agent's claimed nodes without changing status.
+
+| Parameter | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `project_path` | `str` | — | yes | Root directory of the project |
+| `agent_id` | `str` | — | yes | Agent identifier |
+| `node_ids` | `list[str]` | — | yes | Node IDs to release |
+
+Use this when an agent needs to abandon claims due to an error or cancellation without completing the task.
+
+**Example:**
+```
+codegiraffe_release(
+  project_path="/home/user/my-project",
+  agent_id="agent-1",
+  node_ids=["endpoint:/api/payments", "service:PaymentService"]
+)
+--> {"agent_id": "agent-1", "released_nodes": ["endpoint:/api/payments", "service:PaymentService"]}
 ```
 
 ---

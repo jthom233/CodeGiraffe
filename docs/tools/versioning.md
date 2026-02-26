@@ -80,15 +80,3 @@ codegiraffe_snapshot(project_path="/home/user/my-project", message="Before auth 
 
 ---
 
-### `codegiraffe_restore`
-
-Restore the architecture graph to a specific version. Automatically creates a backup snapshot first.
-
-| Parameter | Type | Default | Required | Description |
-|---|---|---|---|---|
-| `project_path` | `str` | — | yes | Root directory of the project |
-| `version_id` | `int` | — | yes | Version ID to restore to |
-
-Note: Currently supports diff-based history only. Full snapshot restore is planned.
-
----

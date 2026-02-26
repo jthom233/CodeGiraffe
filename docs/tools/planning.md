@@ -32,23 +32,48 @@ codegiraffe_annotate(
 
 ---
 
-### `codegiraffe_domains`
+### `codegiraffe_list_domains`
 
-Infer or manage domain groupings from directory structure. Groups related services/modules into logical domains.
+List all defined domains in the architecture graph.
 
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
-| `action` | `str` | `"list"` | no | Action: `"list"`, `"infer"`, `"add"`, or `"remove"` |
-| `name` | `str` | `""` | no | Domain name (required for `add`/`remove`) |
-| `node_ids` | `str` | `""` | no | Comma-separated node IDs to assign to domain (required for `add`) |
 
 **Example:**
 ```
-codegiraffe_domains(
-  project_path="/home/user/my-project",
-  action="infer"
-)
+codegiraffe_list_domains(project_path="/home/user/my-project")
+--> {
+      "domains": [
+        {
+          "name": "auth",
+          "nodes": ["endpoint:/api/login", "service:AuthService", "table:users"],
+          "member_count": 3
+        },
+        {
+          "name": "payments",
+          "nodes": ["endpoint:/api/payments", "service:PaymentService"],
+          "member_count": 2
+        }
+      ]
+    }
+```
+
+---
+
+### `codegiraffe_infer_domains`
+
+Auto-infer domain groupings from directory structure or ID prefix patterns.
+
+| Parameter | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `project_path` | `str` | — | yes | Root directory of the project |
+
+Auto-clustering creates domains for any cluster with 2+ members. Manual domains survive rescans.
+
+**Example:**
+```
+codegiraffe_infer_domains(project_path="/home/user/my-project")
 --> {
       "domains": [
         {
@@ -63,6 +88,48 @@ codegiraffe_domains(
         }
       ]
     }
+```
+
+---
+
+### `codegiraffe_add_domain`
+
+Create a domain and assign nodes to it.
+
+| Parameter | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `project_path` | `str` | — | yes | Root directory of the project |
+| `name` | `str` | — | yes | Domain name |
+| `node_ids` | `str` | — | yes | Comma-separated node IDs to assign to domain |
+
+**Example:**
+```
+codegiraffe_add_domain(
+  project_path="/home/user/my-project",
+  name="billing",
+  node_ids="endpoint:/api/billing,service:BillingService,table:invoices"
+)
+--> {"domain": "billing", "nodes": ["endpoint:/api/billing", "service:BillingService", "table:invoices"]}
+```
+
+---
+
+### `codegiraffe_remove_domain`
+
+Delete a domain and its associations.
+
+| Parameter | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `project_path` | `str` | — | yes | Root directory of the project |
+| `name` | `str` | — | yes | Domain name to remove |
+
+**Example:**
+```
+codegiraffe_remove_domain(
+  project_path="/home/user/my-project",
+  name="billing"
+)
+--> {"status": "removed", "domain": "billing"}
 ```
 
 ---
