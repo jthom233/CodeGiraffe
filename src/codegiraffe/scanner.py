@@ -7,8 +7,10 @@ APIs, services) and edges (reads, writes, calls) between them.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -88,6 +90,45 @@ class ScanResult:
     interfaces: list[InterfaceInfo] = field(default_factory=list)
     method_sets: list[MethodSetEntry] = field(default_factory=list)
 
+    # Incremental dedup indexes — not serialized, not compared (performance state only)
+    _node_index: dict[str, Node] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _seen_edges: set[tuple] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _seen_imports: set[tuple] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _seen_implementations: set[tuple] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _seen_calls: set[tuple] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _seen_interfaces: set[tuple] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _seen_method_sets: set[tuple] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        """Populate incremental indexes from any data passed at construction time."""
+        self._node_index = {n.id: n for n in self.nodes}
+        self._seen_edges = {(e.source, e.target, e.type) for e in self.edges}
+        self._seen_imports = {(i.module_path, i.style) for i in self.imports}
+        self._seen_implementations = {
+            (i.child_class, i.parent_class, i.file_path) for i in self.implementations
+        }
+        self._seen_calls = {
+            (c.caller, c.callee, c.file_path, c.receiver) for c in self.calls
+        }
+        self._seen_interfaces = {(i.name, i.file_path) for i in self.interfaces}
+        self._seen_method_sets = {
+            (m.struct_name, m.method_name, m.file_path) for m in self.method_sets
+        }
+
     def merge(self, other: ScanResult) -> None:
         """Merge *other* into this result, deduplicating all fields.
 
@@ -95,59 +136,56 @@ class ScanResult:
         Edges by ``(source, target, type)``.  Structured data (imports,
         implementations, calls, interfaces, method_sets) by their natural
         identity tuples.
+
+        This method is O(len(other.*)) per call — the incremental indexes
+        (_node_index, _seen_edges, etc.) are kept in sync so that each merge
+        does not need to rebuild the full accumulated index from scratch.
         """
-        node_index: dict[str, Node] = {n.id: n for n in self.nodes}
         for node in other.nodes:
-            if node.id not in node_index:
+            if node.id not in self._node_index:
                 self.nodes.append(node)
-                node_index[node.id] = node
+                self._node_index[node.id] = node
             else:
-                existing = node_index[node.id]
+                existing = self._node_index[node.id]
                 for k, v in node.metadata.items():
                     if k not in existing.metadata:
                         existing.metadata[k] = v
 
-        seen_edges = {(e.source, e.target, e.type) for e in self.edges}
         for edge in other.edges:
             key = (edge.source, edge.target, edge.type)
-            if key not in seen_edges:
+            if key not in self._seen_edges:
                 self.edges.append(edge)
-                seen_edges.add(key)
+                self._seen_edges.add(key)
 
-        seen_imports = {(i.module_path, i.style) for i in self.imports}
         for imp in other.imports:
             key = (imp.module_path, imp.style)
-            if key not in seen_imports:
+            if key not in self._seen_imports:
                 self.imports.append(imp)
-                seen_imports.add(key)
+                self._seen_imports.add(key)
 
-        seen_implementations = {(i.child_class, i.parent_class, i.file_path) for i in self.implementations}
         for impl in other.implementations:
             key = (impl.child_class, impl.parent_class, impl.file_path)
-            if key not in seen_implementations:
+            if key not in self._seen_implementations:
                 self.implementations.append(impl)
-                seen_implementations.add(key)
+                self._seen_implementations.add(key)
 
-        seen_calls = {(c.caller, c.callee, c.file_path, c.receiver) for c in self.calls}
         for call in other.calls:
             key = (call.caller, call.callee, call.file_path, call.receiver)
-            if key not in seen_calls:
+            if key not in self._seen_calls:
                 self.calls.append(call)
-                seen_calls.add(key)
+                self._seen_calls.add(key)
 
-        seen_interfaces = {(i.name, i.file_path) for i in self.interfaces}
         for iface in other.interfaces:
             key = (iface.name, iface.file_path)
-            if key not in seen_interfaces:
+            if key not in self._seen_interfaces:
                 self.interfaces.append(iface)
-                seen_interfaces.add(key)
+                self._seen_interfaces.add(key)
 
-        seen_method_sets = {(m.struct_name, m.method_name, m.file_path) for m in self.method_sets}
         for ms in other.method_sets:
             key = (ms.struct_name, ms.method_name, ms.file_path)
-            if key not in seen_method_sets:
+            if key not in self._seen_method_sets:
                 self.method_sets.append(ms)
-                seen_method_sets.add(key)
+                self._seen_method_sets.add(key)
 
 
 # ---------------------------------------------------------------------------
@@ -1685,6 +1723,14 @@ def _infer_call_edges(result: ScanResult) -> None:
             if pkg:
                 module_registry[pkg] = node.id
 
+    # Pre-build a file_path -> module_node_id lookup to avoid O(N) linear
+    # scans inside the call loop (mirrors _build_name_lookup pattern).
+    file_path_to_module_id: dict[str, str] = {
+        node.file_path: node.id
+        for node in result.nodes
+        if node.type == "module" and node.file_path is not None
+    }
+
     for call in result.calls:
         # Determine the caller's language from its file path
         caller_lang: str | None = None
@@ -1725,12 +1771,9 @@ def _infer_call_edges(result: ScanResult) -> None:
                 caller_node_id = symbol_registry.get(call.caller)
 
         if caller_node_id is None:
-            # Try to find caller by file path — use the module node
+            # Try to find caller by file path — O(1) dict lookup instead of linear scan
             if call.file_path:
-                for node in result.nodes:
-                    if node.type == "module" and node.file_path == call.file_path:
-                        caller_node_id = node.id
-                        break
+                caller_node_id = file_path_to_module_id.get(call.file_path)
 
         if caller_node_id is None or caller_node_id == callee_node_id:
             continue  # Can't resolve caller or self-call
@@ -2077,6 +2120,118 @@ def _promote_cross_repo_edges(result: ScanResult, project_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-file scan helper (shared by scan_project and sync_files)
+# ---------------------------------------------------------------------------
+
+
+def _scan_single_file(
+    source_file: Path,
+    rel_path: Path,
+    project_path: str,
+    active_registry: "RecognizerRegistry",
+    is_test: bool = False,
+) -> "tuple[ScanResult, str] | None":
+    """Scan a single source file and return ``(ScanResult, content)`` or ``None``.
+
+    Dispatches applicable recognizers for *source_file*, builds the module
+    node, creates ``contains`` edges from the module to all discovered
+    entities, and returns the combined result alongside the raw file content
+    (needed by cross-file inference callers).
+
+    Returns ``None`` when:
+    - No recognizers apply to this file.
+    - The file cannot be read (``OSError`` or encoding failure).
+
+    Parameters
+    ----------
+    source_file:
+        Absolute path to the file on disk.
+    rel_path:
+        Path of *source_file* relative to the project root.
+    project_path:
+        Absolute path to the project root (used for module-path derivation).
+    active_registry:
+        The recognizer registry to dispatch against.
+    is_test:
+        When ``True``, the module node and all discovered nodes are tagged
+        with ``source: "test"`` metadata.
+    """
+    applicable = active_registry.get_recognizers(source_file)
+    if not applicable:
+        return None
+
+    try:
+        content = source_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    suffix = source_file.suffix.lower()
+
+    file_nodes: list[Node] = []
+    file_edges: list[Edge] = []
+    file_imports: list[ImportInfo] = []
+    file_implementations: list[ImplementationInfo] = []
+    file_calls: list[CallInfo] = []
+    file_interfaces: list[InterfaceInfo] = []
+    file_method_sets: list[MethodSetEntry] = []
+
+    for recognizer in applicable:
+        file_result = recognizer.recognize(rel_path, content)
+        file_nodes.extend(file_result.nodes)
+        file_edges.extend(file_result.edges)
+        file_imports.extend(file_result.imports)
+        file_implementations.extend(file_result.implementations)
+        file_calls.extend(file_result.calls)
+        file_interfaces.extend(file_result.interfaces)
+        file_method_sets.extend(file_result.method_sets)
+
+    # Tag nodes from test files with source: test metadata
+    if is_test:
+        for node in file_nodes:
+            node.metadata["source"] = "test"
+
+    # Create module node for ALL scanned languages (universal)
+    module_path = _file_to_module_path_universal(source_file, project_path, suffix)
+    module_id = f"mod:{module_path}"
+    module_label = source_file.stem
+
+    module_node = Node(
+        id=module_id,
+        type=NodeType.MODULE.value,
+        label=module_label,
+        file_path=rel_path.as_posix(),
+        metadata={
+            "package": module_path.rsplit(".", 1)[0] if "." in module_path else "",
+            "source": "test" if is_test else "production",
+            "language": _suffix_to_language(suffix),
+        },
+    )
+    file_nodes.append(module_node)
+
+    # Create contains edges from module to all entities in this file
+    for node in file_nodes:
+        if node.id != module_id:
+            file_edges.append(Edge(
+                source=module_id,
+                target=node.id,
+                type=EdgeType.CONTAINS.value,
+                confidence=1.0,
+                metadata={"inferred": True},
+            ))
+
+    combined = ScanResult(
+        nodes=file_nodes,
+        edges=file_edges,
+        imports=file_imports,
+        implementations=file_implementations,
+        calls=file_calls,
+        interfaces=file_interfaces,
+        method_sets=file_method_sets,
+    )
+    return combined, content
+
+
+# ---------------------------------------------------------------------------
 # Project scanner
 # ---------------------------------------------------------------------------
 
@@ -2086,6 +2241,7 @@ def scan_project(
     recognizers: list[PatternRecognizer] | None = None,
     registry: RecognizerRegistry | None = None,
     include_tests: bool = False,
+    max_workers: int | None = None,
 ) -> ScanResult:
     """Walk *project_path* and scan files for architectural patterns.
 
@@ -2109,6 +2265,14 @@ def scan_project(
     registry:
         A :class:`RecognizerRegistry` that maps file extensions to
         recognizers.
+    include_tests:
+        When ``True``, test files are included and tagged with
+        ``source: "test"`` metadata.
+    max_workers:
+        Maximum number of worker threads for parallel file scanning.
+        ``None`` (default) uses ``ThreadPoolExecutor``'s built-in default
+        (``min(32, os.cpu_count() + 4)``).  Pass ``1`` to force sequential
+        execution.
 
     Returns
     -------
@@ -2147,97 +2311,72 @@ def scan_project(
     extensions = active_registry.registered_extensions
     has_global = bool(active_registry._global_recognizers)
 
-    for source_file in sorted(root.rglob("*")):
-        if not source_file.is_file():
-            continue
-        if _should_skip(source_file):
-            continue
+    # ------------------------------------------------------------------
+    # Stage 1 (Sequential): Walk the directory tree, collecting candidate
+    # files. Use os.walk with in-place directory pruning so ignored
+    # directories (node_modules, .venv, dist, *.egg-info, etc.) are never
+    # entered -- as opposed to rglob which enumerates their contents before
+    # _should_skip can discard them.
+    # ------------------------------------------------------------------
+    files_to_scan: list[tuple[Path, Path, bool]] = []  # (abs_path, rel_path, is_test)
 
-        suffix = source_file.suffix.lower()
-        if not has_global and suffix not in extensions:
-            continue
+    for dirpath, dirs, files in os.walk(str(root), topdown=True, followlinks=False):
+        # Prune ignored directories in-place before os.walk descends into them
+        dirs[:] = [
+            d for d in dirs
+            if d not in _IGNORE_DIRS and not d.endswith(".egg-info")
+        ]
 
-        # Test file handling: skip or tag based on include_tests flag
-        is_test = _is_test_file(source_file) or _is_in_test_dir(source_file)
-        if is_test and not include_tests:
-            continue
+        for filename in sorted(files):
+            source_file = Path(dirpath) / filename
 
-        applicable = active_registry.get_recognizers(source_file)
-        if not applicable:
-            continue
+            # Safety net: _should_skip covers any remaining path-component
+            # checks that os.walk pruning may not handle (e.g., a file inside
+            # a non-ignored dir whose name itself is an ignore pattern).
+            if _should_skip(source_file):
+                continue
 
-        try:
-            content = source_file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+            suffix = source_file.suffix.lower()
+            if not has_global and suffix not in extensions:
+                continue
 
-        # Store content for cross-file inference later
-        rel_path = source_file.relative_to(root)
-        file_contents[rel_path] = content
+            # Test file handling: skip or tag based on include_tests flag
+            is_test = _is_test_file(source_file) or _is_in_test_dir(source_file)
+            if is_test and not include_tests:
+                continue
 
-        # Collect all nodes/edges/imports/implementations from recognizers
-        file_nodes: list[Node] = []
-        file_edges: list[Edge] = []
-        file_imports: list[ImportInfo] = []
-        file_implementations: list[ImplementationInfo] = []
-        file_calls: list[CallInfo] = []
-        file_interfaces: list[InterfaceInfo] = []
-        file_method_sets: list[MethodSetEntry] = []
-        for recognizer in applicable:
-            file_result = recognizer.recognize(rel_path, content)
-            file_nodes.extend(file_result.nodes)
-            file_edges.extend(file_result.edges)
-            file_imports.extend(file_result.imports)
-            file_implementations.extend(file_result.implementations)
-            file_calls.extend(file_result.calls)
-            file_interfaces.extend(file_result.interfaces)
-            file_method_sets.extend(file_result.method_sets)
+            rel_path = source_file.relative_to(root)
+            files_to_scan.append((source_file, rel_path, is_test))
 
-        # Tag nodes from test files with source: test metadata
-        if is_test and include_tests:
-            for node in file_nodes:
-                node.metadata["source"] = "test"
-
-        # Create module node for ALL scanned languages (universal)
-        module_path = _file_to_module_path_universal(source_file, project_path, suffix)
-        module_id = f"mod:{module_path}"
-        module_label = Path(source_file).stem
-
-        module_node = Node(
-            id=module_id,
-            type=NodeType.MODULE.value,
-            label=module_label,
-            file_path=rel_path.as_posix(),
-            metadata={
-                "package": module_path.rsplit(".", 1)[0] if "." in module_path else "",
-                "source": "test" if is_test else "production",
-                "language": _suffix_to_language(suffix),
-            },
-        )
-        file_nodes.append(module_node)
-
-        # Create contains edges from module to all entities in this file
-        for node in file_nodes:
-            if node.id != module_id:
-                file_edges.append(Edge(
-                    source=module_id,
-                    target=node.id,
-                    type=EdgeType.CONTAINS.value,
-                    confidence=1.0,
-                    metadata={"inferred": True},
-                ))
-
-        combined = ScanResult(
-            nodes=file_nodes,
-            edges=file_edges,
-            imports=file_imports,
-            implementations=file_implementations,
-            calls=file_calls,
-            interfaces=file_interfaces,
-            method_sets=file_method_sets,
-        )
-        per_file_results[rel_path] = combined
-        merged.merge(combined)
+    # ------------------------------------------------------------------
+    # Stage 2 (Parallel): Scan each file concurrently using
+    # ThreadPoolExecutor. _scan_single_file returns (ScanResult, content)
+    # or None on error — errors are isolated per-file and do not propagate.
+    # ------------------------------------------------------------------
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_rel: dict = {
+            executor.submit(
+                _scan_single_file,
+                abs_path,
+                rel_path,
+                project_path,
+                active_registry,
+                is_test,
+            ): rel_path
+            for abs_path, rel_path, is_test in files_to_scan
+        }
+        for future in as_completed(future_to_rel):
+            rel_path = future_to_rel[future]
+            try:
+                outcome = future.result()
+            except Exception:
+                continue  # Isolate per-file errors
+            if outcome is None:
+                continue
+            file_result, content = outcome
+            file_contents[rel_path] = content
+            per_file_results[rel_path] = file_result
+            merged.merge(file_result)
 
     # Universal import inference (processes ScanResult.imports from all languages)
     _infer_import_edges_universal(merged, per_file_results)
@@ -2435,11 +2574,12 @@ def sync_files(
                 graph.graph.remove_node(nid)
                 removed_nodes += 1
 
-    # Invalidate the to_data() cache after direct graph mutations above.
-    # graph.graph.remove_edge/remove_node bypass ArchGraph.remove_node()
+    # Invalidate the to_data() and betweenness caches after direct graph mutations
+    # above. graph.graph.remove_edge/remove_node bypass ArchGraph.remove_node()
     # which is the only method that sets _cached_data = None, so we must
     # do it explicitly here to avoid stale cache reads downstream.
     graph._cached_data = None
+    graph._betweenness_cache = None
 
     # ------------------------------------------------------------------
     # Step 3: Re-scan existing files and collect new nodes/edges
@@ -2452,77 +2592,21 @@ def sync_files(
         if not abs_path.exists():
             continue  # File deleted — nothing to re-add
 
-        suffix = abs_path.suffix.lower()
-        applicable = active_registry.get_recognizers(abs_path)
-        if not applicable:
-            continue
-
-        try:
-            content = abs_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-
         rel_path = Path(rel_path_str)
+        # Determine is_test from path (sync_files may be called on test files too)
+        is_test = _is_test_file(abs_path) or _is_in_test_dir(abs_path)
+        outcome = _scan_single_file(
+            source_file=abs_path,
+            rel_path=rel_path,
+            project_path=project_path,
+            active_registry=active_registry,
+            is_test=is_test,
+        )
+        if outcome is None:
+            continue
+
+        combined, content = outcome
         new_file_contents[rel_path] = content
-
-        file_nodes: list[Node] = []
-        file_edges: list[Edge] = []
-        file_imports: list[ImportInfo] = []
-        file_implementations: list[ImplementationInfo] = []
-        file_calls: list[CallInfo] = []
-        file_interfaces: list[InterfaceInfo] = []
-        file_method_sets: list[MethodSetEntry] = []
-
-        for recognizer in applicable:
-            file_result = recognizer.recognize(rel_path, content)
-            file_nodes.extend(file_result.nodes)
-            file_edges.extend(file_result.edges)
-            file_imports.extend(file_result.imports)
-            file_implementations.extend(file_result.implementations)
-            file_calls.extend(file_result.calls)
-            file_interfaces.extend(file_result.interfaces)
-            file_method_sets.extend(file_result.method_sets)
-
-        # Create module node (mirrors scan_project logic)
-        module_path = _file_to_module_path_universal(abs_path, project_path, suffix)
-        module_id = f"mod:{module_path}"
-        module_label = Path(abs_path).stem
-
-        module_node = Node(
-            id=module_id,
-            type=NodeType.MODULE.value,
-            label=module_label,
-            file_path=rel_path_str,
-            metadata={
-                "package": (
-                    module_path.rsplit(".", 1)[0] if "." in module_path else ""
-                ),
-                "source": "production",
-                "language": _suffix_to_language(suffix),
-            },
-        )
-        file_nodes.append(module_node)
-
-        # Contains edges from module to all entities in this file
-        for node in file_nodes:
-            if node.id != module_id:
-                file_edges.append(Edge(
-                    source=module_id,
-                    target=node.id,
-                    type=EdgeType.CONTAINS.value,
-                    metadata={"inferred": True},
-                    confidence=1.0,
-                ))
-
-        combined = ScanResult(
-            nodes=file_nodes,
-            edges=file_edges,
-            imports=file_imports,
-            implementations=file_implementations,
-            calls=file_calls,
-            interfaces=file_interfaces,
-            method_sets=file_method_sets,
-        )
         new_per_file_results[rel_path] = combined
         new_file_merged.merge(combined)
 

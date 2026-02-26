@@ -63,6 +63,7 @@ class ArchGraph:
         self._graph = nx.MultiDiGraph()
         self._data = data or GraphData()
         self._cached_data: GraphData | None = None
+        self._betweenness_cache: dict[str, float] | None = None
 
         if data:
             for node in data.nodes.values():
@@ -84,6 +85,7 @@ class ArchGraph:
         """Add a node to the graph, replacing any existing node with the same id."""
         self._graph.add_node(node.id, node=node)
         self._cached_data = None
+        self._betweenness_cache = None
 
     def add_edge(self, edge: Edge) -> None:
         """Add an edge to the graph.
@@ -110,12 +112,14 @@ class ArchGraph:
                 edge=edge,
             )
         self._cached_data = None
+        self._betweenness_cache = None
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node and all its incident edges from the graph."""
         if node_id in self._graph:
             self._graph.remove_node(node_id)
         self._cached_data = None
+        self._betweenness_cache = None
 
     def get_subgraph(self, node_id: str, depth: int = 2) -> GraphData:
         """Extract a subgraph via BFS from node_id up to the given depth.
@@ -227,10 +231,15 @@ class ArchGraph:
 
         Betweenness centrality measures how often a node appears on shortest
         paths between other nodes -- high values indicate architectural bottlenecks.
+        Results are cached until the graph is mutated via add_node, add_edge,
+        or remove_node.
         """
         if len(self._graph) == 0:
             return {}
-        return nx.betweenness_centrality(self._graph)
+        if self._betweenness_cache is not None:
+            return self._betweenness_cache
+        self._betweenness_cache = nx.betweenness_centrality(self._graph)
+        return self._betweenness_cache
 
     def to_data(self) -> GraphData:
         """Serialize the current graph state back to a GraphData model."""
