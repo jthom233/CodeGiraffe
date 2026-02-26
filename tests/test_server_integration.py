@@ -32,7 +32,6 @@ from codegiraffe.server import (
     codegiraffe_hotspots,
     codegiraffe_init,
     codegiraffe_query,
-    codegiraffe_restore,
     codegiraffe_risk_assessment,
     codegiraffe_snapshot,
     codegiraffe_sync,
@@ -168,13 +167,13 @@ class TestDiff:
 
 
 class TestRestore:
-    def test_restore_returns_not_supported(self, project_dir):
-        """Init, restore, verify it returns the 'not supported' message."""
-        codegiraffe_init(project_dir)
-        result = codegiraffe_restore(project_dir, version_id=1)
+    def test_restore_tool_does_not_exist(self):
+        """codegiraffe_restore has been removed — it was a permanently-failing stub."""
+        import codegiraffe.server as _srv
 
-        assert "not yet supported" in result
-        assert "backup snapshot" in result.lower() or "backup" in result.lower()
+        assert not hasattr(_srv, "codegiraffe_restore"), (
+            "codegiraffe_restore should have been removed from the server module"
+        )
 
 
 # ---------------------------------------------------------------------------

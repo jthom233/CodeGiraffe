@@ -2,7 +2,7 @@
 
 # MCP Tool Reference
 
-Code Giraffe exposes **37 tools** that any MCP client can call.
+Code Giraffe exposes **40 tools** that any MCP client can call.
 
 ## Tool Index
 
@@ -31,18 +31,21 @@ Code Giraffe exposes **37 tools** that any MCP client can call.
 | [`codegiraffe_pr_diff`](change-impact.md#codegiraffe_pr_diff) | [Change Impact](change-impact.md) | Compare graph architecture at two git refs |
 | [`codegiraffe_coverage`](change-impact.md#codegiraffe_coverage) | [Change Impact](change-impact.md) | Map test coverage data to graph nodes |
 | [`codegiraffe_claim`](coordination.md#codegiraffe_claim) | [Coordination](coordination.md) | Claim graph nodes for an agent to prevent conflicts |
-| [`codegiraffe_status`](coordination.md#codegiraffe_status) | [Coordination](coordination.md) | Update an agent's status and refresh its claim TTL |
+| [`codegiraffe_update_agent_status`](coordination.md#codegiraffe_update_agent_status) | [Coordination](coordination.md) | Update an agent's status and refresh its claim TTL |
+| [`codegiraffe_release`](coordination.md#codegiraffe_release) | [Coordination](coordination.md) | Manually release an agent's claimed nodes |
 | [`codegiraffe_agents`](coordination.md#codegiraffe_agents) | [Coordination](coordination.md) | List all active agents and their claimed nodes |
 | [`codegiraffe_history`](versioning.md#codegiraffe_history) | [Versioning](versioning.md) | List version history for the architecture graph |
 | [`codegiraffe_diff`](versioning.md#codegiraffe_diff) | [Versioning](versioning.md) | Compare two versions of the architecture graph |
 | [`codegiraffe_snapshot`](versioning.md#codegiraffe_snapshot) | [Versioning](versioning.md) | Create a named snapshot of the current graph state |
-| [`codegiraffe_restore`](versioning.md#codegiraffe_restore) | [Versioning](versioning.md) | Restore the architecture graph to a specific version |
 | [`codegiraffe_federate`](federation.md#codegiraffe_federate) | [Federation](federation.md) | Register multiple repositories into a federated view |
 | [`codegiraffe_cross_query`](federation.md#codegiraffe_cross_query) | [Federation](federation.md) | Query across federated graphs using namespaced node IDs |
 | [`codegiraffe_cross_edges`](federation.md#codegiraffe_cross_edges) | [Federation](federation.md) | List all edges that cross repository boundaries |
 | [`codegiraffe_cypher`](federation.md#codegiraffe_cypher) | [Federation](federation.md) | Run a read-only Cypher query against a Neo4j-backed graph |
 | [`codegiraffe_annotate`](planning.md#codegiraffe_annotate) | [Planning](planning.md) | Annotate nodes with owner, stability, and custom notes |
-| [`codegiraffe_domains`](planning.md#codegiraffe_domains) | [Planning](planning.md) | Infer or manage domain groupings from directory structure |
+| [`codegiraffe_list_domains`](planning.md#codegiraffe_list_domains) | [Planning](planning.md) | List all defined domains in the architecture |
+| [`codegiraffe_infer_domains`](planning.md#codegiraffe_infer_domains) | [Planning](planning.md) | Auto-infer domain groupings from directory structure |
+| [`codegiraffe_add_domain`](planning.md#codegiraffe_add_domain) | [Planning](planning.md) | Create a domain and assign nodes to it |
+| [`codegiraffe_remove_domain`](planning.md#codegiraffe_remove_domain) | [Planning](planning.md) | Delete a domain and its associations |
 | [`codegiraffe_order_tasks`](planning.md#codegiraffe_order_tasks) | [Planning](planning.md) | Order tasks by dependency topology |
 | [`codegiraffe_migration_plan`](planning.md#codegiraffe_migration_plan) | [Planning](planning.md) | Generate an ordered migration plan for large refactors |
 
@@ -52,7 +55,7 @@ Code Giraffe exposes **37 tools** that any MCP client can call.
 - **[Context & Analysis](context-and-analysis.md)** (6 tools) — Intelligent context retrieval, hotspots, patterns, blast radius, risk, cycles
 - **[Contracts](contracts.md)** (3 tools) — Cross-system contract modeling and validation
 - **[Change Impact](change-impact.md)** (5 tools) — Change validation, test suggestions, file coupling, PR diffing, coverage
-- **[Coordination](coordination.md)** (3 tools) — Multi-agent claim/status coordination
-- **[Versioning](versioning.md)** (4 tools) — Schema evolution, history, snapshots, restore
+- **[Coordination](coordination.md)** (4 tools) — Multi-agent claim/status/release coordination
+- **[Versioning](versioning.md)** (3 tools) — Schema evolution, history, snapshots
 - **[Federation](federation.md)** (4 tools) — Cross-repo federation, namespaced queries, Cypher
-- **[Planning](planning.md)** (4 tools) — Annotation, domains, task ordering, migration planning
+- **[Planning](planning.md)** (7 tools) — Annotation, domains (4 new tools), task ordering, migration planning
