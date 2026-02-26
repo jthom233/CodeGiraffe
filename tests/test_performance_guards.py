@@ -620,3 +620,160 @@ class TestDriftResponseCap:
             f"Truncation fired at exactly {n} records — expected > check, not >= check"
         )
         assert len(drifts) == n
+
+
+# ---------------------------------------------------------------------------
+# 4. TestBetweennessCentralityCache (US1)
+# ---------------------------------------------------------------------------
+
+
+def _make_graph_with_edges() -> ArchGraph:
+    """Create an ArchGraph with 5 nodes and 4 edges for centrality testing."""
+    graph = ArchGraph()
+    for i in range(5):
+        graph.add_node(_make_node(f"service:N{i}", label=f"N{i}"))
+    # Create a chain: N0 -> N1 -> N2 -> N3 -> N4
+    for i in range(4):
+        graph.add_edge(Edge(
+            source=f"service:N{i}",
+            target=f"service:N{i+1}",
+            type=EdgeType.CALLS,
+        ))
+    return graph
+
+
+class TestBetweennessCentralityCache:
+    """T005-T009: Betweenness centrality must be cached and invalidated on mutations."""
+
+    def test_betweenness_cache_hit(self):
+        """T005: Two calls without mutation return the identical dict object (cache hit)."""
+        graph = _make_graph_with_edges()
+        first = graph.get_betweenness_centrality()
+        second = graph.get_betweenness_centrality()
+        assert first is second, (
+            "Expected cache hit: get_betweenness_centrality() must return the same dict "
+            "object on repeated calls without intervening mutations"
+        )
+
+    def test_betweenness_cache_invalidated_on_add_node(self):
+        """T006: add_node() must invalidate the betweenness cache."""
+        graph = _make_graph_with_edges()
+        first = graph.get_betweenness_centrality()
+        graph.add_node(_make_node("service:NewNode"))
+        second = graph.get_betweenness_centrality()
+        assert first is not second, (
+            "add_node() must invalidate the betweenness cache; "
+            "got the same dict object before and after mutation"
+        )
+
+    def test_betweenness_cache_invalidated_on_add_edge(self):
+        """T007: add_edge() must invalidate the betweenness cache."""
+        graph = _make_graph_with_edges()
+        first = graph.get_betweenness_centrality()
+        graph.add_edge(Edge(source="service:N0", target="service:N4", type=EdgeType.CALLS))
+        second = graph.get_betweenness_centrality()
+        assert first is not second, (
+            "add_edge() must invalidate the betweenness cache; "
+            "got the same dict object before and after mutation"
+        )
+
+    def test_betweenness_cache_invalidated_on_remove_node(self):
+        """T008: remove_node() must invalidate the betweenness cache."""
+        graph = _make_graph_with_edges()
+        first = graph.get_betweenness_centrality()
+        graph.remove_node("service:N2")
+        second = graph.get_betweenness_centrality()
+        assert first is not second, (
+            "remove_node() must invalidate the betweenness cache; "
+            "got the same dict object before and after mutation"
+        )
+
+    def test_betweenness_cache_invalidated_by_sync_files_direct_mutation(self, tmp_path):
+        """T009: sync_files direct graph mutations must also reset _betweenness_cache."""
+        from codegiraffe.scanner import sync_files
+
+        # Create a 2-file project
+        (tmp_path / "a.py").write_text("class Alpha:\n    pass\n")
+        (tmp_path / "b.py").write_text("class Beta:\n    pass\n")
+
+        # Build a graph with these files
+        from codegiraffe.scanner import scan_project
+        from codegiraffe.storage import JSONStorage
+        scan_result = scan_project(str(tmp_path))
+
+        graph = ArchGraph()
+        for node in scan_result.nodes:
+            graph.add_node(node)
+        for edge in scan_result.edges:
+            graph.add_edge(edge)
+
+        # Prime the betweenness cache
+        _ = graph.get_betweenness_centrality()
+        assert graph._betweenness_cache is not None, "Cache should be populated"
+
+        # Modify a.py and call sync_files — this uses direct graph mutations
+        (tmp_path / "a.py").write_text("class AlphaModified:\n    pass\n")
+        sync_files(graph, str(tmp_path), [str(tmp_path / "a.py")])
+
+        # The cache must have been cleared by sync_files
+        assert graph._betweenness_cache is None, (
+            "sync_files() must reset _betweenness_cache after direct graph mutations"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6. TestInferCallEdgesNoLinearScan (Phase 6 / FR-010)
+# ---------------------------------------------------------------------------
+
+
+class TestInferCallEdgesNoLinearScan:
+    """T032: _infer_call_edges must complete under 1 second on 1000 nodes."""
+
+    def test_infer_call_edges_no_linear_scan(self):
+        """_infer_call_edges with 1000 nodes and 100 calls must finish in < 1 second."""
+        import time
+        from codegiraffe.scanner import _infer_call_edges
+        from codegiraffe.scanner import ScanResult, CallInfo
+        from codegiraffe.graph import Node, Edge
+
+        # Build a ScanResult with 1000 module nodes
+        nodes = [
+            Node(
+                id=f"mod:module_{i}",
+                type="module",
+                label=f"module_{i}",
+                file_path=f"module_{i}.py",
+            )
+            for i in range(1000)
+        ]
+
+        # Add some service nodes as callee targets
+        for i in range(0, 100, 10):
+            nodes.append(Node(
+                id=f"service:Svc{i}",
+                type="service",
+                label=f"Svc{i}",
+                file_path=f"module_{i}.py",
+                metadata={"struct_name": f"Svc{i}"},
+            ))
+
+        # Build 100 CallInfo records (each referencing a service node)
+        calls = [
+            CallInfo(
+                caller=f"module_{i * 10}",
+                callee=f"Svc{i * 10}",
+                receiver=f"Svc{i * 10}",
+                file_path=f"module_{i * 10}.py",
+            )
+            for i in range(10)
+        ]
+
+        result = ScanResult(nodes=nodes, calls=calls)
+
+        start = time.monotonic()
+        _infer_call_edges(result)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 1.0, (
+            f"_infer_call_edges took {elapsed:.3f}s on 1000 nodes — must be under 1.0s"
+        )

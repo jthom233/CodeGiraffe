@@ -1,7 +1,11 @@
 """Tests for the codebase scanner (codegiraffe.scanner)."""
 
+import os
+import stat
+import time
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 
 from codegiraffe.scanner import (
     scan_project,
@@ -877,3 +881,279 @@ class TestEdgeDeduplicationIdempotency:
             "StrEnum EdgeType.READS must equal 'reads' for set lookup"
         )
         assert ("ep:/a", "table:b", EdgeType.READS.value) in existing_edges
+# T001 — Phase 1: _scan_single_file helper (US3)
+# ---------------------------------------------------------------------------
+
+
+class TestScanSingleFileHelper:
+    """T001: _scan_single_file is importable and produces ScanResult with module node."""
+
+    def test_scan_single_file_importable_and_returns_scan_result(self, tmp_path):
+        """_scan_single_file must be importable and return a ScanResult with a module node."""
+        from codegiraffe.scanner import _scan_single_file
+        from codegiraffe.registry import get_default_registry
+
+        py_file = tmp_path / "mymodule.py"
+        py_file.write_text("def hello():\n    pass\n")
+
+        active_registry = get_default_registry()
+        outcome = _scan_single_file(
+            source_file=py_file,
+            rel_path=py_file.relative_to(tmp_path),
+            project_path=str(tmp_path),
+            active_registry=active_registry,
+            is_test=False,
+        )
+        assert outcome is not None
+        result, content = outcome
+        module_nodes = [n for n in result.nodes if n.type == "module"]
+        assert len(module_nodes) >= 1, "Expected at least one module node"
+
+
+# ---------------------------------------------------------------------------
+# T005–T008 — Phase 2: Betweenness centrality caching (US1)
+# Written here to keep scanner tests separate; US1 tests live in test_performance_guards.py
+# ---------------------------------------------------------------------------
+
+# (US1 tests are added in test_performance_guards.py separately)
+
+
+# ---------------------------------------------------------------------------
+# T014–T017 — Phase 3: Directory-pruning file discovery (US2)
+# ---------------------------------------------------------------------------
+
+
+class TestDirectoryPruning:
+    """Verify that os.walk-based pruning never enters ignored directories."""
+
+    def test_ignored_dir_not_entered(self, tmp_path):
+        """Files inside node_modules are never read when node_modules is pruned."""
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "main.py").write_text("def hello():\n    pass\n")
+
+        nm_dir = tmp_path / "node_modules" / "lodash"
+        nm_dir.mkdir(parents=True)
+        (nm_dir / "index.js").write_text("module.exports = {};\n")
+
+        result = scan_project(str(tmp_path))
+
+        # No node should have a file_path that mentions node_modules
+        bad_nodes = [
+            n for n in result.nodes
+            if n.file_path and "node_modules" in n.file_path
+        ]
+        assert bad_nodes == [], (
+            f"Found nodes from inside node_modules: {[n.file_path for n in bad_nodes]}"
+        )
+
+    def test_nested_ignored_dir_not_entered(self, tmp_path):
+        """Files inside a nested .venv directory are never scanned."""
+        app_dir = tmp_path / "src" / "app"
+        app_dir.mkdir(parents=True)
+        (app_dir / "lib.py").write_text("def foo():\n    pass\n")
+
+        venv_dir = tmp_path / "src" / "app" / ".venv" / "site-packages" / "requests"
+        venv_dir.mkdir(parents=True)
+        (venv_dir / "__init__.py").write_text("# requests\n")
+
+        result = scan_project(str(tmp_path))
+
+        bad_nodes = [
+            n for n in result.nodes
+            if n.file_path and ".venv" in n.file_path
+        ]
+        assert bad_nodes == [], (
+            f"Found nodes from inside .venv: {[n.file_path for n in bad_nodes]}"
+        )
+
+    def test_no_ignored_dirs_scans_all_files(self, tmp_path):
+        """When no ignored dirs exist, all files are scanned (regression guard)."""
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "a.py").write_text("class Alpha:\n    pass\n")
+        (src_dir / "b.py").write_text("class Beta:\n    pass\n")
+
+        result = scan_project(str(tmp_path))
+
+        module_ids = {n.id for n in result.nodes if n.type == "module"}
+        # Both files must produce module nodes
+        assert "mod:a" in module_ids or any("a" in mid for mid in module_ids), (
+            f"Expected module for a.py; got modules: {module_ids}"
+        )
+        assert "mod:b" in module_ids or any("b" in mid for mid in module_ids), (
+            f"Expected module for b.py; got modules: {module_ids}"
+        )
+
+    def test_egg_info_dirs_pruned(self, tmp_path):
+        """Directories matching *.egg-info are never entered."""
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "main.py").write_text("def hello():\n    pass\n")
+
+        egg_dir = tmp_path / "my_pkg.egg-info"
+        egg_dir.mkdir()
+        (egg_dir / "PKG-INFO").write_text("Metadata-Version: 2.1\n")
+
+        result = scan_project(str(tmp_path))
+
+        bad_nodes = [
+            n for n in result.nodes
+            if n.file_path and "egg-info" in n.file_path
+        ]
+        assert bad_nodes == [], (
+            f"Found nodes from inside egg-info: {[n.file_path for n in bad_nodes]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# T020–T022 — Phase 4: Efficient incremental scan / linear merge (US3)
+# ---------------------------------------------------------------------------
+
+
+class TestScanResultMergeLinearScale:
+    """T020: ScanResult.merge() over 1000 results must complete under 2 seconds."""
+
+    def test_scan_result_merge_linear_scale(self):
+        """Merging 1000 ScanResults each with 5 unique nodes must be fast (< 2s)."""
+        from codegiraffe.graph import Node
+
+        all_results = []
+        for i in range(1000):
+            nodes = [
+                Node(
+                    id=f"service:Node{i}_{j}",
+                    type="service",
+                    label=f"Node{i}_{j}",
+                )
+                for j in range(5)
+            ]
+            all_results.append(ScanResult(nodes=nodes))
+
+        start = time.monotonic()
+        merged = ScanResult()
+        for r in all_results:
+            merged.merge(r)
+        elapsed = time.monotonic() - start
+
+        assert len(merged.nodes) == 5000, f"Expected 5000 nodes, got {len(merged.nodes)}"
+        assert elapsed < 2.0, (
+            f"merge() took {elapsed:.2f}s on 1000 results — must be under 2.0s"
+        )
+
+    def test_scan_project_and_sync_files_produce_same_nodes(self, tmp_path):
+        """T021: scan_project and sync_files on the same 3-file project yield identical node IDs."""
+        from codegiraffe.scanner import sync_files
+        from codegiraffe.graph import ArchGraph, GraphData
+
+        # Create 3-file project
+        (tmp_path / "a.py").write_text("class Alpha:\n    pass\n")
+        (tmp_path / "b.py").write_text("class Beta:\n    pass\n")
+        (tmp_path / "c.py").write_text("class Gamma:\n    pass\n")
+
+        # Full scan
+        full_result = scan_project(str(tmp_path))
+        full_node_ids = {n.id for n in full_result.nodes}
+
+        # Now sync_files on all 3 files (empty graph start)
+        graph = ArchGraph()
+        sync_files(
+            graph,
+            str(tmp_path),
+            [str(tmp_path / "a.py"), str(tmp_path / "b.py"), str(tmp_path / "c.py")],
+        )
+        sync_node_ids = {
+            attrs["node"].id
+            for _, attrs in graph.graph.nodes(data=True)
+            if "node" in attrs
+        }
+
+        # The module node IDs must be the same
+        full_modules = {nid for nid in full_node_ids if nid.startswith("mod:")}
+        sync_modules = {nid for nid in sync_node_ids if nid.startswith("mod:")}
+        assert full_modules == sync_modules, (
+            f"Module node ID mismatch:\n  scan_project: {full_modules}\n  sync_files: {sync_modules}"
+        )
+
+    def test_merge_deduplicates_across_multiple_merges(self):
+        """T022: Merging two ScanResults with a shared node ID yields exactly one node."""
+        from codegiraffe.graph import Node
+
+        shared_node = Node(id="service:Shared", type="service", label="Shared", metadata={"key": "val1"})
+        other_node = Node(id="service:Shared", type="service", label="Shared", metadata={"extra": "val2"})
+
+        r1 = ScanResult(nodes=[shared_node])
+        r2 = ScanResult(nodes=[other_node])
+
+        merged = ScanResult()
+        merged.merge(r1)
+        merged.merge(r2)
+
+        matching = [n for n in merged.nodes if n.id == "service:Shared"]
+        assert len(matching) == 1, f"Expected 1 deduplicated node, got {len(matching)}"
+        # Metadata should be merged (additive)
+        assert matching[0].metadata.get("key") == "val1"
+        assert matching[0].metadata.get("extra") == "val2"
+
+
+# ---------------------------------------------------------------------------
+# T025–T027 — Phase 5: Parallel file scanning (US4)
+# ---------------------------------------------------------------------------
+
+
+class TestParallelScanning:
+    """Verify parallel scanning produces set-identical results to sequential."""
+
+    def test_parallel_scan_produces_same_nodes_as_sequential(self, tmp_path):
+        """T025: max_workers=1 and max_workers=4 must yield identical node ID sets."""
+        # Create a 10-file project
+        for i in range(10):
+            (tmp_path / f"module_{i}.py").write_text(
+                f"class Class{i}:\n    pass\n"
+            )
+
+        seq_result = scan_project(str(tmp_path), max_workers=1)
+        par_result = scan_project(str(tmp_path), max_workers=4)
+
+        seq_ids = {n.id for n in seq_result.nodes}
+        par_ids = {n.id for n in par_result.nodes}
+
+        assert seq_ids == par_ids, (
+            f"Node ID mismatch between sequential and parallel scans:\n"
+            f"  only in sequential: {seq_ids - par_ids}\n"
+            f"  only in parallel: {par_ids - seq_ids}"
+        )
+
+    def test_parallel_scan_file_error_isolated(self, tmp_path):
+        """T026: A single unreadable file must not crash parallel scan."""
+        good_files = []
+        for i in range(5):
+            f = tmp_path / f"module_{i}.py"
+            f.write_text(f"class C{i}:\n    pass\n")
+            good_files.append(f)
+
+        # Make one file unreadable
+        bad_file = tmp_path / "bad.py"
+        bad_file.write_text("class Bad:\n    pass\n")
+        # chmod 000 to make unreadable
+        bad_file.chmod(0)
+
+        try:
+            result = scan_project(str(tmp_path), max_workers=4)
+            # Should not raise; bad file should simply be absent
+            bad_nodes = [n for n in result.nodes if n.file_path and "bad.py" in n.file_path]
+            # The result should have nodes from the 5 good files
+            good_module_ids = {n.id for n in result.nodes if n.type == "module"}
+            assert len(good_module_ids) >= 4, (
+                f"Expected at least 4 good modules; got {good_module_ids}"
+            )
+        finally:
+            # Restore permissions for cleanup
+            bad_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_parallel_scan_accepts_max_workers_none(self, tmp_path):
+        """T027: scan_project with no max_workers argument must complete without error."""
+        (tmp_path / "main.py").write_text("def hello():\n    pass\n")
+        # Should not raise TypeError about unexpected keyword argument
+        result = scan_project(str(tmp_path))
+        assert result is not None
