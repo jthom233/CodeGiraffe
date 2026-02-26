@@ -9,6 +9,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+# Maximum seconds a single git command is allowed to run before being
+# aborted.  Guards against hanging processes in CI and network-mounted
+# repositories.
+GIT_COMMAND_TIMEOUT = 30
+
 
 class GitError(Exception):
     """Base exception for git operations."""
@@ -18,19 +23,29 @@ class NotAGitRepoError(GitError):
     """Raised when a path is not inside a git repository."""
 
 
+class GitTimeoutError(GitError):
+    """Raised when a git command exceeds GIT_COMMAND_TIMEOUT seconds."""
+
+
 def is_git_repo(project_path: str) -> bool:
     """Check whether *project_path* is inside a git repository.
 
     Runs ``git rev-parse --git-dir`` and returns ``True`` when the
     command succeeds (returncode 0).
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        cwd=project_path,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            cwd=project_path,
+            timeout=GIT_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(
+            f"git rev-parse timed out after {GIT_COMMAND_TIMEOUT}s in {project_path}"
+        ) from exc
     return result.returncode == 0
 
 
@@ -44,27 +59,40 @@ def get_uncommitted_diff(project_path: str) -> str:
 
     Raises:
         NotAGitRepoError: If *project_path* is not a git repository.
+        GitTimeoutError: If a git command exceeds GIT_COMMAND_TIMEOUT seconds.
     """
     if not is_git_repo(project_path):
         raise NotAGitRepoError(f"Not a git repository: {project_path}")
 
-    result = subprocess.run(
-        ["git", "diff", "HEAD"],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        cwd=project_path,
-    )
-
-    if result.returncode != 0:
-        # Fallback for repos with no commits yet.
+    try:
         result = subprocess.run(
-            ["git", "diff", "--cached"],
+            ["git", "diff", "HEAD"],
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
             cwd=project_path,
+            timeout=GIT_COMMAND_TIMEOUT,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(
+            f"git diff HEAD timed out after {GIT_COMMAND_TIMEOUT}s in {project_path}"
+        ) from exc
+
+    if result.returncode != 0:
+        # Fallback for repos with no commits yet.
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--cached"],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                cwd=project_path,
+                timeout=GIT_COMMAND_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitTimeoutError(
+                f"git diff --cached timed out after {GIT_COMMAND_TIMEOUT}s in {project_path}"
+            ) from exc
 
     return result.stdout
 
@@ -74,17 +102,26 @@ def get_changed_files(project_path: str) -> list[str]:
 
     Combines ``git diff HEAD --name-only`` output.  Returns an empty
     list when the directory is not a git repository (no exception).
+
+    Raises:
+        GitTimeoutError: If a git command exceeds GIT_COMMAND_TIMEOUT seconds.
     """
     if not is_git_repo(project_path):
         return []
 
-    result = subprocess.run(
-        ["git", "diff", "HEAD", "--name-only"],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        cwd=project_path,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD", "--name-only"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            cwd=project_path,
+            timeout=GIT_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(
+            f"git diff HEAD --name-only timed out after {GIT_COMMAND_TIMEOUT}s in {project_path}"
+        ) from exc
 
     if result.returncode != 0:
         return []
@@ -103,23 +140,32 @@ def get_commit_file_history(
 
     Returns an empty list when the directory is not a git repository or
     has no commits.
+
+    Raises:
+        GitTimeoutError: If a git command exceeds GIT_COMMAND_TIMEOUT seconds.
     """
     if not is_git_repo(project_path):
         return []
 
-    result = subprocess.run(
-        [
-            "git",
-            "log",
-            "--name-only",
-            "--pretty=format:COMMIT:%H",
-            f"-n{depth}",
-        ],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        cwd=project_path,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "log",
+                "--name-only",
+                "--pretty=format:COMMIT:%H",
+                f"-n{depth}",
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            cwd=project_path,
+            timeout=GIT_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(
+            f"git log timed out after {GIT_COMMAND_TIMEOUT}s in {project_path}"
+        ) from exc
 
     if result.returncode != 0:
         return []

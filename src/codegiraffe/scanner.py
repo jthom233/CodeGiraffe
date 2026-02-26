@@ -2311,6 +2311,9 @@ def scan_project(
     extensions = active_registry.registered_extensions
     has_global = bool(active_registry._global_recognizers)
 
+    # Canonical resolved path for the project root — used for symlink boundary checks.
+    resolved_root = root.resolve()
+
     # ------------------------------------------------------------------
     # Stage 1 (Sequential): Walk the directory tree, collecting candidate
     # files. Use os.walk with in-place directory pruning so ignored
@@ -2335,6 +2338,22 @@ def scan_project(
             # a non-ignored dir whose name itself is an ignore pattern).
             if _should_skip(source_file):
                 continue
+
+            # Symlink boundary check: skip any symlink whose resolved path falls
+            # outside the project root.  This prevents directory-traversal attacks
+            # where a symlink inside the project points to sensitive files outside.
+            if source_file.is_symlink():
+                try:
+                    resolved_file = source_file.resolve()
+                    resolved_file.relative_to(resolved_root)
+                except ValueError:
+                    import warnings
+                    warnings.warn(
+                        f"Skipping symlink '{source_file}': resolved path '{resolved_file}' "
+                        f"is outside the project root '{resolved_root}'.",
+                        stacklevel=2,
+                    )
+                    continue
 
             suffix = source_file.suffix.lower()
             if not has_global and suffix not in extensions:

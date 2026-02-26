@@ -40,6 +40,7 @@ from codegiraffe.git_utils import (
     get_changed_files,
     get_uncommitted_diff,
     is_git_repo,
+    GitTimeoutError,
     NotAGitRepoError,
 )
 from codegiraffe.domains import (
@@ -69,6 +70,18 @@ _federation = GraphFederation()
 # RLock is used so that _ensure_graph (which acquires the lock) can be called
 # safely from within other locked sections in write tools.
 _graph_lock = threading.RLock()
+# Set of project paths that have been successfully initialized via codegiraffe_init.
+# The dashboard /api/init endpoint uses this allowlist to prevent unauthorized
+# path traversal: only pre-approved paths may trigger a rescan via the dashboard.
+_initialized_project_paths: set[str] = set()
+
+# ---------------------------------------------------------------------------
+# Parameter bound constants (US5)
+# ---------------------------------------------------------------------------
+
+MAX_QUERY_DEPTH = 20
+MAX_COUPLING_DEPTH = 500
+MAX_BLAST_DEPTH = 20
 
 
 def _get_storage(backend: str = "json"):
@@ -144,7 +157,7 @@ def codegiraffe_init(
 
     Returns a summary of the initialized graph.
     """
-    global _graph, _storage  # noqa: PLW0603
+    global _graph, _storage, _initialized_project_paths  # noqa: PLW0603
 
     try:
         new_storage = _get_storage(backend)
@@ -211,6 +224,10 @@ def codegiraffe_init(
 
         final_data = graph.to_data()
 
+        # Register path in the allowlist so the dashboard /api/init endpoint
+        # may rescan it without triggering a 403 path-traversal guard.
+        _initialized_project_paths.add(project_path)
+
         # Lazily start the background dashboard server after a successful init.
         try:
             from codegiraffe.dashboard_server import get_or_start_server
@@ -255,6 +272,9 @@ def codegiraffe_query(
     large graphs may produce very large output).
     """
     try:
+        # Clamp depth to the configured maximum to prevent excessive traversal.
+        depth = min(depth, MAX_QUERY_DEPTH)
+
         graph = _ensure_graph(project_path)
 
         if node_id is not None:
@@ -610,6 +630,10 @@ def codegiraffe_blast_radius(
     Returns a human-readable markdown impact report.
     """
     try:
+        # Clamp max_depth to the configured maximum to prevent excessive traversal.
+        if max_depth is not None:
+            max_depth = min(max_depth, MAX_BLAST_DEPTH)
+
         graph = _ensure_graph(project_path)
 
         if node_id is not None:
@@ -1323,6 +1347,9 @@ def codegiraffe_file_coupling(
     together, then cross-references with the architecture graph to detect
     implicit coupling not yet captured in the graph.
     """
+    # Clamp depth to the configured maximum to prevent excessive git-log traversal.
+    depth = min(depth, MAX_COUPLING_DEPTH)
+
     try:
         graph = _ensure_graph(project_path)
     except Exception as exc:

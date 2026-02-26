@@ -780,7 +780,7 @@ body {
       Object.keys(typeCounts).sort().forEach(function(t) {
         var pct = (typeCounts[t] / maxCount) * 100;
         var color = TYPE_COLORS[t] || DEFAULT_COLOR;
-        html += '<div class="dist-row"><span class="dist-label">' + t + '</span><span class="dist-bar" style="width:' + pct + '%;background:' + color + '"></span><span class="dist-count">' + typeCounts[t] + '</span></div>';
+        html += '<div class="dist-row"><span class="dist-label">' + escapeHtml(t) + '</span><span class="dist-bar" style="width:' + pct + '%;background:' + color + '"></span><span class="dist-count">' + typeCounts[t] + '</span></div>';
       });
       $dist.innerHTML = html;
     }
@@ -792,7 +792,7 @@ body {
     if (!$legend) { return; }
     var html = '';
     Object.keys(TYPE_COLORS).sort().forEach(function(t) {
-      html += '<div class="legend-item"><span class="legend-swatch" style="background:' + TYPE_COLORS[t] + '"></span>' + t + '</div>';
+      html += '<div class="legend-item"><span class="legend-swatch" style="background:' + TYPE_COLORS[t] + '"></span>' + escapeHtml(t) + '</div>';
     });
     html += '<div class="legend-divider"></div>';
     var edgeStyles = {

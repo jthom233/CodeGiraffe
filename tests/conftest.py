@@ -3,6 +3,35 @@ from pathlib import Path
 from codegiraffe.graph import Node, Edge, GraphData, ArchGraph
 from codegiraffe.schema import NodeType, EdgeType
 
+
+# ---------------------------------------------------------------------------
+# Shared server-state reset fixture (US6 — fixture consolidation)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def reset_server_state():
+    """Reset server module globals before/after each test to avoid cross-test pollution.
+
+    Defined here so all test modules can reference it via conftest discovery
+    instead of duplicating it locally.
+    """
+    import codegiraffe.server as server_module
+    from codegiraffe.storage import JSONStorage
+    from codegiraffe.versioning import VersionStore
+    from codegiraffe.federation import GraphFederation
+
+    server_module._graph = None
+    server_module._storage = JSONStorage()
+    server_module._version_store = VersionStore()
+    server_module._federation = GraphFederation()
+    server_module._initialized_project_paths = set()
+    yield
+    server_module._graph = None
+    server_module._storage = JSONStorage()
+    server_module._version_store = VersionStore()
+    server_module._federation = GraphFederation()
+    server_module._initialized_project_paths = set()
+
 @pytest.fixture
 def sample_nodes():
     return [

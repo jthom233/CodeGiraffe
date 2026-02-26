@@ -212,7 +212,12 @@ class DashboardServer:
             return HTMLResponse(DASHBOARD_HTML)
 
         async def init_graph(request: Request) -> JSONResponse:
-            """Initialize/scan a project so the dashboard can display it."""
+            """Initialize/scan a project so the dashboard can display it.
+
+            Security: only paths that have previously been initialized via the
+            MCP tool ``codegiraffe_init`` are permitted.  Unknown paths receive
+            a 403 to prevent arbitrary filesystem traversal via the dashboard.
+            """
             import codegiraffe.server as srv
             from codegiraffe.graph import ArchGraph, GraphData, Node  # noqa: F401
             from codegiraffe.scanner import scan_project
@@ -221,6 +226,17 @@ class DashboardServer:
             project_path = body.get("project_path", "")
             if not project_path:
                 return JSONResponse({"error": "project_path required"}, status_code=400)
+
+            # Path allowlist check — reject paths not approved by codegiraffe_init.
+            if project_path not in srv._initialized_project_paths:
+                return JSONResponse(
+                    {"error": (
+                        f"Path '{project_path}' is not in the initialized project allowlist. "
+                        "Run codegiraffe_init first via the MCP tool."
+                    )},
+                    status_code=403,
+                )
+
             try:
                 result = scan_project(project_path)
                 nodes = {node.id: node for node in result.nodes}
