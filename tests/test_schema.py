@@ -29,6 +29,7 @@ class TestNodeTypeEnum:
             (NodeType.EVENT, "event"),
             (NodeType.EXTERNAL_API, "external_api"),
             (NodeType.MODULE, "module"),
+            (NodeType.PROJECT, "project"),
             (NodeType.CONTRACT, "contract"),
         ],
     )
@@ -82,6 +83,7 @@ class TestEdgeTypeEnum:
             (EdgeType.CONSUMES_CONTRACT, "consumes_contract"),
             (EdgeType.VALIDATES, "validates"),
             (EdgeType.VIOLATES, "violates"),
+            (EdgeType.PROJECT_CONTAINS, "project_contains"),
         ],
     )
     def test_edge_type_values(self, member, expected):
@@ -106,6 +108,22 @@ class TestContractSchemaTypes:
 
     def test_violates_edge_type_exists(self):
         assert EdgeType.VIOLATES == "violates"
+
+
+class TestProjectSchemaTypes:
+    """Verify project node and edge types introduced for .NET project graph support."""
+
+    def test_project_node_type_exists(self):
+        assert NodeType.PROJECT == "project"
+
+    def test_project_node_type_string_round_trip(self):
+        assert NodeType("project") is NodeType.PROJECT
+
+    def test_project_contains_edge_type_exists(self):
+        assert EdgeType.PROJECT_CONTAINS == "project_contains"
+
+    def test_project_contains_string_round_trip(self):
+        assert EdgeType("project_contains") is EdgeType.PROJECT_CONTAINS
 
 
 class TestEnumStringBehavior:

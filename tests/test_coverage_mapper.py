@@ -328,8 +328,14 @@ class TestRiskMultiplierForUncoveredNodes:
         assert db_risk == pytest.approx(base_risk * 1.5)
         assert auth_risk == pytest.approx(base_risk)  # no multiplier
 
-    def test_node_without_coverage_metadata_gets_multiplier(self):
-        """Nodes with no _test_coverage metadata also get 1.5x multiplier."""
+    def test_node_without_coverage_metadata_is_neutral(self):
+        """Nodes with no _test_coverage metadata get a neutral 1.0x multiplier.
+
+        When no coverage report has been loaded, the absence of the
+        ``_test_coverage`` key means coverage state is *unknown*, not zero.
+        Applying a penalty here would inflate risk scores for every node in the
+        default (no-coverage-report) workflow, which is misleading.
+        """
         from codegiraffe.query import compute_risk_with_coverage
 
         g = _make_graph(("mod:unknown", "src/unknown.py", NodeType.MODULE))
@@ -339,7 +345,7 @@ class TestRiskMultiplierForUncoveredNodes:
         base_risk = 0.2
         result = compute_risk_with_coverage(base_risk, unknown_node)
 
-        assert result == pytest.approx(base_risk * 1.5)
+        assert result == pytest.approx(base_risk)  # neutral — no penalty
 
     def test_covered_node_above_zero_has_no_multiplier(self):
         """Nodes with _test_coverage > 0 get no multiplier."""

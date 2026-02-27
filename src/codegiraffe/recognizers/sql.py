@@ -6,6 +6,8 @@ Detects architectural patterns in .sql files including:
     - CREATE VIEW                          -> module nodes (kind=view)
     - FOREIGN KEY ... REFERENCES           -> depends_on edges between tables
     - FROM/JOIN/INTO/UPDATE within bodies  -> reads/writes edges (proc/view -> table)
+    - EXEC/EXECUTE proc_name within bodies -> calls edges (proc -> proc)
+    - MERGE INTO table_name within bodies  -> writes edges (proc/view -> table)
     - Migration file ALTER TABLE           -> writes edges (file module -> table)
 
 Supports both T-SQL bracket notation ([dbo].[tbName]) and bare identifiers.
@@ -132,6 +134,20 @@ _SQL_WRITE_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+# EXEC / EXECUTE [[schema].]proc_name
+# Skips dynamic execution: EXEC(@var) and EXEC sp_executesql
+# Group 1: raw proc name (may include schema prefix and brackets)
+_SQL_EXEC_RE = re.compile(
+    r"""\bEXEC(?:UTE)?\s+((?:\[?[a-zA-Z_]\w*\]?\.)?(?:\[?\w+\]?))""",
+    re.IGNORECASE,
+)
+
+# MERGE INTO [[schema].]table_name
+_SQL_MERGE_RE = re.compile(
+    r"""\bMERGE\s+(?:INTO\s+)?((?:\[?[a-zA-Z_]\w*\]?\.)?(?:\[?\w+\]?))""",
+    re.IGNORECASE,
+)
+
 # Parameters for a stored procedure/function definition.
 # Matches @paramName datatype patterns after the object name up to AS/BEGIN.
 _SQL_PARAM_RE = re.compile(r"""(@\w+)\s+([\w\[\]]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)""", re.IGNORECASE)
@@ -200,8 +216,14 @@ class SqlRecognizer:
         - FOREIGN KEY ... REFERENCES     -> ``depends_on`` edges (table -> table)
         - Body FROM/JOIN references      -> ``reads`` edges (proc/view -> table)
         - Body INSERT/UPDATE/DELETE      -> ``writes`` edges (proc/view -> table)
+        - Body MERGE INTO table          -> ``writes`` edges (proc/view -> table)
+        - Body EXEC/EXECUTE proc_name    -> ``calls`` edges (proc -> proc)
         - Migration ALTER TABLE          -> ``writes`` edges (file module -> table)
         - CREATE INDEX ... ON table      -> ``writes`` edge (file module -> table)
+
+    EXEC/EXECUTE skips:
+        - Dynamic execution: ``EXEC(@variable)``
+        - System procedures: ``sp_executesql``, ``xp_cmdshell``, etc.
 
     Metadata captured:
         - Table nodes: ``column_count``, ``has_primary_key``
@@ -220,8 +242,15 @@ class SqlRecognizer:
         "EXEC", "EXECUTE", "CAST", "CONVERT", "CASE", "WHEN", "THEN",
         "TOP", "DISTINCT", "UNION", "ALL", "EXCEPT", "INTERSECT",
         "GO", "USE", "GRANT", "REVOKE", "DENY",
+        "MERGE", "USING", "MATCHED", "OUTPUT",
         "INFORMATION_SCHEMA", "SYS", "SYSOBJ", "SYSOBJ", "SYSOBJECTS",
         "SYSCOLUMNS", "SYSOBJECTS", "SYSINDEXES",
+    })
+
+    # System procedures that should be skipped when building call graphs
+    _SYSTEM_PROCS: frozenset[str] = frozenset({
+        "sp_executesql", "sp_execute", "xp_cmdshell", "sp_addlogin",
+        "sp_adduser", "sp_configure", "sp_helpdb", "sp_who",
     })
 
     def recognize(self, file_path: Path, content: str) -> ScanResult:
@@ -472,6 +501,49 @@ class SqlRecognizer:
                             target=target_id,
                             type=EdgeType.WRITES,
                             metadata={"inferred": True},
+                        )
+                    )
+
+            # MERGE INTO: treats target as a write (upsert)
+            for ref_m in _SQL_MERGE_RE.finditer(body):
+                ref_name = _strip_name(ref_m.group(1))
+                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS:
+                    continue
+                target_id = f"table:{ref_name}"
+                key = (source_id, target_id, EdgeType.WRITES)
+                if key not in seen_edges:
+                    seen_edges.add(key)
+                    edges.append(
+                        Edge(
+                            source=source_id,
+                            target=target_id,
+                            type=EdgeType.WRITES,
+                            metadata={"inferred": True, "via": "merge"},
+                        )
+                    )
+
+            # EXEC / EXECUTE: stored-procedure-to-stored-procedure calls
+            for ref_m in _SQL_EXEC_RE.finditer(body):
+                raw = ref_m.group(1).strip()
+                # Skip dynamic execution: EXEC(@variable) is captured as raw starting with "@"
+                if raw.startswith("@") or raw.startswith("("):
+                    continue
+                callee_name = _strip_name(raw)
+                if not callee_name or callee_name.upper() in self._SQL_KEYWORDS:
+                    continue
+                # Skip system/dynamic stored procedures
+                if callee_name.lower() in self._SYSTEM_PROCS:
+                    continue
+                target_id = f"service:{callee_name}"
+                key = (source_id, target_id, EdgeType.CALLS)
+                if key not in seen_edges:
+                    seen_edges.add(key)
+                    edges.append(
+                        Edge(
+                            source=source_id,
+                            target=target_id,
+                            type=EdgeType.CALLS,
+                            metadata={"inferred": True, "style": "exec"},
                         )
                     )
 

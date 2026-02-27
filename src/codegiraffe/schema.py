@@ -21,6 +21,7 @@ class NodeType(StrEnum):
     EVENT = "event"
     EXTERNAL_API = "external_api"
     MODULE = "module"
+    PROJECT = "project"
     CONTRACT = "contract"
     DECISION = "decision"
     DOMAIN = "domain"
@@ -54,3 +55,4 @@ class EdgeType(StrEnum):
     SUPERSEDES = "supersedes"
     BELONGS_TO = "belongs_to"
     TESTED_BY = "tested_by"
+    PROJECT_CONTAINS = "project_contains"

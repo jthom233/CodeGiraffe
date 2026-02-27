@@ -1370,16 +1370,21 @@ public class NotificationHub : Hub {
         assert node is not None
         assert node.metadata.get("http_method") == "PATCH"
 
-    def test_route_controller_template_skipped(self, recognizer):
-        """[Route("api/[controller]")] must NOT produce an endpoint node."""
+    def test_route_controller_template_no_verb_produces_no_endpoint(self, recognizer):
+        """[Route("api/[controller]")] alone (no Http verb attr) must NOT produce an endpoint node.
+
+        The class-level route sets the prefix but a verb method is needed to
+        actually emit an endpoint.  The literal [controller] must never appear
+        as an endpoint ID.
+        """
         content = '[Route("api/[controller]")]\npublic class UsersController : ControllerBase { }'
         result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
         ids = {n.id for n in result.nodes}
         assert "endpoint:api/[controller]" not in ids
         assert not any(n.type == "endpoint" for n in result.nodes)
 
-    def test_route_controller_template_case_insensitive(self, recognizer):
-        """[controller] token check is case-insensitive ([Controller] variant)."""
+    def test_route_controller_template_case_insensitive_no_verb(self, recognizer):
+        """[Controller] token (uppercase) with no verb attr: no endpoint emitted."""
         content = '[Route("api/[Controller]")]\npublic class UsersController : ControllerBase { }'
         result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
         assert not any(n.type == "endpoint" for n in result.nodes)
@@ -1391,6 +1396,261 @@ public class NotificationHub : Hub {
         node = next((n for n in result.nodes if n.id == "endpoint:custom"), None)
         assert node is not None
         assert node.metadata.get("http_method") == "ANY"
+
+
+class TestCSharpNewPatterns:
+    """Tests for [controller] resolution, BackgroundService, Autofac Module, and Minimal API detection."""
+
+    @pytest.fixture
+    def recognizer(self):
+        return CSharpRecognizer()
+
+    # --- [controller] route resolution ---
+
+    def test_route_controller_placeholder_resolved_from_class_name(self, recognizer):
+        """[Route("api/[controller]")] on SecretsController -> endpoint api/secrets via [HttpGet]."""
+        content = '''\
+[Route("api/[controller]")]
+public class SecretsController : ControllerBase
+{
+    [HttpGet]
+    public IActionResult GetAll() { return Ok(); }
+}
+'''
+        result = recognizer.recognize(Path("Controllers/SecretsController.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/secrets" in ids, f"Expected endpoint:/api/secrets, got: {ids}"
+        assert "endpoint:api/[controller]" not in ids
+
+    def test_route_controller_placeholder_with_method_segment(self, recognizer):
+        """[Route("api/[controller]")] + [HttpGet("items")] -> endpoint api/secrets/items."""
+        content = '''\
+[Route("api/[controller]")]
+public class SecretsController : ControllerBase
+{
+    [HttpGet("items")]
+    public IActionResult GetItems() { return Ok(); }
+}
+'''
+        result = recognizer.recognize(Path("Controllers/SecretsController.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/secrets/items" in ids, f"Expected endpoint:/api/secrets/items, got: {ids}"
+
+    def test_route_controller_and_action_placeholders_resolved(self, recognizer):
+        """[Route("api/[controller]/[action]")] resolves both [controller] and [action]."""
+        content = '''\
+[Route("api/[controller]/[action]")]
+public class OrdersController : ControllerBase
+{
+    [HttpGet]
+    public IActionResult GetPending() { return Ok(); }
+}
+'''
+        result = recognizer.recognize(Path("Controllers/OrdersController.cs"), content)
+        ids = {n.id for n in result.nodes}
+        # [controller] -> "orders", [action] in prefix is not resolved in pass1
+        # (action resolution only applies to method-level routes), so the class
+        # prefix retains [action] and is resolved at method-level look-ahead.
+        # Result: endpoint:/api/orders/getpending (action lowercased)
+        # OR the prefix itself contains [action] which is not replaced — acceptable.
+        # The key assertion: [controller] is replaced and the literal "[controller]" is gone.
+        assert not any("[controller]" in nid for nid in ids), \
+            f"Literal [controller] must not appear in any node id. Got: {ids}"
+        assert not any("[action]" in nid for nid in ids), \
+            f"Literal [action] must not appear in any node id. Got: {ids}"
+
+    def test_route_controller_case_insensitive_resolution(self, recognizer):
+        """[Route("api/[Controller]")] (uppercase) is resolved the same as lowercase."""
+        content = '''\
+[Route("api/[Controller]")]
+public class ProductsController : ControllerBase
+{
+    [HttpGet]
+    public IActionResult GetAll() { return Ok(); }
+}
+'''
+        result = recognizer.recognize(Path("Controllers/ProductsController.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/products" in ids, f"Expected endpoint:/api/products, got: {ids}"
+
+    # --- BackgroundService / IHostedService ---
+
+    def test_background_service_subclass_emits_service_node(self, recognizer):
+        """class FooWorker : BackgroundService must emit service node with kind=background_worker."""
+        content = '''\
+public class EmailDispatchWorker : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct) { }
+}
+'''
+        result = recognizer.recognize(Path("Workers/EmailDispatchWorker.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:EmailDispatchWorker" in ids, f"Expected service:EmailDispatchWorker, got: {ids}"
+        node = next(n for n in result.nodes if n.id == "service:EmailDispatchWorker")
+        assert node.metadata.get("kind") == "background_worker"
+
+    def test_ihostedservice_implementer_emits_service_node(self, recognizer):
+        """class HealthCheckService : IHostedService must emit service node with kind=background_worker."""
+        content = '''\
+public class HealthCheckService : IHostedService
+{
+    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
+    public Task StopAsync(CancellationToken ct) => Task.CompletedTask;
+}
+'''
+        result = recognizer.recognize(Path("Services/HealthCheckService.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:HealthCheckService" in ids, f"Expected service:HealthCheckService, got: {ids}"
+        node = next(n for n in result.nodes if n.id == "service:HealthCheckService")
+        assert node.metadata.get("kind") == "background_worker"
+
+    def test_background_service_not_duplicated(self, recognizer):
+        """BackgroundService subclass must appear exactly once in the output nodes."""
+        content = '''\
+public class QueueProcessor : BackgroundService
+{
+    protected override Task ExecuteAsync(CancellationToken ct) => Task.CompletedTask;
+}
+'''
+        result = recognizer.recognize(Path("Workers/QueueProcessor.cs"), content)
+        worker_nodes = [n for n in result.nodes if "QueueProcessor" in n.id]
+        assert len(worker_nodes) == 1, f"Expected exactly 1 node for QueueProcessor, got: {worker_nodes}"
+
+    # --- Autofac Module ---
+
+    def test_autofac_module_subclass_emits_di_module_node(self, recognizer):
+        """class InfrastructureModule : Module must emit service node with kind=di_module."""
+        content = '''\
+public class InfrastructureModule : Module
+{
+    protected override void Load(ContainerBuilder builder)
+    {
+        builder.RegisterType<SqlRepository>().AsImplementedInterfaces();
+    }
+}
+'''
+        result = recognizer.recognize(Path("Modules/InfrastructureModule.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:InfrastructureModule" in ids, f"Expected service:InfrastructureModule, got: {ids}"
+        node = next(n for n in result.nodes if n.id == "service:InfrastructureModule")
+        assert node.metadata.get("kind") == "di_module"
+        assert node.metadata.get("framework") == "autofac"
+
+    def test_autofac_qualified_module_subclass(self, recognizer):
+        """class DataModule : Autofac.Module must also be detected."""
+        content = '''\
+public class DataModule : Autofac.Module
+{
+    protected override void Load(ContainerBuilder builder) { }
+}
+'''
+        result = recognizer.recognize(Path("Modules/DataModule.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:DataModule" in ids, f"Expected service:DataModule, got: {ids}"
+        node = next(n for n in result.nodes if n.id == "service:DataModule")
+        assert node.metadata.get("kind") == "di_module"
+
+    def test_autofac_module_not_duplicated(self, recognizer):
+        """Autofac Module subclass must appear exactly once."""
+        content = '''\
+public class SecurityModule : Module
+{
+    protected override void Load(ContainerBuilder builder) { }
+}
+'''
+        result = recognizer.recognize(Path("Modules/SecurityModule.cs"), content)
+        module_nodes = [n for n in result.nodes if "SecurityModule" in n.id]
+        assert len(module_nodes) == 1, f"Expected exactly 1 node for SecurityModule, got: {module_nodes}"
+
+    # --- Minimal API endpoints ---
+
+    def test_minimal_api_get_endpoint(self, recognizer):
+        """app.MapGet("/api/health", ...) must emit an endpoint node with http_method GET."""
+        content = '''\
+app.MapGet("/api/health", () => Results.Ok("healthy"));
+'''
+        result = recognizer.recognize(Path("Program.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/health" in ids, f"Expected endpoint:/api/health, got: {ids}"
+        node = next(n for n in result.nodes if n.id == "endpoint:/api/health")
+        assert node.metadata.get("http_method") == "GET"
+        assert node.metadata.get("kind") == "minimal_api"
+
+    def test_minimal_api_post_endpoint(self, recognizer):
+        """app.MapPost("/api/orders", ...) must emit an endpoint node with http_method POST."""
+        content = '''\
+app.MapPost("/api/orders", async (CreateOrderDto dto, IOrderService svc) =>
+{
+    var id = await svc.CreateAsync(dto);
+    return Results.Created($"/api/orders/{id}", id);
+});
+'''
+        result = recognizer.recognize(Path("Program.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/orders" in ids, f"Expected endpoint:/api/orders, got: {ids}"
+        node = next(n for n in result.nodes if n.id == "endpoint:/api/orders")
+        assert node.metadata.get("http_method") == "POST"
+
+    def test_minimal_api_multiple_verbs(self, recognizer):
+        """Multiple app.Map* calls in the same file produce multiple endpoint nodes."""
+        content = '''\
+app.MapGet("/api/users", () => Results.Ok());
+app.MapPost("/api/users", (CreateUserDto dto) => Results.Created());
+app.MapDelete("/api/users/{id}", (int id) => Results.NoContent());
+app.MapPut("/api/users/{id}", (int id, UpdateUserDto dto) => Results.Ok());
+app.MapPatch("/api/users/{id}/status", (int id) => Results.Ok());
+'''
+        result = recognizer.recognize(Path("Program.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/users" in ids
+        assert "endpoint:/api/users/{id}" in ids
+        assert "endpoint:/api/users/{id}/status" in ids
+        endpoint_nodes = [n for n in result.nodes if n.type == NodeType.ENDPOINT]
+        # At minimum 4 endpoints: GET /api/users, POST /api/users, DELETE /api/users/{id},
+        # PUT /api/users/{id}, PATCH /api/users/{id}/status — but GET and POST share the same
+        # node_id (endpoint:/api/users), so deduplication may apply per route+verb combo.
+        # We check that at least 3 distinct endpoint node IDs were created.
+        assert len({n.id for n in endpoint_nodes}) >= 3
+
+    def test_minimal_api_endpoints_receiver_variants(self, recognizer):
+        """endpoints.MapGet(...) and group.MapGet(...) are also detected."""
+        content = '''\
+var userGroup = app.MapGroup("/api/users");
+userGroup.MapGet("/", () => Results.Ok());
+endpoints.MapPost("/api/events", (EventDto dto) => Results.Accepted());
+'''
+        result = recognizer.recognize(Path("Program.cs"), content)
+        endpoint_nodes = [n for n in result.nodes if n.type == NodeType.ENDPOINT]
+        assert len(endpoint_nodes) >= 1
+
+    # --- Regression: existing controller detection still works ---
+
+    def test_regression_standard_route_attributes_still_work(self, recognizer):
+        """[HttpGet("/path")] without [controller] placeholder still produces correct endpoints."""
+        content = '''\
+[HttpGet("/api/users")]
+public async Task<IActionResult> GetUsers() { return Ok(); }
+
+[HttpPost("/api/users")]
+public async Task<IActionResult> CreateUser() { return Created(); }
+'''
+        result = recognizer.recognize(Path("Controllers/UsersController.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "endpoint:/api/users" in ids
+
+    def test_regression_signalr_hub_still_detected(self, recognizer):
+        """SignalR hubs are still detected after the new patterns are added."""
+        content = '''\
+public class NotificationHub : Hub
+{
+    public async Task Notify(string msg) { }
+}
+'''
+        result = recognizer.recognize(Path("Hubs/NotificationHub.cs"), content)
+        ids = {n.id for n in result.nodes}
+        assert "service:NotificationHub" in ids
+        node = next(n for n in result.nodes if n.id == "service:NotificationHub")
+        assert node.metadata.get("kind") == "signalr_hub"
 
 
 class TestCppRecognizer:
@@ -2675,22 +2935,22 @@ class TestCsprojRecognizer:
 </Project>'''
         result = recognizer.recognize(Path("MyApp/MyApp.csproj"), content)
 
-        # Project module node must exist.
-        project_node = next((n for n in result.nodes if n.id == "mod:MyApp"), None)
-        assert project_node is not None, "Expected mod:MyApp project node"
-        assert project_node.metadata["kind"] == "project"
+        # Project node must exist with the project: prefix.
+        from codegiraffe.schema import EdgeType, NodeType
+        project_node = next((n for n in result.nodes if n.id == "project:MyApp"), None)
+        assert project_node is not None, "Expected project:MyApp node"
+        assert project_node.type == NodeType.PROJECT
         assert project_node.metadata["language"] == "csharp"
         assert project_node.metadata["target_framework"] == "net8.0"
 
-        # Dependency edges.
+        # Dependency edges point to mod: targets (NuGet packages are modules).
         edge_targets = {e.target for e in result.edges}
         assert "mod:Newtonsoft.Json" in edge_targets
         assert "mod:Autofac" in edge_targets
 
         # All edges are depends_on from the project node.
-        from codegiraffe.schema import EdgeType
         for edge in result.edges:
-            assert edge.source == "mod:MyApp"
+            assert edge.source == "project:MyApp"
             assert edge.type == EdgeType.DEPENDS_ON
             assert edge.metadata["reference_type"] == "nuget"
 
@@ -2702,8 +2962,10 @@ class TestCsprojRecognizer:
   </ItemGroup>
 </Project>'''
         result = recognizer.recognize(Path("Svc/Svc.csproj"), content)
+        # Edge source is now project:Svc; target NuGet package stays as mod:.
         edge = next((e for e in result.edges if e.target == "mod:Serilog"), None)
         assert edge is not None
+        assert edge.source == "project:Svc"
         assert edge.metadata.get("version") == "3.1.1"
 
     def test_old_style_msbuild_namespace(self, recognizer):
@@ -2718,8 +2980,10 @@ class TestCsprojRecognizer:
   </ItemGroup>
 </Project>'''
         result = recognizer.recognize(Path("Legacy/Legacy.csproj"), content)
-        project_node = next((n for n in result.nodes if n.id == "mod:Legacy"), None)
+        from codegiraffe.schema import NodeType
+        project_node = next((n for n in result.nodes if n.id == "project:Legacy"), None)
         assert project_node is not None
+        assert project_node.type == NodeType.PROJECT
         edge = next((e for e in result.edges if e.target == "mod:NUnit"), None)
         assert edge is not None
         assert edge.metadata["reference_type"] == "nuget"
@@ -2734,11 +2998,13 @@ class TestCsprojRecognizer:
 </Project>'''
         result = recognizer.recognize(Path("Web/Thycotic.ihawu.Web.csproj"), content)
 
+        # ProjectReference targets now use project: prefix.
         edge_targets = {e.target for e in result.edges}
-        assert "mod:Thycotic.ihawu.Business" in edge_targets
-        assert "mod:Thycotic.ihawu.Entities" in edge_targets
+        assert "project:Thycotic.ihawu.Business" in edge_targets
+        assert "project:Thycotic.ihawu.Entities" in edge_targets
 
         for edge in result.edges:
+            assert edge.source == "project:Thycotic.ihawu.Web"
             assert edge.metadata["reference_type"] == "project_reference"
             assert edge.type == "depends_on"
 
@@ -2750,7 +3016,7 @@ class TestCsprojRecognizer:
   </PropertyGroup>
 </Project>'''
         result = recognizer.recognize(Path("Lib/MyLib.csproj"), content)
-        node = next((n for n in result.nodes if n.id == "mod:MyLib"), None)
+        node = next((n for n in result.nodes if n.id == "project:MyLib"), None)
         assert node is not None
         assert node.metadata["target_framework"] == "net9.0"
 
@@ -2762,15 +3028,15 @@ class TestCsprojRecognizer:
   </PropertyGroup>
 </Project>'''
         result = recognizer.recognize(Path("Multi/Multi.csproj"), content)
-        node = next((n for n in result.nodes if n.id == "mod:Multi"), None)
+        node = next((n for n in result.nodes if n.id == "project:Multi"), None)
         assert node is not None
         assert node.metadata["target_framework"] == "net8.0;net48"
 
     def test_empty_csproj(self, recognizer):
-        """A minimal/empty .csproj still emits a project module node."""
+        """A minimal/empty .csproj still emits a project node."""
         content = '<Project Sdk="Microsoft.NET.Sdk"></Project>'
         result = recognizer.recognize(Path("Empty/Empty.csproj"), content)
-        assert any(n.id == "mod:Empty" for n in result.nodes)
+        assert any(n.id == "project:Empty" for n in result.nodes)
         assert result.edges == []
 
     def test_broken_xml_returns_empty(self, recognizer):
@@ -2781,13 +3047,13 @@ class TestCsprojRecognizer:
         assert result.edges == []
 
     def test_assembly_name_derived_from_filename(self, recognizer):
-        """Assembly name (and mod: ID) is derived from the .csproj filename stem."""
+        """Assembly name (and project: ID) is derived from the .csproj filename stem."""
         content = '<Project Sdk="Microsoft.NET.Sdk"></Project>'
         result = recognizer.recognize(
             Path("src/Thycotic.ihawu.Business.Logic/Thycotic.ihawu.Business.Logic.csproj"),
             content,
         )
-        assert any(n.id == "mod:Thycotic.ihawu.Business.Logic" for n in result.nodes)
+        assert any(n.id == "project:Thycotic.ihawu.Business.Logic" for n in result.nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -2818,10 +3084,12 @@ class TestPackagesConfigRecognizer:
 
         result = recognizer.recognize(config_path, content)
 
-        # Source project node.
-        project_node = next((n for n in result.nodes if n.id == "mod:MyLegacyApp"), None)
+        # Source project node uses project: prefix.
+        from codegiraffe.schema import NodeType
+        project_node = next((n for n in result.nodes if n.id == "project:MyLegacyApp"), None)
         assert project_node is not None, "Expected stub project node for MyLegacyApp"
-        assert project_node.metadata["kind"] == "project"
+        assert project_node.type == NodeType.PROJECT
+        assert project_node.metadata["language"] == "csharp"
 
         edge_targets = {e.target for e in result.edges}
         assert "mod:Newtonsoft.Json" in edge_targets
@@ -2830,6 +3098,7 @@ class TestPackagesConfigRecognizer:
 
         # Edges must carry version and reference_type.
         nj_edge = next(e for e in result.edges if e.target == "mod:Newtonsoft.Json")
+        assert nj_edge.source == "project:MyLegacyApp"
         assert nj_edge.metadata["version"] == "10.0.3"
         assert nj_edge.metadata["reference_type"] == "nuget"
 
@@ -2847,7 +3116,7 @@ class TestPackagesConfigRecognizer:
         content = '<packages><package id="Serilog" version="3.0.0" /></packages>'
         result = recognizer.recognize(tmp_path / "Packages.Config", content)
         # Case-insensitive match: Packages.Config == packages.config, so it IS processed.
-        assert any(n.id == "mod:MyApp" for n in result.nodes)
+        assert any(n.id == "project:MyApp" for n in result.nodes)
         assert any(e.target == "mod:Serilog" for e in result.edges)
 
     def test_association_with_sibling_csproj(self, recognizer, tmp_path):
@@ -2856,8 +3125,8 @@ class TestPackagesConfigRecognizer:
         content = '<packages><package id="NSubstitute" version="4.0.0" /></packages>'
         result = recognizer.recognize(tmp_path / "packages.config", content)
 
-        assert any(n.id == "mod:Thycotic.ihawu.Web" for n in result.nodes)
-        edges = [e for e in result.edges if e.source == "mod:Thycotic.ihawu.Web"]
+        assert any(n.id == "project:Thycotic.ihawu.Web" for n in result.nodes)
+        edges = [e for e in result.edges if e.source == "project:Thycotic.ihawu.Web"]
         assert len(edges) == 1
         assert edges[0].target == "mod:NSubstitute"
 
@@ -2868,7 +3137,7 @@ class TestPackagesConfigRecognizer:
 
         # The project ID should be based on the parent directory name.
         dir_name = tmp_path.name
-        assert any(n.id == f"mod:{dir_name}" for n in result.nodes)
+        assert any(n.id == f"project:{dir_name}" for n in result.nodes)
 
     def test_broken_xml_returns_stub_node_only(self, recognizer, tmp_path):
         """Malformed XML returns the stub project node but no package edges."""
@@ -2876,7 +3145,7 @@ class TestPackagesConfigRecognizer:
         content = "<packages><this is broken"
         result = recognizer.recognize(tmp_path / "packages.config", content)
         # Stub node emitted.
-        assert any(n.id == "mod:MyApp" for n in result.nodes)
+        assert any(n.id == "project:MyApp" for n in result.nodes)
         # No edges (XML parse failed).
         assert result.edges == []
 
@@ -2885,7 +3154,7 @@ class TestPackagesConfigRecognizer:
         (tmp_path / "App.csproj").write_text("<Project />")
         content = '<packages></packages>'
         result = recognizer.recognize(tmp_path / "packages.config", content)
-        assert any(n.id == "mod:App" for n in result.nodes)
+        assert any(n.id == "project:App" for n in result.nodes)
         assert result.edges == []
 
 
@@ -3284,6 +3553,204 @@ class TestSqlRecognizer:
         result = recognizer.recognize(Path("comments.sql"), content)
         assert result.nodes == []
         assert result.edges == []
+
+    # -----------------------------------------------------------------------
+    # EXEC / EXECUTE → calls edges
+    # -----------------------------------------------------------------------
+
+    def test_exec_bare_name_produces_calls_edge(self, recognizer):
+        """EXEC usp_GetSecrets in a procedure body emits a calls edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_Caller]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    EXEC usp_GetSecrets\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        calls_edges = [e for e in result.edges if e.type == EdgeType.CALLS]
+        assert any(
+            e.source == "service:proc_Caller" and e.target == "service:usp_GetSecrets"
+            for e in calls_edges
+        ), f"Expected calls edge to service:usp_GetSecrets, got: {calls_edges}"
+
+    def test_execute_with_schema_produces_calls_edge(self, recognizer):
+        """EXECUTE dbo.usp_UpdateSecret emits a calls edge with the stripped proc name."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_Orchestrator]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    EXECUTE dbo.usp_UpdateSecret\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        calls_edges = [e for e in result.edges if e.type == EdgeType.CALLS]
+        assert any(
+            e.source == "service:proc_Orchestrator" and e.target == "service:usp_UpdateSecret"
+            for e in calls_edges
+        ), f"Expected calls edge to service:usp_UpdateSecret, got: {calls_edges}"
+
+    def test_exec_bracket_quoted_identifiers_produces_calls_edge(self, recognizer):
+        """EXEC [dbo].[usp_DeleteSecret] with bracket-quoted identifiers emits a calls edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_DeleteOrchestrator]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    EXEC [dbo].[usp_DeleteSecret]\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        calls_edges = [e for e in result.edges if e.type == EdgeType.CALLS]
+        assert any(
+            e.source == "service:proc_DeleteOrchestrator" and e.target == "service:usp_DeleteSecret"
+            for e in calls_edges
+        ), f"Expected calls edge to service:usp_DeleteSecret, got: {calls_edges}"
+
+    def test_exec_dynamic_variable_is_skipped(self, recognizer):
+        """EXEC(@sql) dynamic execution is not recorded as a calls edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_Dynamic]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    DECLARE @sql NVARCHAR(MAX) = 'SELECT 1'\n"
+            "    EXEC(@sql)\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        calls_edges = [e for e in result.edges if e.type == EdgeType.CALLS]
+        assert calls_edges == [], f"Expected no calls edges for dynamic EXEC, got: {calls_edges}"
+
+    def test_exec_sp_executesql_is_skipped(self, recognizer):
+        """EXEC sp_executesql is skipped as a system procedure."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_Dynamic2]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    EXEC sp_executesql N'SELECT 1'\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        calls_edges = [e for e in result.edges if e.type == EdgeType.CALLS]
+        assert calls_edges == [], f"Expected no calls edges for sp_executesql, got: {calls_edges}"
+
+    def test_exec_calls_edge_metadata(self, recognizer):
+        """EXEC calls edges have inferred=True and style=exec in metadata."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_A]\n"
+            "AS\n"
+            "EXEC proc_B\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        calls_edges = [
+            e for e in result.edges
+            if e.type == EdgeType.CALLS and e.target == "service:proc_B"
+        ]
+        assert len(calls_edges) == 1
+        assert calls_edges[0].metadata.get("inferred") is True
+        assert calls_edges[0].metadata.get("style") == "exec"
+
+    def test_exec_no_duplicate_calls_edges(self, recognizer):
+        """Multiple EXEC of the same proc in a body produce only one calls edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_Multi]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    EXEC usp_Helper\n"
+            "    EXEC usp_Helper\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        calls_edges = [
+            e for e in result.edges
+            if e.type == EdgeType.CALLS and e.target == "service:usp_Helper"
+        ]
+        assert len(calls_edges) == 1, f"Expected exactly 1 calls edge, got {len(calls_edges)}"
+
+    # -----------------------------------------------------------------------
+    # MERGE INTO → writes edges
+    # -----------------------------------------------------------------------
+
+    def test_merge_into_produces_writes_edge(self, recognizer):
+        """MERGE INTO Secrets in a procedure body emits a writes edge to the table."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_SyncSecrets]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    MERGE INTO Secrets AS target\n"
+            "    USING SourceSecrets AS source ON target.Id = source.Id\n"
+            "    WHEN MATCHED THEN UPDATE SET target.Name = source.Name\n"
+            "    WHEN NOT MATCHED THEN INSERT (Id, Name) VALUES (source.Id, source.Name);\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(
+            e.source == "service:proc_SyncSecrets" and e.target == "table:Secrets"
+            for e in writes_edges
+        ), f"Expected writes edge to table:Secrets, got: {writes_edges}"
+
+    def test_merge_into_bracket_quoted_produces_writes_edge(self, recognizer):
+        """MERGE INTO [dbo].[tbSecret] with bracket-quoted identifier emits a writes edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_MergeSecrets]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    MERGE INTO [dbo].[tbSecret] AS t\n"
+            "    USING src ON t.SecretId = src.SecretId\n"
+            "    WHEN MATCHED THEN UPDATE SET t.Name = src.Name;\n"
+            "END\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(
+            e.source == "service:proc_MergeSecrets" and e.target == "table:tbSecret"
+            for e in writes_edges
+        ), f"Expected writes edge to table:tbSecret, got: {writes_edges}"
+
+    def test_merge_without_into_keyword_produces_writes_edge(self, recognizer):
+        """MERGE target_table AS t (without INTO keyword) also emits a writes edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_MergeNoInto]\n"
+            "AS\n"
+            "MERGE tbFolder AS t\n"
+            "USING src ON t.FolderId = src.FolderId\n"
+            "WHEN MATCHED THEN UPDATE SET t.Name = src.Name;\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(
+            e.target == "table:tbFolder"
+            for e in writes_edges
+        ), f"Expected writes edge to table:tbFolder, got: {writes_edges}"
+
+    def test_merge_writes_edge_metadata(self, recognizer):
+        """MERGE-produced writes edges have inferred=True and via=merge in metadata."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_MergeMeta]\n"
+            "AS\n"
+            "MERGE INTO tbTarget AS t\n"
+            "USING src ON t.Id = src.Id\n"
+            "WHEN MATCHED THEN UPDATE SET t.Val = src.Val;\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        merge_writes = [
+            e for e in result.edges
+            if e.type == EdgeType.WRITES and e.target == "table:tbTarget"
+            and e.metadata.get("via") == "merge"
+        ]
+        assert len(merge_writes) == 1
+        assert merge_writes[0].metadata.get("inferred") is True
 
     # -----------------------------------------------------------------------
     # Registration

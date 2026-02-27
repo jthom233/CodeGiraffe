@@ -41,9 +41,10 @@ class CsprojRecognizer:
     """Recognizer for SDK-style and old-style ``.csproj`` project files.
 
     Emits:
-    - A ``module`` node for the project itself (``mod:{AssemblyName}``).
-    - ``depends_on`` edges for each ``<PackageReference>`` (NuGet).
-    - ``depends_on`` edges for each ``<ProjectReference>`` (project-to-project).
+    - A ``project`` node for the project itself (``project:{AssemblyName}``).
+    - ``depends_on`` edges to ``mod:{PackageName}`` for each ``<PackageReference>`` (NuGet).
+    - ``depends_on`` edges to ``project:{RefName}`` for each ``<ProjectReference>``
+      (project-to-project).
 
     Both SDK-style projects (``<Project Sdk="Microsoft.NET.Sdk">``) and
     legacy MSBuild projects (with ``xmlns="http://schemas.microsoft.com/developer/msbuild/2003"``)
@@ -58,7 +59,7 @@ class CsprojRecognizer:
 
         # Derive assembly name from the filename stem.
         assembly_name = Path(file_path).stem
-        project_id = f"mod:{assembly_name}"
+        project_id = f"project:{assembly_name}"
 
         # Parse XML — tolerate broken files gracefully.
         try:
@@ -71,11 +72,10 @@ class CsprojRecognizer:
 
         project_node = Node(
             id=project_id,
-            type=NodeType.MODULE,
+            type=NodeType.PROJECT,
             label=assembly_name,
             file_path=rel_path,
             metadata={
-                "kind": "project",
                 "language": "csharp",
                 **({"target_framework": target_framework} if target_framework else {}),
             },
@@ -89,6 +89,7 @@ class CsprojRecognizer:
                 continue
             pkg_id = pkg_id.strip()
             version = (elem.get("Version") or elem.get("version") or "").strip()
+            # NuGet packages are external modules, not project nodes.
             target_id = f"mod:{pkg_id}"
             meta: dict = {"reference_type": "nuget"}
             if version:
@@ -112,7 +113,8 @@ class CsprojRecognizer:
             ref_name = Path(include_path.replace("\\", "/")).stem
             if not ref_name:
                 continue
-            target_id = f"mod:{ref_name}"
+            # Peer projects use the project: prefix.
+            target_id = f"project:{ref_name}"
             edges.append(
                 Edge(
                     source=project_id,

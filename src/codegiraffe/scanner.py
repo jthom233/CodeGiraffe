@@ -358,6 +358,31 @@ _IGNORE_DIRS: frozenset[str] = frozenset(
         "*.egg-info",
         "obj",
         "bin",
+        # .NET-specific directories
+        "packages",      # NuGet restore directory
+        "artifacts",     # .NET 8+ build output
+        "testresults",   # Visual Studio test output
+        ".openapi-generator",  # OpenAPI generated code directory
+    }
+)
+
+# Lowercased version of _IGNORE_DIRS for case-insensitive matching (critical on Windows)
+_IGNORE_DIRS_LOWER: frozenset[str] = frozenset(d.lower() for d in _IGNORE_DIRS)
+
+# File suffixes that indicate generated code — skip before running recognizers
+_GENERATED_FILE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".g.cs",          # MSBuild / Roslyn source generators
+        ".generated.cs",  # General C# generated files
+        ".designer.cs",   # Windows Forms / WPF designer files
+    }
+)
+
+# Directory-level marker files/dirs whose presence flags the entire parent as generated
+_GENERATED_DIR_MARKERS: frozenset[str] = frozenset(
+    {
+        ".openapi-generator",         # OpenAPI Generator output directory marker
+        ".openapi-generator-ignore",  # Per-file OpenAPI generator ignore list
     }
 )
 
@@ -508,10 +533,39 @@ def _is_test_file(file_path: Path) -> bool:
 
 
 def _should_skip(path: Path) -> bool:
-    """Return True if any component of *path* matches an ignore pattern."""
+    """Return True if any component of *path* matches an ignore pattern.
+
+    Matching is case-insensitive so that Windows directories like ``Packages``
+    are treated the same as ``packages``.
+    """
     for part in path.parts:
-        if part in _IGNORE_DIRS or part.endswith(".egg-info"):
+        part_lower = part.lower()
+        if part_lower in _IGNORE_DIRS_LOWER or part_lower.endswith(".egg-info"):
             return True
+    return False
+
+
+def _is_generated_file(path: Path) -> bool:
+    """Return True if *path* looks like a generated source file that should be skipped.
+
+    Checks two things:
+    1. The file name ends with a known generated-code suffix (e.g. ``.g.cs``,
+       ``.generated.cs``, ``.Designer.cs``).
+    2. The file's parent directory (or any ancestor) contains a marker file/dir
+       that flags the entire subtree as generated (e.g. ``.openapi-generator``).
+    """
+    # Check file-name suffixes (case-insensitive)
+    name_lower = path.name.lower()
+    for gen_suffix in _GENERATED_FILE_SUFFIXES:
+        if name_lower.endswith(gen_suffix):
+            return True
+
+    # Check for directory-level markers in ancestors
+    for ancestor in path.parents:
+        for marker in _GENERATED_DIR_MARKERS:
+            if (ancestor / marker).exists():
+                return True
+
     return False
 
 
@@ -2022,33 +2076,99 @@ def _infer_decision_marker_edges(
 
 
 # ---------------------------------------------------------------------------
+# Project-to-module containment edges
+# ---------------------------------------------------------------------------
+
+
+def _infer_project_contains_edges(result: ScanResult) -> None:
+    """Create ``project_contains`` edges from ``project:X`` nodes to the ``mod:``
+    nodes that belong to the same .NET project.
+
+    A ``module`` node is considered to belong to a project when the module's
+    ``file_path`` sits inside the same directory as the project's ``.csproj``
+    file (i.e. the project node's ``file_path``).
+
+    This wires the CsprojRecognizer's ``project:ProjectName`` nodes to the
+    actual C# ``mod:`` nodes created by the scanner so that NuGet/project
+    reference edges connect to the code graph.
+    """
+    # Index project nodes by their csproj directory (as a posix path prefix).
+    project_dir_index: dict[str, str] = {}  # dir_prefix -> project node id
+    for node in result.nodes:
+        if node.type in (NodeType.PROJECT, NodeType.PROJECT.value):
+            if node.file_path:
+                # The project's directory is everything before the filename.
+                proj_dir = "/".join(node.file_path.split("/")[:-1])
+                project_dir_index[proj_dir] = node.id
+
+    if not project_dir_index:
+        return
+
+    # For each module node, check whether its file_path starts with one of the
+    # known project directories.
+    existing_edge_keys: set[tuple[str, str, str]] = {
+        (e.source, e.target, e.type) for e in result.edges
+    }
+    new_edges: list[Edge] = []
+
+    for node in result.nodes:
+        if node.type not in (NodeType.MODULE, NodeType.MODULE.value):
+            continue
+        if not node.file_path:
+            continue
+
+        module_dir = "/".join(node.file_path.split("/")[:-1])
+
+        # Walk up directory hierarchy to find the closest owning project.
+        candidate = module_dir
+        while True:
+            if candidate in project_dir_index:
+                project_id = project_dir_index[candidate]
+                key = (project_id, node.id, EdgeType.PROJECT_CONTAINS.value)
+                if key not in existing_edge_keys:
+                    new_edges.append(
+                        Edge(
+                            source=project_id,
+                            target=node.id,
+                            type=EdgeType.PROJECT_CONTAINS,
+                            confidence=1.0,
+                            metadata={"inferred": True},
+                        )
+                    )
+                    existing_edge_keys.add(key)
+                break
+            if not candidate or "/" not in candidate:
+                break
+            candidate = "/".join(candidate.split("/")[:-1])
+
+    result.edges.extend(new_edges)
+
+
+# ---------------------------------------------------------------------------
 # Cross-repo NuGet/project dependency promotion
 # ---------------------------------------------------------------------------
 
 
 def _promote_cross_repo_edges(result: ScanResult, project_path: str) -> None:
-    """Promote ``depends_on`` edges between project modules from different repos
+    """Promote ``depends_on`` edges between project nodes from different repos
     to ``cross_repo_depends_on``, and stub-out external NuGet packages that are
     not present in the graph.
 
-    A "project module" is a ``module`` node whose metadata contains
-    ``{"kind": "project"}``.  Two such nodes are considered to be in *different
-    repos* when the top-level directory of their ``file_path`` (relative to the
-    scanned project root) differs — i.e. the first path component differs.
+    A "project node" is a node whose type is ``NodeType.PROJECT``.  Two such
+    nodes are considered to be in *different repos* when the top-level directory
+    of their ``file_path`` (relative to the scanned project root) differs —
+    i.e. the first path component differs.
 
-    For ``depends_on`` edges where the *target* module is not yet in the graph
+    For ``depends_on`` edges where the *target* is not yet in the graph
     a lightweight stub node is inserted so the edge can be resolved and the
     dependency is visible in the graph.
     """
     root = Path(project_path)
 
-    # Index all project-kind module nodes by their ID.
+    # Index all project nodes by their ID.
     project_nodes: dict[str, Node] = {}
     for node in result.nodes:
-        if (
-            node.type in (NodeType.MODULE, NodeType.MODULE.value)
-            and node.metadata.get("kind") == "project"
-        ):
+        if node.type in (NodeType.PROJECT, NodeType.PROJECT.value):
             project_nodes[node.id] = node
 
     if not project_nodes:
@@ -2103,15 +2223,28 @@ def _promote_cross_repo_edges(result: ScanResult, project_path: str) -> None:
                         )
                     )
         elif target_id not in existing_node_ids:
-            # Target module is unknown — create an external stub node.
-            stub_label = target_id.removeprefix("mod:")
-            stub_node = Node(
-                id=target_id,
-                type=NodeType.MODULE,
-                label=stub_label,
-                file_path=None,
-                metadata={"external": True, "source": "nuget"},
-            )
+            # Target is unknown — create an external stub node.
+            # Project-reference targets (project:X) get a project stub;
+            # NuGet package targets (mod:X) stay as module stubs.
+            ref_type = edge.metadata.get("reference_type", "")
+            if target_id.startswith("project:"):
+                stub_label = target_id.removeprefix("project:")
+                stub_node = Node(
+                    id=target_id,
+                    type=NodeType.PROJECT,
+                    label=stub_label,
+                    file_path=None,
+                    metadata={"external": True, "language": "csharp"},
+                )
+            else:
+                stub_label = target_id.removeprefix("mod:")
+                stub_node = Node(
+                    id=target_id,
+                    type=NodeType.MODULE,
+                    label=stub_label,
+                    file_path=None,
+                    metadata={"external": True, "source": "nuget"},
+                )
             new_nodes.append(stub_node)
             existing_node_ids.add(target_id)
 
@@ -2190,34 +2323,41 @@ def _scan_single_file(
         for node in file_nodes:
             node.metadata["source"] = "test"
 
-    # Create module node for ALL scanned languages (universal)
-    module_path = _file_to_module_path_universal(source_file, project_path, suffix)
-    module_id = f"mod:{module_path}"
-    module_label = source_file.stem
+    # Create a scanner-level module node only for real source-code files.
+    # Files whose suffix maps to a known language (e.g. .py, .cs, .ts, .go)
+    # always receive a mod: node.  Files whose suffix is "unknown"
+    # (e.g. .sql, .csproj, .config) may still produce recognizer-emitted
+    # nodes but do NOT get an additional scanner-level mod: node — this
+    # avoids flooding the graph with nodes for SQL migrations and config files.
+    language = _suffix_to_language(suffix)
+    if language != "unknown":
+        module_path = _file_to_module_path_universal(source_file, project_path, suffix)
+        module_id = f"mod:{module_path}"
+        module_label = source_file.stem
 
-    module_node = Node(
-        id=module_id,
-        type=NodeType.MODULE.value,
-        label=module_label,
-        file_path=rel_path.as_posix(),
-        metadata={
-            "package": module_path.rsplit(".", 1)[0] if "." in module_path else "",
-            "source": "test" if is_test else "production",
-            "language": _suffix_to_language(suffix),
-        },
-    )
-    file_nodes.append(module_node)
+        module_node = Node(
+            id=module_id,
+            type=NodeType.MODULE.value,
+            label=module_label,
+            file_path=rel_path.as_posix(),
+            metadata={
+                "package": module_path.rsplit(".", 1)[0] if "." in module_path else "",
+                "source": "test" if is_test else "production",
+                "language": language,
+            },
+        )
+        file_nodes.append(module_node)
 
-    # Create contains edges from module to all entities in this file
-    for node in file_nodes:
-        if node.id != module_id:
-            file_edges.append(Edge(
-                source=module_id,
-                target=node.id,
-                type=EdgeType.CONTAINS.value,
-                confidence=1.0,
-                metadata={"inferred": True},
-            ))
+        # Create contains edges from module to all entities in this file
+        for node in file_nodes:
+            if node.id != module_id:
+                file_edges.append(Edge(
+                    source=module_id,
+                    target=node.id,
+                    type=EdgeType.CONTAINS.value,
+                    confidence=1.0,
+                    metadata={"inferred": True},
+                ))
 
     combined = ScanResult(
         nodes=file_nodes,
@@ -2428,6 +2568,9 @@ def scan_project(
 
     # Decision marker inference (detects ADR comments in source files)
     _infer_decision_marker_edges(merged, file_contents)
+
+    # Link project: nodes to the mod: nodes they contain
+    _infer_project_contains_edges(merged)
 
     # Cross-repo NuGet/project dependency promotion
     _promote_cross_repo_edges(merged, project_path)

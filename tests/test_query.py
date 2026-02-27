@@ -4,7 +4,16 @@ import pytest
 from unittest.mock import patch
 
 from codegiraffe.graph import Node, Edge, GraphData, ArchGraph
-from codegiraffe.query import query_by_node, query_by_text, query_by_type, context_for_task, detect_drift
+from codegiraffe.query import (
+    query_by_node,
+    query_by_text,
+    query_by_type,
+    context_for_task,
+    detect_drift,
+    _score_node,
+    compute_risk_with_coverage,
+    _NODE_TYPE_WEIGHTS,
+)
 from codegiraffe.scanner import ScanResult
 from codegiraffe.schema import NodeType, EdgeType
 
@@ -398,9 +407,11 @@ class TestQueryByTextServerIntegration:
 
         result = codegiraffe_blast_radius(project_path=str(tmp_path), query="users")
 
-        # Should produce a report string, not an error
-        assert isinstance(result, str)
-        assert "Error" not in result or "no nodes" in result.lower()
+        # Should produce a structured dict, not an error dict (or an error about no nodes)
+        assert isinstance(result, dict)
+        has_match = "target" in result
+        no_match = "error" in result and "no nodes found" in result["error"].lower()
+        assert has_match or no_match
 
     def test_server_blast_radius_no_match_returns_message(self, tmp_path):
         import codegiraffe.server as server_module
@@ -421,7 +432,9 @@ class TestQueryByTextServerIntegration:
             project_path=str(tmp_path), query="zzznomatchzzz"
         )
 
-        assert "no nodes found" in result.lower()
+        assert isinstance(result, dict)
+        assert "error" in result
+        assert "no nodes found" in result["error"].lower()
 
     def test_server_blast_radius_no_params_returns_error(self, tmp_path):
         import codegiraffe.server as server_module
@@ -440,4 +453,154 @@ class TestQueryByTextServerIntegration:
 
         result = codegiraffe_blast_radius(project_path=str(tmp_path))
 
-        assert "error" in result.lower()
+        assert isinstance(result, dict)
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Type-aware node scoring tests
+# ---------------------------------------------------------------------------
+
+
+def _make_node(node_id: str, node_type: str, label: str) -> Node:
+    """Build a minimal Node for scoring tests."""
+    return Node(id=node_id, type=node_type, label=label)
+
+
+class TestNodeTypeWeights:
+    """_score_node applies _NODE_TYPE_WEIGHTS after keyword counting."""
+
+    def test_service_scores_higher_than_module_same_keywords(self):
+        """A service node must outscore a module node with identical keyword matches."""
+        keywords = ["auth"]
+        service_node = _make_node("service:AuthHelper", NodeType.SERVICE, "AuthHelper")
+        module_node = _make_node("mod:AuthHelper", NodeType.MODULE, "AuthHelper")
+
+        service_score = _score_node(service_node, keywords)
+        module_score = _score_node(module_node, keywords)
+
+        assert service_score > module_score
+
+    def test_endpoint_scores_higher_than_module_same_keywords(self):
+        """An endpoint node must outscore a module node with identical keyword matches."""
+        keywords = ["users"]
+        endpoint_node = _make_node("endpoint:/api/users", NodeType.ENDPOINT, "users")
+        module_node = _make_node("mod:users", NodeType.MODULE, "users")
+
+        endpoint_score = _score_node(endpoint_node, keywords)
+        module_score = _score_node(module_node, keywords)
+
+        assert endpoint_score > module_score
+
+    def test_database_table_scores_above_module_below_service(self):
+        """A database_table node must score above a module but below a service."""
+        keywords = ["payment"]
+        service_node = _make_node("service:PaymentService", NodeType.SERVICE, "payment")
+        table_node = _make_node("table:payment", NodeType.DATABASE_TABLE, "payment")
+        module_node = _make_node("mod:payment", NodeType.MODULE, "payment")
+
+        service_score = _score_node(service_node, keywords)
+        table_score = _score_node(table_node, keywords)
+        module_score = _score_node(module_node, keywords)
+
+        assert service_score > table_score > module_score
+
+    def test_zero_base_score_remains_zero_after_weight(self):
+        """Nodes with no keyword matches stay at 0 regardless of type weight."""
+        keywords = ["completely_unrelated_keyword"]
+        service_node = _make_node("service:AuthService", NodeType.SERVICE, "AuthService")
+
+        score = _score_node(service_node, keywords)
+
+        assert score == 0.0
+
+    def test_unlisted_type_uses_neutral_weight(self):
+        """Node types not in _NODE_TYPE_WEIGHTS get a 1.0x multiplier."""
+        keywords = ["queue"]
+        queue_node = _make_node("queue:notifications", NodeType.QUEUE, "queue")
+
+        # QUEUE is not in _NODE_TYPE_WEIGHTS, so weight should be 1.0
+        assert NodeType.QUEUE not in _NODE_TYPE_WEIGHTS
+
+        score = _score_node(queue_node, keywords)
+        # 1 keyword match * 1.0 weight = 1.0
+        assert score == pytest.approx(1.0)
+
+    def test_env_var_scores_lower_than_neutral_type(self):
+        """env_var type (weight 0.8) scores below unlisted types at same keyword count."""
+        keywords = ["database"]
+        env_node = _make_node("env:DATABASE_URL", NodeType.ENV_VAR, "database")
+        # QUEUE is neutral (1.0x)
+        queue_node = _make_node("queue:database_queue", NodeType.QUEUE, "database")
+
+        env_score = _score_node(env_node, keywords)
+        queue_score = _score_node(queue_node, keywords)
+
+        assert queue_score > env_score
+
+    def test_context_for_task_service_ranks_above_module(self):
+        """Integration: context_for_task returns service nodes ranked above modules."""
+        graph = ArchGraph()
+        # Both nodes match the keyword "auth" equally on text; service should win
+        graph.add_node(_make_node("service:AuthService", NodeType.SERVICE, "auth"))
+        graph.add_node(_make_node("mod:auth_module", NodeType.MODULE, "auth"))
+
+        result = context_for_task(graph, "auth", max_nodes=10)
+
+        scores = {
+            nid: n.metadata.get("_relevance_score", 0)
+            for nid, n in result.nodes.items()
+        }
+        assert "service:AuthService" in scores
+        assert "mod:auth_module" in scores
+        assert scores["service:AuthService"] > scores["mod:auth_module"]
+
+
+# ---------------------------------------------------------------------------
+# compute_risk_with_coverage tests (updated semantics)
+# ---------------------------------------------------------------------------
+
+
+class TestRiskCoverageNeutralWhenAbsent:
+    """compute_risk_with_coverage uses neutral 1.0x when coverage data is absent."""
+
+    def test_no_coverage_key_returns_neutral(self):
+        """When _test_coverage is not in metadata, no penalty is applied."""
+        node = _make_node("service:Foo", NodeType.SERVICE, "Foo")
+        # No _test_coverage key at all
+
+        result = compute_risk_with_coverage(0.5, node)
+
+        assert result == pytest.approx(0.5)
+
+    def test_coverage_key_zero_applies_penalty(self):
+        """When _test_coverage is present and 0.0, the 1.5x penalty is applied."""
+        node = _make_node("service:Uncovered", NodeType.SERVICE, "Uncovered")
+        node.metadata["_test_coverage"] = 0.0
+
+        result = compute_risk_with_coverage(0.4, node)
+
+        assert result == pytest.approx(0.4 * 1.5)
+
+    def test_coverage_key_above_zero_no_penalty(self):
+        """When _test_coverage is present and > 0, no penalty is applied."""
+        node = _make_node("service:Covered", NodeType.SERVICE, "Covered")
+        node.metadata["_test_coverage"] = 80.0
+
+        result = compute_risk_with_coverage(0.3, node)
+
+        assert result == pytest.approx(0.3)
+
+    def test_multiple_nodes_no_coverage_no_inflation(self):
+        """A batch of nodes without coverage keys all receive neutral multipliers."""
+        nodes = [
+            _make_node(f"service:Svc{i}", NodeType.SERVICE, f"Svc{i}")
+            for i in range(5)
+        ]
+        base_risk = 0.2
+
+        for node in nodes:
+            result = compute_risk_with_coverage(base_risk, node)
+            assert result == pytest.approx(base_risk), (
+                f"Node {node.id} should not be penalised when coverage data is absent"
+            )

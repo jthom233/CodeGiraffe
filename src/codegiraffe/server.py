@@ -22,9 +22,11 @@ from codegiraffe.federation import GraphFederation
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 from codegiraffe.query import (
     compute_blast_radius,
+    compute_enhanced_blast_radius,
     context_for_task,
     detect_drift,
     file_coupling,
+    generate_enhanced_impact_summary,
     generate_impact_summary,
     get_contracts,
     map_files_to_nodes,
@@ -617,19 +619,31 @@ def codegiraffe_blast_radius(
     query: str | None = None,
     include_upstream: bool = False,
     max_depth: int | None = None,
-) -> str:
+) -> dict:
     """Analyze the blast radius of changing a specific node.
 
-    Shows what breaks if you change this node -- downstream dependencies
-    ranked by severity (direct, transitive, indirect), plus any circular
-    dependencies and hotspots in the impact zone.
+    Shows what breaks if you change this node -- interface contracts, sibling
+    implementations, interface consumers, cross-repo consumers, data layer
+    dependencies, downstream dependencies ranked by severity (direct,
+    transitive, indirect), upstream dependencies, circular dependencies, and
+    hotspots in the impact zone.
 
-    Provide *node_id* for an exact lookup, or *query* to find a matching node
-    by case-insensitive substring search across node IDs, labels, and metadata.
-    When *query* matches multiple nodes the best match (first result) is used
-    and the others are listed so you can refine.
+    Provide *node_id* for an exact lookup, or *query* to find a matching node.
+    When *query* is provided two strategies are tried and the best result is
+    selected:
 
-    Returns a human-readable markdown impact report.
+    - **Substring match** (good for partial class/symbol names)
+    - **Semantic match** via context_for_task (good for natural-language phrases
+      such as "SSH password changer" or "unix account changer")
+
+    The best candidate is chosen by preferring exact label matches first, then
+    high-relevance semantic results for service/module/table nodes.  All other
+    matches are listed so you can refine with a more specific query or node_id.
+
+    The *include_upstream* parameter is accepted for backwards compatibility
+    but is now a no-op -- upstream is always included in the report.
+
+    Returns structured impact data as a dict.
     """
     try:
         # Clamp max_depth to the configured maximum to prevent excessive traversal.
@@ -644,54 +658,113 @@ def codegiraffe_blast_radius(
             target_id = node_id
             other_matches: list[str] = []
         elif query is not None:
-            # Find nodes matching the query
-            matches_data = query_by_text(graph, query)
-            matched_ids = list(matches_data.nodes.keys())
-            if not matched_ids:
-                return f"No nodes found matching query '{query}'."
-            target_id = matched_ids[0]
-            other_matches = matched_ids[1:]
-        else:
-            return "Error: provide either node_id or query"
+            # Strategy A: substring / label match
+            text_matches = query_by_text(graph, query)
+            text_ids = list(text_matches.nodes.keys())
 
-        blast = compute_blast_radius(
-            graph, target_id, include_upstream=include_upstream, max_depth=max_depth
+            # Strategy B: semantic match via context_for_task
+            context_matches = context_for_task(graph, query, max_nodes=10, use_embeddings=True)
+            context_ids = sorted(
+                context_matches.nodes.keys(),
+                key=lambda nid: context_matches.nodes[nid].metadata.get("_relevance_score", 0),
+                reverse=True,
+            )
+
+            preferred_types = {"service", "module", "database_table", "endpoint"}
+
+            target_id = None
+
+            # Prefer an exact label match from the substring strategy
+            for nid in text_ids:
+                node = text_matches.nodes[nid]
+                if node.label.lower() == query.lower():
+                    target_id = nid
+                    break
+
+            if target_id is None:
+                # Use semantic results, preferring architecturally meaningful node types
+                for nid in context_ids:
+                    node = context_matches.nodes[nid]
+                    if node.type in preferred_types:
+                        target_id = nid
+                        break
+                if target_id is None and context_ids:
+                    target_id = context_ids[0]
+
+            # Fall back to the best substring match if semantic returned nothing
+            if target_id is None and text_ids:
+                target_id = text_ids[0]
+
+            if target_id is None:
+                return {"error": f"No nodes found matching query '{query}'."}
+
+            # Collect other candidates from both strategies (deduplicated)
+            all_ids = list(dict.fromkeys(text_ids + context_ids))
+            other_matches = [nid for nid in all_ids if nid != target_id][:50]
+        else:
+            return {"error": "provide either node_id or query"}
+
+        blast = compute_enhanced_blast_radius(
+            graph, target_id, max_depth=max_depth
         )
-        report = generate_impact_summary(blast, graph)
+
+        # Compute total affected nodes (unique across all sections)
+        all_impacted: set[str] = set()
+        for section_key in ("siblings", "interface_consumers", "cross_repo_consumers", "data_layer", "downstream", "upstream"):
+            for item in blast.get(section_key, []):
+                all_impacted.add(item["node_id"])
+        total_affected = len(all_impacted)
+
+        # Classify downstream by severity
+        downstream = blast.get("downstream", [])
+        direct_impact = [n for n in downstream if n["severity"] in ("direct", "uncertain_direct")]
+        transitive_impact = [n for n in downstream if n["severity"] in ("transitive", "uncertain_transitive")]
+
+        result: dict = {
+            "target": blast["target_node"],
+            "total_affected": total_affected,
+            "interfaces": blast.get("interfaces", []),
+            "siblings": blast.get("siblings", []),
+            "interface_consumers": blast.get("interface_consumers", []),
+            "cross_repo_consumers": blast.get("cross_repo_consumers", []),
+            "data_layer": blast.get("data_layer", []),
+            "direct_impact": direct_impact,
+            "transitive_impact": transitive_impact,
+            "downstream": downstream,
+            "upstream": blast.get("upstream", []),
+            "cycles": blast.get("cycles", []),
+            "critical_paths": blast.get("critical_paths", []),
+            "contract_impact": blast.get("contract_impact", []),
+        }
 
         if other_matches:
-            note = (
-                "\n\n---\n**Note:** The query also matched these other nodes; "
-                "re-run with a more specific query or use `node_id` to target one:\n"
-                + "\n".join(f"- `{nid}`" for nid in other_matches)
-            )
-            report = report + note
+            result["other_matches"] = other_matches
 
-        return report
+        return result
     except ValueError as exc:
-        return str(exc)
+        return {"error": str(exc)}
     except Exception as exc:
-        return f"Error computing blast radius: {exc}"
+        return {"error": f"Error computing blast radius: {exc}"}
 
 
 @mcp.tool()
 def codegiraffe_risk_assessment(
     project_path: str,
     node_ids: list[str] | None = None,
-) -> str:
+) -> dict:
     """Assess architectural risk for specific nodes or the entire graph.
 
     Risk score = (degree_centrality * 0.4) + (betweenness_centrality * 0.4)
                  + (descendant_count / total_nodes * 0.2)
 
     If node_ids provided: assess those nodes. If None: top-10 riskiest nodes.
-    Returns markdown report ranked by risk score.
+    Returns structured risk data ranked by risk score.
     """
     try:
         graph = _ensure_graph(project_path)
         total_nodes = len(graph.graph)
         if total_nodes == 0:
-            return "Graph is empty -- no nodes to assess."
+            return {"error": "Graph is empty -- no nodes to assess.", "nodes": [], "total_graph_nodes": 0}
 
         degree = nx.degree_centrality(graph.graph)
         betweenness = graph.get_betweenness_centrality()
@@ -720,15 +793,24 @@ def codegiraffe_risk_assessment(
                 "betweenness_centrality": round(betweenness.get(nid, 0.0), 4),
                 "blast_radius_count": desc_count,
                 "file_path": node_data.file_path,
+                "risk_explanation": _risk_explanation({
+                    "degree_centrality": round(degree.get(nid, 0.0), 4),
+                    "betweenness_centrality": round(betweenness.get(nid, 0.0), 4),
+                    "blast_radius_count": desc_count,
+                }),
             })
 
         scored.sort(key=lambda x: x["risk_score"], reverse=True)
         if node_ids is None:
             scored = scored[:10]
 
-        return _format_risk_report(scored, total_nodes)
+        return {
+            "total_graph_nodes": total_nodes,
+            "nodes_assessed": len(scored),
+            "nodes": scored,
+        }
     except Exception as exc:
-        return f"Error computing risk assessment: {exc}"
+        return {"error": f"Error computing risk assessment: {exc}", "nodes": [], "total_graph_nodes": 0}
 
 
 @mcp.tool()
@@ -1263,7 +1345,7 @@ def codegiraffe_validate_changes(
     project_path: str,
     diff: str | None = None,
     auto: bool = True,
-) -> str:
+) -> dict:
     """Analyze uncommitted (or arbitrary) changes against the architecture graph to detect incomplete modifications.
 
     Parses a diff, maps changed files to graph nodes, computes blast radius,
@@ -1274,27 +1356,38 @@ def codegiraffe_validate_changes(
     try:
         graph = _ensure_graph(project_path)
     except Exception as exc:
-        return f"Error: {exc}"
+        return {"error": str(exc)}
 
     # Obtain the diff text
     raw_diff: str | None = diff
     if raw_diff is None:
         if not auto:
-            return "Error: no diff provided and auto=False. Pass a diff string or set auto=True."
+            return {"error": "no diff provided and auto=False. Pass a diff string or set auto=True."}
         try:
             raw_diff = get_uncommitted_diff(project_path)
         except NotAGitRepoError:
-            return f"Error: '{project_path}' is not a git repository."
+            return {"error": f"'{project_path}' is not a git repository."}
 
     if not raw_diff or not raw_diff.strip():
-        return "No uncommitted changes found."
+        return {"status": "no_changes", "message": "No uncommitted changes found."}
 
     diff_files = parse_diff(raw_diff)
     if not diff_files:
-        return "No uncommitted changes found."
+        return {"status": "no_changes", "message": "No uncommitted changes found."}
 
     report = validate_changes(graph, diff_files)
-    return _format_validation_report(report)
+    return {
+        "changed_files": [
+            {"path": df.path, "status": df.status}
+            for df in report.changed_files
+        ],
+        "changed_nodes": report.changed_nodes,
+        "total_blast_radius": report.total_blast_radius,
+        "covered_nodes": report.covered_nodes,
+        "uncovered_nodes": report.uncovered_nodes,
+        "contract_violations": report.contract_violations,
+        "recommendations": report.recommendations,
+    }
 
 
 @mcp.tool()
@@ -1303,7 +1396,7 @@ def codegiraffe_suggest_tests(
     diff: str | None = None,
     auto: bool = True,
     max_suggestions: int = 20,
-) -> str:
+) -> dict:
     """Suggest test files to run based on uncommitted (or arbitrary) changes.
 
     Uses graph relationships, naming conventions, and blast radius analysis
@@ -1314,27 +1407,40 @@ def codegiraffe_suggest_tests(
     try:
         graph = _ensure_graph(project_path)
     except Exception as exc:
-        return f"Error: {exc}"
+        return {"error": str(exc), "suggestions": []}
 
     # Obtain the diff text
     raw_diff: str | None = diff
     if raw_diff is None:
         if not auto:
-            return "Error: no diff provided and auto=False. Pass a diff string or set auto=True."
+            return {"error": "no diff provided and auto=False. Pass a diff string or set auto=True.", "suggestions": []}
         try:
             raw_diff = get_uncommitted_diff(project_path)
         except NotAGitRepoError:
-            return f"Error: '{project_path}' is not a git repository."
+            return {"error": f"'{project_path}' is not a git repository.", "suggestions": []}
 
     if not raw_diff or not raw_diff.strip():
-        return "No uncommitted changes found."
+        return {"status": "no_changes", "message": "No uncommitted changes found.", "suggestions": []}
 
     diff_files = parse_diff(raw_diff)
     if not diff_files:
-        return "No uncommitted changes found."
+        return {"status": "no_changes", "message": "No uncommitted changes found.", "suggestions": []}
 
     suggestions = suggest_tests(graph, diff_files, max_suggestions=max_suggestions)
-    return _format_test_suggestions(suggestions)
+    suggestion_dicts = [
+        {
+            "file_path": s.file_path,
+            "score": round(s.score, 3),
+            "reason": s.reason,
+            "strategy": s.strategy,
+            "relevance": "high" if s.score >= 0.7 else ("medium" if s.score >= 0.3 else "low"),
+        }
+        for s in suggestions
+    ]
+    return {
+        "total_suggestions": len(suggestion_dicts),
+        "suggestions": suggestion_dicts,
+    }
 
 
 @mcp.tool()

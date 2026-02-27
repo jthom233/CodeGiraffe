@@ -176,6 +176,60 @@ class TestArchGraphAddEdgeUpdatesExisting:
         assert data.edges[0].metadata == {"version": 2}
 
 
+class TestArchGraphMultipleEdgesPreserved:
+    """MultiDiGraph correctness: multiple edge types between the same node pair
+    must all be preserved (the original DiGraph silently dropped all but the last)."""
+
+    def test_parallel_edges_different_types_both_preserved(self):
+        """Adding two edges with different types between the same pair keeps both."""
+        graph = ArchGraph()
+        node_a = Node(id="mod:app", type="module", label="app")
+        node_b = Node(id="service:Svc", type="service", label="Svc")
+        graph.add_node(node_a)
+        graph.add_node(node_b)
+
+        edge_contains = Edge(source="mod:app", target="service:Svc", type=EdgeType.CONTAINS)
+        edge_calls = Edge(source="mod:app", target="service:Svc", type=EdgeType.CALLS)
+        graph.add_edge(edge_contains)
+        graph.add_edge(edge_calls)
+
+        data = graph.to_data()
+        edge_types = {e.type for e in data.edges}
+        assert EdgeType.CONTAINS in edge_types, "contains edge was dropped"
+        assert EdgeType.CALLS in edge_types, "calls edge was dropped"
+        assert len(data.edges) == 2
+
+    def test_parallel_edges_roundtrip(self):
+        """Parallel edges survive a to_data() -> ArchGraph(data) roundtrip."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="A", type="service", label="A"))
+        graph.add_node(Node(id="B", type="service", label="B"))
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS))
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.IMPORTS))
+
+        data = graph.to_data()
+        restored = ArchGraph(data)
+        restored_data = restored.to_data()
+
+        edge_types = {e.type for e in restored_data.edges}
+        assert EdgeType.CALLS in edge_types
+        assert EdgeType.IMPORTS in edge_types
+        assert len(restored_data.edges) == 2
+
+    def test_same_type_same_pair_updates_not_duplicates(self):
+        """Adding the same (source, target, type) twice updates, does not duplicate."""
+        graph = ArchGraph()
+        graph.add_node(Node(id="A", type="service", label="A"))
+        graph.add_node(Node(id="B", type="service", label="B"))
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS, metadata={"v": 1}))
+        graph.add_edge(Edge(source="A", target="B", type=EdgeType.CALLS, metadata={"v": 2}))
+
+        data = graph.to_data()
+        calls_edges = [e for e in data.edges if e.type == EdgeType.CALLS]
+        assert len(calls_edges) == 1
+        assert calls_edges[0].metadata == {"v": 2}
+
+
 class TestArchGraphRemoveNode:
     """test_remove_node -- remove a node, verify its edges are also removed."""
 

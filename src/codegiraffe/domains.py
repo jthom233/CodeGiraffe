@@ -200,6 +200,8 @@ def list_domains(graph: ArchGraph) -> list[dict[str, Any]]:
             continue
 
         # Count predecessors connected via belongs_to
+        # MultiDiGraph.get_edge_data(u, v) returns {key: {attrs}} so we
+        # check for key membership rather than a "key" attribute.
         member_count = 0
         member_ids: list[str] = []
         for predecessor in graph.graph.predecessors(nid):
