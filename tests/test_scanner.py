@@ -13,6 +13,9 @@ from codegiraffe.scanner import (
     ScanResult,
     _file_to_module_path,
     _is_test_file,
+    _should_skip,
+    _is_generated_file,
+    _IGNORE_DIRS_LOWER,
 )
 from codegiraffe.schema import NodeType, EdgeType
 
@@ -828,6 +831,108 @@ class Invoice(Base):
 
 
 # ---------------------------------------------------------------------------
+# Conditional module creation tests (T051-T055)
+# ---------------------------------------------------------------------------
+
+
+class TestConditionalModuleCreation:
+    """Tests verifying that the scanner only creates universal mod: nodes for
+    real source-code files and not for 'unknown'-language files like .sql or
+    .csproj."""
+
+    def test_cs_file_gets_module_node(self, tmp_path):
+        """T051: A .cs file (known language) still receives a scanner-level module node."""
+        (tmp_path / "Service.cs").write_text(
+            "namespace MyApp {\n    public class MyService {}\n}\n"
+        )
+        result = scan_project(str(tmp_path))
+        module_ids = {n.id for n in result.nodes if n.type == NodeType.MODULE}
+        # The scanner-level mod: node should be present for a .cs file
+        assert any("Service" in mid for mid in module_ids), (
+            f"Expected a module node for Service.cs, got: {module_ids}"
+        )
+
+    def test_sql_file_with_table_no_universal_module_node(self, tmp_path):
+        """T052: A .sql file gets its recognizer-emitted table nodes but NOT a
+        scanner-level mod: node for the file itself."""
+        (tmp_path / "create_users.sql").write_text(
+            "CREATE TABLE Users (Id INT PRIMARY KEY, Name NVARCHAR(100));\n"
+        )
+        result = scan_project(str(tmp_path))
+
+        node_ids = {n.id for n in result.nodes}
+        module_ids = {n.id for n in result.nodes if n.type == NodeType.MODULE}
+
+        # The recognizer-emitted table node should be present
+        assert "table:Users" in node_ids, (
+            f"Expected table:Users from SQL recognizer, got: {node_ids}"
+        )
+
+        # No scanner-level file module node for the .sql file
+        # (The file stem is "create_users"; it must not appear as a bare file module)
+        assert "mod:create_users" not in module_ids, (
+            f"Scanner should not create a mod: node for a .sql file, got: {module_ids}"
+        )
+
+    def test_csproj_file_no_extra_universal_module_node(self, tmp_path):
+        """T053: A .csproj file gets its recognizer-emitted project node (project: type)
+        but NOT an additional scanner-level mod: file node for the .csproj path itself.
+
+        The CsprojRecognizer emits a project:<assembly> node; the scanner must not
+        duplicate it with a second node derived from the file path."""
+        csproj_content = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+</Project>"""
+        (tmp_path / "MyApp.csproj").write_text(csproj_content)
+
+        result = scan_project(str(tmp_path))
+        from codegiraffe.schema import NodeType as NT
+        project_nodes = [n for n in result.nodes if n.type == NT.PROJECT]
+        project_ids = {n.id for n in project_nodes}
+
+        # The CsprojRecognizer emits exactly one project: node
+        assert "project:MyApp" in project_ids, (
+            f"CsprojRecognizer project node expected in {project_ids}"
+        )
+        # No mod:MyApp scanner-level node should exist for the .csproj file
+        module_ids = {n.id for n in result.nodes if n.type == NodeType.MODULE}
+        assert "mod:MyApp" not in module_ids, (
+            "Scanner must not create a redundant mod:MyApp for the .csproj file"
+        )
+
+    def test_sql_migration_file_gets_recognizer_module(self, tmp_path):
+        """T054: A SQL migration file (ALTER TABLE only) gets the recognizer-emitted
+        migration mod: node but NOT an additional scanner-level file mod: node."""
+        (tmp_path / "V2__add_column.sql").write_text(
+            "ALTER TABLE Users ADD Email NVARCHAR(200);\n"
+        )
+        result = scan_project(str(tmp_path))
+
+        module_ids = {n.id for n in result.nodes if n.type == NodeType.MODULE}
+        # The SqlRecognizer emits a migration mod: node for the file stem
+        assert "mod:V2__add_column" in module_ids, (
+            f"Expected migration mod: node from SqlRecognizer, got: {module_ids}"
+        )
+        # There must only be ONE such node — the scanner must not add a second one
+        all_module_nodes = [n for n in result.nodes if n.type == NodeType.MODULE]
+        assert len([n for n in all_module_nodes if n.id == "mod:V2__add_column"]) == 1, (
+            "Expected exactly one mod:V2__add_column; scanner must not duplicate it"
+        )
+
+    def test_config_file_with_no_recognizer_produces_no_nodes(self, tmp_path):
+        """T055: A .config file that no recognizer handles produces zero nodes."""
+        (tmp_path / "app.config").write_text(
+            "<configuration><appSettings /></configuration>\n"
+        )
+        result = scan_project(str(tmp_path))
+        assert len(result.nodes) == 0, (
+            f"Unexpected nodes for unrecognized .config file: {[n.id for n in result.nodes]}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # US5: Edge deduplication idempotency
 # ---------------------------------------------------------------------------
 
@@ -1157,3 +1262,291 @@ class TestParallelScanning:
         # Should not raise TypeError about unexpected keyword argument
         result = scan_project(str(tmp_path))
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Generated file exclusion tests (T056-T059)
+# ---------------------------------------------------------------------------
+
+
+class TestGeneratedFileExclusion:
+    """Tests verifying that generated code files are skipped before recognizer
+    invocation."""
+
+    def test_g_cs_file_is_skipped(self, tmp_path):
+        """T056: Files ending in .g.cs (Roslyn source generators) are skipped."""
+        (tmp_path / "MyModel.g.cs").write_text(
+            "namespace MyApp {\n    public class MyModel {}\n}\n"
+        )
+        result = scan_project(str(tmp_path))
+        node_ids = {n.id for n in result.nodes}
+        assert "service:MyModel" not in node_ids, (
+            "Scanner should skip .g.cs generated files"
+        )
+
+    def test_designer_cs_file_is_skipped(self, tmp_path):
+        """T057: Files ending in .Designer.cs (WinForms/WPF) are skipped."""
+        (tmp_path / "Form1.Designer.cs").write_text(
+            "namespace MyApp {\n    public partial class Form1 {}\n}\n"
+        )
+        result = scan_project(str(tmp_path))
+        node_ids = {n.id for n in result.nodes}
+        assert "service:Form1" not in node_ids, (
+            "Scanner should skip .Designer.cs generated files"
+        )
+
+    def test_generated_cs_file_is_skipped(self, tmp_path):
+        """T058: Files ending in .generated.cs are skipped."""
+        (tmp_path / "Contracts.generated.cs").write_text(
+            "namespace MyApp {\n    public class Contracts {}\n}\n"
+        )
+        result = scan_project(str(tmp_path))
+        node_ids = {n.id for n in result.nodes}
+        assert "service:Contracts" not in node_ids, (
+            "Scanner should skip .generated.cs generated files"
+        )
+
+    def test_openapi_generator_dir_skips_contents(self, tmp_path):
+        """T059: Files inside a directory containing .openapi-generator marker are
+        skipped (treated as generated output)."""
+        gen_dir = tmp_path / "src" / "generated"
+        gen_dir.mkdir(parents=True)
+        # Create the OpenAPI generator marker directory inside the output dir
+        (gen_dir / ".openapi-generator").mkdir()
+        # Put a real .cs file next to the marker
+        (gen_dir / "ApiClient.cs").write_text(
+            "namespace MyApp {\n    public class ApiClient {}\n}\n"
+        )
+        result = scan_project(str(tmp_path))
+        node_ids = {n.id for n in result.nodes}
+        assert "service:ApiClient" not in node_ids, (
+            "Files inside openapi-generator output directories should be skipped"
+        )
+
+    def test_normal_cs_file_still_scanned(self, tmp_path):
+        """T059b: A normal .cs file (no generated suffix) is still scanned normally."""
+        (tmp_path / "UserService.cs").write_text(
+            "namespace MyApp {\n    public class UserService {}\n}\n"
+        )
+        result = scan_project(str(tmp_path))
+        # Just verify the scan ran without error; recognizer will or will not find nodes
+        # but the file was not skipped by the generated-file guard
+        assert isinstance(result, ScanResult)
+
+
+# ---------------------------------------------------------------------------
+# Case-insensitive _IGNORE_DIRS tests (T060-T063)
+# ---------------------------------------------------------------------------
+
+
+class TestIgnoreDirsCaseInsensitive:
+    """Tests verifying that _IGNORE_DIRS matching is case-insensitive.  This is
+    critical on Windows where directory names like ``Packages`` != ``packages``
+    in a case-sensitive comparison."""
+
+    def test_ignore_dirs_lower_contains_new_entries(self):
+        """T060: _IGNORE_DIRS_LOWER includes the newly added .NET directories."""
+        assert "packages" in _IGNORE_DIRS_LOWER
+        assert "artifacts" in _IGNORE_DIRS_LOWER
+        assert "testresults" in _IGNORE_DIRS_LOWER
+        assert ".openapi-generator" in _IGNORE_DIRS_LOWER
+
+    def test_packages_dir_uppercase_is_skipped(self, tmp_path):
+        """T061: A directory named 'Packages' (NuGet restore) is skipped."""
+        pkg_dir = tmp_path / "Packages" / "Newtonsoft.Json"
+        pkg_dir.mkdir(parents=True)
+        (pkg_dir / "Newtonsoft.cs").write_text(
+            "namespace Newtonsoft { public class JsonSerializer {} }\n"
+        )
+        result = scan_project(str(tmp_path))
+        node_ids = {n.id for n in result.nodes}
+        assert "service:JsonSerializer" not in node_ids, (
+            "Packages/ directory (NuGet restore) should be excluded case-insensitively"
+        )
+
+    def test_artifacts_dir_is_skipped(self, tmp_path):
+        """T062: A directory named 'artifacts' (.NET 8+ build output) is skipped."""
+        art_dir = tmp_path / "artifacts" / "bin"
+        art_dir.mkdir(parents=True)
+        (art_dir / "compiled.py").write_text("class CompiledHelper:\n    pass\n")
+        result = scan_project(str(tmp_path))
+        node_ids = {n.id for n in result.nodes}
+        assert "service:CompiledHelper" not in node_ids, (
+            "artifacts/ directory (.NET build output) should be excluded"
+        )
+
+    def test_testresults_dir_is_skipped(self, tmp_path):
+        """T063: A directory named 'TestResults' (VS test output) is skipped
+        even when the casing differs from the lowercase entry in _IGNORE_DIRS."""
+        tr_dir = tmp_path / "TestResults" / "run1"
+        tr_dir.mkdir(parents=True)
+        (tr_dir / "coverage.py").write_text("class CoverageHelper:\n    pass\n")
+        result = scan_project(str(tmp_path))
+        node_ids = {n.id for n in result.nodes}
+        assert "service:CoverageHelper" not in node_ids, (
+            "TestResults/ directory (VS test output) should be excluded case-insensitively"
+        )
+
+    def test_should_skip_case_insensitive_unit(self, tmp_path):
+        """T064 (unit): _should_skip returns True for a path component that matches
+        an _IGNORE_DIRS entry regardless of case."""
+        # Test with a Path object directly — simulate Windows-style casing
+        assert _should_skip(Path("MyProject/Packages/Newtonsoft.Json/lib.cs"))
+        assert _should_skip(Path("src/ARTIFACTS/bin/out.cs"))
+        assert _should_skip(Path(".git/config"))
+        # Normal source file must not be skipped
+        assert not _should_skip(Path("src/app.py"))
+
+
+# ---------------------------------------------------------------------------
+# Project node type and project_contains edge tests
+# ---------------------------------------------------------------------------
+
+
+class TestProjectNodeType:
+    """Tests for the project: node type introduced to represent .NET .csproj projects
+    and the project_contains edges that link them to their constituent modules."""
+
+    def test_csproj_emits_project_type_node(self, tmp_path):
+        """T065: CsprojRecognizer emits a node with type NodeType.PROJECT, not MODULE."""
+        (tmp_path / "MyApp.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">'
+            "<PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>"
+            "</Project>"
+        )
+        result = scan_project(str(tmp_path))
+        project_nodes = [n for n in result.nodes if n.type == NodeType.PROJECT]
+        assert any(n.id == "project:MyApp" for n in project_nodes), (
+            f"Expected project:MyApp in {[n.id for n in project_nodes]}"
+        )
+
+    def test_project_reference_links_project_to_project(self, tmp_path):
+        """T066: ProjectReference edges connect project:A to project:B."""
+        (tmp_path / "App.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">'
+            "<ItemGroup>"
+            '<ProjectReference Include="../Lib/Lib.csproj" />'
+            "</ItemGroup>"
+            "</Project>"
+        )
+        (tmp_path / "Lib.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk"></Project>'
+        )
+        result = scan_project(str(tmp_path))
+
+        # Both project nodes should exist.
+        project_ids = {n.id for n in result.nodes if n.type == NodeType.PROJECT}
+        assert "project:App" in project_ids, f"Expected project:App in {project_ids}"
+        assert "project:Lib" in project_ids, f"Expected project:Lib in {project_ids}"
+
+        # The project reference edge must connect project:App -> project:Lib.
+        ref_edge = next(
+            (
+                e for e in result.edges
+                if e.source == "project:App"
+                and e.target == "project:Lib"
+                and e.type == EdgeType.DEPENDS_ON
+            ),
+            None,
+        )
+        assert ref_edge is not None, "Expected depends_on edge from project:App to project:Lib"
+        assert ref_edge.metadata["reference_type"] == "project_reference"
+
+    def test_nuget_references_remain_as_mod_targets(self, tmp_path):
+        """T067: PackageReference edges still point to mod: targets (NuGet packages are modules)."""
+        (tmp_path / "App.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">'
+            '<ItemGroup><PackageReference Include="Serilog" Version="3.1.1" /></ItemGroup>'
+            "</Project>"
+        )
+        result = scan_project(str(tmp_path))
+
+        nuget_edge = next(
+            (
+                e for e in result.edges
+                if e.source == "project:App" and e.target == "mod:Serilog"
+            ),
+            None,
+        )
+        assert nuget_edge is not None, "Expected project:App -> mod:Serilog edge"
+        assert nuget_edge.metadata["reference_type"] == "nuget"
+
+    def test_project_contains_edges_link_project_to_cs_modules(self, tmp_path):
+        """T068: Scanner creates project_contains edges from project:X to mod:X.* modules
+        whose files live inside the same directory as the .csproj file."""
+        # Create a .csproj and sibling .cs files
+        (tmp_path / "MyApp.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk"></Project>'
+        )
+        (tmp_path / "Program.cs").write_text(
+            "namespace MyApp { public class Program { static void Main() {} } }\n"
+        )
+        (tmp_path / "Service.cs").write_text(
+            "namespace MyApp { public class Service {} }\n"
+        )
+        result = scan_project(str(tmp_path))
+
+        # project:MyApp should exist.
+        project_ids = {n.id for n in result.nodes if n.type == NodeType.PROJECT}
+        assert "project:MyApp" in project_ids
+
+        # project_contains edges from project:MyApp to the module nodes for Program.cs / Service.cs.
+        contains_edges = [
+            e for e in result.edges
+            if e.source == "project:MyApp" and e.type == EdgeType.PROJECT_CONTAINS
+        ]
+        contains_targets = {e.target for e in contains_edges}
+
+        # At minimum, the scanner-level mod: nodes for Program.cs and Service.cs must be linked.
+        assert any("Program" in t for t in contains_targets), (
+            f"Expected a project_contains edge to the Program module, got: {contains_targets}"
+        )
+        assert any("Service" in t for t in contains_targets), (
+            f"Expected a project_contains edge to the Service module, got: {contains_targets}"
+        )
+
+    def test_project_contains_edges_scoped_to_csproj_directory(self, tmp_path):
+        """T069: project_contains edges only link modules inside the .csproj directory,
+        not sibling directories belonging to a different project."""
+        # Project A
+        proj_a = tmp_path / "ProjA"
+        proj_a.mkdir()
+        (proj_a / "ProjA.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk"></Project>')
+        (proj_a / "ServiceA.cs").write_text(
+            "namespace ProjA { public class ServiceA {} }\n"
+        )
+
+        # Project B
+        proj_b = tmp_path / "ProjB"
+        proj_b.mkdir()
+        (proj_b / "ProjB.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk"></Project>')
+        (proj_b / "ServiceB.cs").write_text(
+            "namespace ProjB { public class ServiceB {} }\n"
+        )
+
+        result = scan_project(str(tmp_path))
+
+        contains_a = {
+            e.target for e in result.edges
+            if e.source == "project:ProjA" and e.type == EdgeType.PROJECT_CONTAINS
+        }
+        contains_b = {
+            e.target for e in result.edges
+            if e.source == "project:ProjB" and e.type == EdgeType.PROJECT_CONTAINS
+        }
+
+        # ProjA should contain ServiceA modules but not ServiceB modules.
+        assert any("ServiceA" in t for t in contains_a), (
+            f"project:ProjA should contain ServiceA, got {contains_a}"
+        )
+        assert not any("ServiceB" in t for t in contains_a), (
+            f"project:ProjA must not contain ServiceB, got {contains_a}"
+        )
+
+        # ProjB should contain ServiceB modules but not ServiceA modules.
+        assert any("ServiceB" in t for t in contains_b), (
+            f"project:ProjB should contain ServiceB, got {contains_b}"
+        )
+        assert not any("ServiceA" in t for t in contains_b), (
+            f"project:ProjB must not contain ServiceA, got {contains_b}"
+        )

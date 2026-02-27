@@ -390,11 +390,15 @@ class TestBlastRadiusTool:
         codegiraffe_add_relation(project_path, "C", "D", "calls")
         return project_path
 
-    def test_blast_radius_returns_markdown(self, tmp_path):
-        """Blast radius returns a markdown impact report."""
+    def test_blast_radius_returns_dict(self, tmp_path):
+        """Blast radius returns a structured dict impact report."""
         project_path = self._build_chain_project(tmp_path)
         result = codegiraffe_blast_radius(project_path, node_id="A")
-        assert "## Impact Analysis" in result
+        assert isinstance(result, dict)
+        assert "target" in result
+        assert "total_affected" in result
+        assert "downstream" in result
+        assert "upstream" in result
 
     def test_blast_radius_missing_node(self, tmp_path):
         """Blast radius handles missing node gracefully (no exception)."""
@@ -402,19 +406,21 @@ class TestBlastRadiusTool:
         project_path = str(tmp_path)
         codegiraffe_init(project_path)
         result = codegiraffe_blast_radius(project_path, node_id="nonexistent_node")
-        # Should return an error string, not raise an exception
-        assert isinstance(result, str)
-        assert "not found" in result.lower()
+        # Should return an error dict, not raise an exception
+        assert isinstance(result, dict)
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
     def test_blast_radius_with_upstream(self, tmp_path):
-        """Blast radius with include_upstream=True adds upstream section."""
+        """Blast radius with include_upstream=True includes upstream field."""
         project_path = self._build_chain_project(tmp_path)
         result = codegiraffe_blast_radius(
             project_path, node_id="B", include_upstream=True
         )
-        assert "## Impact Analysis" in result
-        # Upstream section should appear since A -> B exists
-        assert "Upstream" in result
+        assert isinstance(result, dict)
+        assert "upstream" in result
+        # Upstream section should have entries since A -> B exists
+        assert isinstance(result["upstream"], list)
 
     def test_blast_radius_with_max_depth(self, tmp_path):
         """Blast radius with max_depth limits results."""
@@ -426,11 +432,13 @@ class TestBlastRadiusTool:
         result_full = codegiraffe_blast_radius(
             project_path, node_id="A"
         )
-        assert "## Impact Analysis" in result_limited
-        assert "## Impact Analysis" in result_full
+        assert isinstance(result_limited, dict)
+        assert isinstance(result_full, dict)
         # The limited version should have fewer downstream nodes
         # D is 3 hops away, so it should be excluded at max_depth=1
-        assert "D" not in result_limited or result_limited.count("D") < result_full.count("D")
+        limited_node_ids = {n["node_id"] for n in result_limited.get("downstream", [])}
+        full_node_ids = {n["node_id"] for n in result_full.get("downstream", [])}
+        assert len(limited_node_ids) <= len(full_node_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +450,7 @@ class TestRiskAssessmentTool:
     """Tests for the codegiraffe_risk_assessment MCP tool."""
 
     def test_risk_assessment_default(self, tmp_path):
-        """Risk assessment returns top-10 markdown report."""
+        """Risk assessment returns structured dict with top-10 nodes."""
         (tmp_path / "app.py").write_text(
             "class AppService:\n    pass\n\n"
             "class UserService:\n    pass\n"
@@ -453,9 +461,29 @@ class TestRiskAssessmentTool:
         codegiraffe_add_relation(project_path, "B", "C", "calls")
 
         result = codegiraffe_risk_assessment(project_path)
-        assert "## Risk Assessment Report" in result
-        assert "**Graph size:**" in result
-        assert "**Nodes assessed:**" in result
+        assert isinstance(result, dict)
+        assert "nodes" in result
+        assert "total_graph_nodes" in result
+        assert "nodes_assessed" in result
+        assert isinstance(result["nodes"], list)
+
+    def test_risk_assessment_node_fields(self, tmp_path):
+        """Each node entry in risk assessment has required fields."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+
+        result = codegiraffe_risk_assessment(project_path)
+        assert isinstance(result, dict)
+        for node in result["nodes"]:
+            assert "node_id" in node
+            assert "label" in node
+            assert "risk_score" in node
+            assert "degree_centrality" in node
+            assert "betweenness_centrality" in node
+            assert "blast_radius_count" in node
+            assert "risk_explanation" in node
 
     def test_risk_assessment_specific_nodes(self, tmp_path):
         """Risk assessment with specific node_ids returns only those nodes."""
@@ -466,9 +494,8 @@ class TestRiskAssessmentTool:
         codegiraffe_add_relation(project_path, "B", "C", "calls")
 
         result = codegiraffe_risk_assessment(project_path, node_ids=["A"])
-        assert "## Risk Assessment Report" in result
-        # Only node A should be assessed
-        assert "**Nodes assessed:** 1" in result
+        assert isinstance(result, dict)
+        assert result["nodes_assessed"] == 1
 
     def test_risk_assessment_empty_graph(self, tmp_path):
         """Risk assessment on empty graph returns appropriate message."""
@@ -484,7 +511,9 @@ class TestRiskAssessmentTool:
         server_module._graph = empty_graph
 
         result = codegiraffe_risk_assessment(project_path)
-        assert "Graph is empty" in result
+        assert isinstance(result, dict)
+        assert "error" in result
+        assert "Graph is empty" in result["error"]
 
 
 # ---------------------------------------------------------------------------

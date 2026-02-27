@@ -95,8 +95,10 @@ class TestValidateChangesTool:
         ):
             result = codegiraffe_validate_changes(project)
 
-        assert "## Change Impact Validation" in result
-        assert "src/app.py" in result
+        assert isinstance(result, dict)
+        assert "changed_files" in result
+        paths = [f["path"] for f in result["changed_files"]]
+        assert "src/app.py" in paths
 
     def test_explicit_diff(self, tmp_path):
         """When diff is provided directly, it is used without git."""
@@ -104,20 +106,47 @@ class TestValidateChangesTool:
         _build_graph(project)
 
         result = codegiraffe_validate_changes(project, diff=_SAMPLE_DIFF)
-        assert "## Change Impact Validation" in result
-        assert "src/app.py" in result
+        assert isinstance(result, dict)
+        assert "changed_files" in result
+        paths = [f["path"] for f in result["changed_files"]]
+        assert "src/app.py" in paths
+
+    def test_structured_fields_present(self, tmp_path):
+        """Result dict contains all expected structured fields."""
+        project = str(tmp_path)
+        _build_graph(project)
+
+        result = codegiraffe_validate_changes(project, diff=_SAMPLE_DIFF)
+        assert isinstance(result, dict)
+        for field in ("changed_files", "changed_nodes", "total_blast_radius",
+                      "covered_nodes", "uncovered_nodes", "contract_violations",
+                      "recommendations"):
+            assert field in result, f"Missing field: {field}"
+
+    def test_changed_files_have_path_and_status(self, tmp_path):
+        """Each changed_files entry has path and status keys."""
+        project = str(tmp_path)
+        _build_graph(project)
+
+        result = codegiraffe_validate_changes(project, diff=_SAMPLE_DIFF)
+        assert isinstance(result, dict)
+        assert len(result["changed_files"]) > 0
+        for entry in result["changed_files"]:
+            assert "path" in entry
+            assert "status" in entry
 
     def test_no_diff_no_auto_error(self, tmp_path):
-        """diff=None with auto=False returns an error."""
+        """diff=None with auto=False returns an error dict."""
         project = str(tmp_path)
         _build_graph(project)
 
         result = codegiraffe_validate_changes(project, diff=None, auto=False)
-        assert "Error" in result
-        assert "auto=False" in result
+        assert isinstance(result, dict)
+        assert "error" in result
+        assert "auto=False" in result["error"]
 
     def test_not_git_repo_error(self, tmp_path):
-        """Non-git directory with auto=True returns an error."""
+        """Non-git directory with auto=True returns an error dict."""
         project = str(tmp_path)
         _build_graph(project)
 
@@ -127,17 +156,19 @@ class TestValidateChangesTool:
         ):
             result = codegiraffe_validate_changes(project)
 
-        assert "Error" in result
-        assert "not a git repository" in result
+        assert isinstance(result, dict)
+        assert "error" in result
+        assert "not a git repository" in result["error"]
 
     def test_no_graph_error(self, tmp_path):
-        """No initialized graph returns an error."""
+        """No initialized graph returns an error dict."""
         project = str(tmp_path / "nonexistent")
         result = codegiraffe_validate_changes(project)
-        assert "Error" in result
+        assert isinstance(result, dict)
+        assert "error" in result
 
     def test_no_uncommitted_changes(self, tmp_path):
-        """Empty diff returns 'No uncommitted changes' message."""
+        """Empty diff returns a no_changes status dict."""
         project = str(tmp_path)
         _build_graph(project)
 
@@ -146,7 +177,9 @@ class TestValidateChangesTool:
         ):
             result = codegiraffe_validate_changes(project)
 
-        assert "No uncommitted changes" in result
+        assert isinstance(result, dict)
+        assert result.get("status") == "no_changes"
+        assert "No uncommitted changes" in result.get("message", "")
 
 
 # ===========================================================================
@@ -157,16 +190,33 @@ class TestValidateChangesTool:
 class TestSuggestTestsTool:
     """Tests for the codegiraffe_suggest_tests MCP tool."""
 
-    def test_returns_markdown(self, tmp_path):
-        """Output contains the expected heading."""
+    def test_returns_dict(self, tmp_path):
+        """Output is a structured dict with suggestions list."""
         project = str(tmp_path)
         _build_graph(project)
 
         result = codegiraffe_suggest_tests(project, diff=_SAMPLE_DIFF)
-        assert "## Test Suggestions" in result
+        assert isinstance(result, dict)
+        assert "suggestions" in result
+        assert "total_suggestions" in result
 
-    def test_no_tests_found_message(self, tmp_path):
-        """When no tests match, a message is returned."""
+    def test_suggestion_entries_have_required_fields(self, tmp_path):
+        """Each suggestion entry has file_path, score, reason, strategy, and relevance."""
+        project = str(tmp_path)
+        _build_graph(project)
+
+        result = codegiraffe_suggest_tests(project, diff=_SAMPLE_DIFF)
+        assert isinstance(result, dict)
+        for s in result["suggestions"]:
+            assert "file_path" in s
+            assert "score" in s
+            assert "reason" in s
+            assert "strategy" in s
+            assert "relevance" in s
+            assert s["relevance"] in ("high", "medium", "low")
+
+    def test_no_tests_found_returns_empty_list(self, tmp_path):
+        """When no tests match, suggestions list is empty."""
         project = str(tmp_path)
         # Build a graph with no test nodes
         g = ArchGraph()
@@ -194,7 +244,9 @@ index 1234567..abcdefg 100644
 +y = 2
 """
         result = codegiraffe_suggest_tests(project, diff=diff)
-        assert "## Test Suggestions" in result
+        assert isinstance(result, dict)
+        assert "suggestions" in result
+        assert isinstance(result["suggestions"], list)
 
     def test_max_suggestions_respected(self, tmp_path):
         """Output is truncated to max_suggestions entries."""
@@ -204,10 +256,30 @@ index 1234567..abcdefg 100644
         result = codegiraffe_suggest_tests(
             project, diff=_SAMPLE_DIFF, max_suggestions=1
         )
-        assert "## Test Suggestions" in result
-        # Should have at most 1 test entry — count bold file entries
-        lines = [l for l in result.splitlines() if l.startswith("- **")]
-        assert len(lines) <= 1
+        assert isinstance(result, dict)
+        assert len(result["suggestions"]) <= 1
+        assert result["total_suggestions"] <= 1
+
+    def test_no_diff_no_auto_error(self, tmp_path):
+        """diff=None with auto=False returns an error dict."""
+        project = str(tmp_path)
+        _build_graph(project)
+
+        result = codegiraffe_suggest_tests(project, diff=None, auto=False)
+        assert isinstance(result, dict)
+        assert "error" in result
+        assert "suggestions" in result
+
+    def test_no_uncommitted_changes(self, tmp_path):
+        """Empty diff returns a no_changes status dict."""
+        project = str(tmp_path)
+        _build_graph(project)
+
+        with patch("codegiraffe.server.get_uncommitted_diff", return_value=""):
+            result = codegiraffe_suggest_tests(project)
+
+        assert isinstance(result, dict)
+        assert result.get("status") == "no_changes"
 
 
 # ===========================================================================

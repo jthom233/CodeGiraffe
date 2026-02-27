@@ -38,17 +38,17 @@ class PackagesConfigRecognizer:
         # Determine owning project by finding a sibling .csproj in the same dir.
         parent_dir = Path(file_path).parent
         project_name = self._find_project_name(parent_dir)
-        project_id = f"mod:{project_name}"
+        project_id = f"project:{project_name}"
 
         # Emit a stub project node so the graph has a source for these edges.
         # The CsprojRecognizer will fill in richer metadata when the .csproj
         # itself is scanned; ScanResult.merge() will do an additive metadata merge.
         project_node = Node(
             id=project_id,
-            type=NodeType.MODULE,
+            type=NodeType.PROJECT,
             label=project_name,
             file_path=rel_path,
-            metadata={"kind": "project", "language": "csharp"},
+            metadata={"language": "csharp"},
         )
         nodes.append(project_node)
 

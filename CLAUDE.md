@@ -140,5 +140,6 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
   - **Performance**: Betweenness centrality caching, `os.walk` directory pruning (replaces `rglob`), linear-time `ScanResult.merge`, shared `_scan_single_file` helper, `ThreadPoolExecutor` parallel scanning, O(1) call-edge index
   - **API & DX**: Split `codegiraffe_domains` into 4 focused tools, removed `codegiraffe_restore` stub, added `codegiraffe_release`, renamed `codegiraffe_status` → `codegiraffe_update_agent_status`; 40 MCP tools total
   - **Security Hardening**: Dashboard path allowlist with normalization, symlink boundary protection, `GIT_COMMAND_TIMEOUT=30s` on all subprocess calls, XSS escaping in dashboard, depth parameter caps, test fixture consolidation; 1703+ tests
+- v0.15.0: MultiDiGraph migration — `ArchGraph` now uses `nx.MultiDiGraph` so multiple edge types between the same node pair are all preserved (correctness fix)
 - v0.14.0: Sigma.js v3 dashboard — WebGL renderer, server-side ForceAtlas2 layout, 33k-node interactive visualization
 - v0.13.0: Advanced Analysis -- `codegiraffe_coverage`, `codegiraffe_pr_diff`, `codegiraffe_order_tasks`, `codegiraffe_domains`, `codegiraffe_migration_plan`; `codegiraffe_dashboard` tool for one-click web dashboard launch; 37 MCP tools total; 1339+ tests

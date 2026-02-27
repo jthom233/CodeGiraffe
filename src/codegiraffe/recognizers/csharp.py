@@ -8,6 +8,9 @@ Detects architectural patterns in .cs files including:
     - SignalR hubs (: Hub)                 -> service nodes (kind=signalr_hub)
     - MediatR handlers                     -> worker nodes
     - DI registrations                     -> service nodes
+    - BackgroundService / IHostedService   -> service nodes (kind=background_worker)
+    - Autofac Module subclasses            -> service nodes (kind=di_module)
+    - Minimal API (app.MapGet etc.)        -> endpoint nodes (kind=minimal_api)
 """
 
 from __future__ import annotations
@@ -99,7 +102,8 @@ _CS_NOISE_SUFFIXES_REGEX = (
 # Base names that are already captured by dedicated patterns.
 _CS_ALREADY_CAPTURED_BASES = frozenset({
     "Hub", "ControllerBase", "Controller", "ApiController",
-    "BackgroundService", "IHostedService",
+    "BackgroundService", "IHostedService",  # captured by _CS_BACKGROUND_SERVICE_RE
+    "Module",  # Autofac Module captured by _CS_AUTOFAC_MODULE_RE
     "IRequestHandler", "INotificationHandler", "ICommandHandler",
 })
 
@@ -128,6 +132,24 @@ _CS_SQL_TABLE_BARE_RE = re.compile(
 _CS_SQL_PROC_IN_STRING_RE = re.compile(
     r"""["'][^"']*\b((?:proc|sp)_[A-Za-z]\w+)[^"']*["']""",
     re.IGNORECASE,
+)
+
+# BackgroundService and IHostedService: classes that run background processing.
+# Group 1: class name
+_CS_BACKGROUND_SERVICE_RE = re.compile(
+    r"""class\s+(\w+)(?:<[^>]*>)?\s*:\s*[^{]*\b(?:BackgroundService|IHostedService)\b""",
+)
+
+# Autofac Module subclasses: DI registration modules.
+# Group 1: class name
+_CS_AUTOFAC_MODULE_RE = re.compile(
+    r"""class\s+(\w+)(?:<[^>]*>)?\s*:\s*[^{]*\b(?:Autofac\.)?Module\b""",
+)
+
+# Minimal API endpoint registration: app.MapGet("/path", ...) etc.
+# Group 1: HTTP verb (Get/Post/Put/Delete/Patch), Group 2: route path
+_CS_MINIMAL_API_RE = re.compile(
+    r"""(?:app|endpoints|group|routes)\s*\.\s*Map(Get|Post|Put|Delete|Patch)\s*\(\s*"([^"]*)"\s*,""",
 )
 
 
@@ -183,6 +205,9 @@ class CSharpRecognizer:
         - SignalR hubs (``Hub``)               -> ``service`` nodes (kind=signalr_hub)
         - MediatR handlers                     -> ``worker`` nodes
         - DI registrations                     -> ``service`` nodes
+        - BackgroundService / IHostedService   -> ``service`` nodes (kind=background_worker)
+        - Autofac Module subclasses            -> ``service`` nodes (kind=di_module)
+        - Minimal API (``app.MapGet`` etc.)    -> ``endpoint`` nodes (kind=minimal_api)
         - Classes implementing interfaces      -> ``service`` nodes (filtered)
         - Classes with DI constructor params   -> ``service`` nodes (filtered)
         - Classes inheriting non-trivial bases -> ``service`` nodes (filtered)
@@ -225,21 +250,27 @@ class CSharpRecognizer:
 
         # Pass 1: Find the class-level [Route("...")] prefix.
         # A class-level [Route] appears on a line before a `class` declaration
-        # (within a small look-ahead window). Skip templates that contain
-        # [controller] tokens since those are resolved at runtime by ASP.NET.
+        # (within a small look-ahead window).  When the template contains the
+        # [controller] or [action] convention tokens they are resolved from the
+        # class/method name rather than skipped.
         class_route_prefix = ""
         class_route_lines: set[int] = set()
         for i, line in enumerate(lines):
             route_match = _CS_ROUTE_ATTR_RE.search(line)
             if route_match:
                 route_path = route_match.group(1)
-                if "[controller]" in route_path.lower():
-                    class_route_lines.add(i)
-                    continue
                 # Look ahead up to 5 lines for a class declaration
                 for j in range(i + 1, min(i + 6, len(lines))):
-                    if re.search(r'\bclass\b', lines[j]):
-                        class_route_prefix = route_path.rstrip('/')
+                    class_decl_match = re.search(r'\bclass\s+(\w+)', lines[j])
+                    if class_decl_match:
+                        resolved = route_path
+                        if "[controller]" in route_path.lower():
+                            # Derive controller segment from class name:
+                            # strip "Controller" suffix and lowercase.
+                            cls_name = class_decl_match.group(1)
+                            controller_seg = re.sub(r'Controller$', '', cls_name, flags=re.IGNORECASE).lower()
+                            resolved = re.sub(r'\[controller\]', controller_seg, resolved, flags=re.IGNORECASE)
+                        class_route_prefix = resolved.rstrip('/')
                         class_route_lines.add(i)
                         break
 
@@ -252,13 +283,23 @@ class CSharpRecognizer:
             if http_match:
                 verb = http_match.group(1).upper()
                 method_route = http_match.group(2)
+                # Resolve [action] token if present: look ahead for the method name.
+                if "[action]" in method_route.lower():
+                    action_seg = ""
+                    for j in range(i + 1, min(i + 6, len(lines))):
+                        method_match = re.search(r'\b(?:public|private|protected|internal)\b[^(]*\s+(\w+)\s*\(', lines[j])
+                        if method_match:
+                            action_seg = method_match.group(1).lower()
+                            break
+                    method_route = re.sub(r'\[action\]', action_seg, method_route, flags=re.IGNORECASE)
                 if class_route_prefix and not method_route.startswith('/'):
                     full_route = f"{class_route_prefix}/{method_route}"
                 else:
                     full_route = method_route
+                full_route = full_route.strip('/')
                 if full_route not in seen_routes:
                     seen_routes.add(full_route)
-                    node_id = f"endpoint:/{full_route}" if not full_route.startswith('/') else f"endpoint:{full_route}"
+                    node_id = f"endpoint:/{full_route}"
                     nodes.append(
                         Node(
                             id=node_id,
@@ -271,14 +312,24 @@ class CSharpRecognizer:
                     endpoint_ids.append(node_id)
                 continue
 
-            # Match [HttpVerb] with no route argument — route is just the class prefix
+            # Match [HttpVerb] with no route argument — route is the class prefix,
+            # optionally resolving [action] from the following method declaration.
             verb_only_match = _CS_HTTP_VERB_ONLY_RE.search(stripped)
             if verb_only_match:
                 verb = verb_only_match.group(1).upper()
                 full_route = class_route_prefix if class_route_prefix else ""
+                # Resolve [action] in the prefix if present.
+                if full_route and "[action]" in full_route.lower():
+                    action_seg = ""
+                    for j in range(i + 1, min(i + 6, len(lines))):
+                        method_match = re.search(r'\b(?:public|private|protected|internal)\b[^(]*\s+(\w+)\s*\(', lines[j])
+                        if method_match:
+                            action_seg = method_match.group(1).lower()
+                            break
+                    full_route = re.sub(r'\[action\]', action_seg, full_route, flags=re.IGNORECASE)
                 if full_route and full_route not in seen_routes:
                     seen_routes.add(full_route)
-                    node_id = f"endpoint:/{full_route}" if not full_route.startswith('/') else f"endpoint:{full_route}"
+                    node_id = f"endpoint:/{full_route}"
                     nodes.append(
                         Node(
                             id=node_id,
@@ -291,11 +342,14 @@ class CSharpRecognizer:
                     endpoint_ids.append(node_id)
                 continue
 
-            # Match non-class-level [Route("...")] as standalone endpoints
+            # Match non-class-level [Route("...")] as standalone endpoints.
+            # Resolve convention tokens if present.
             route_match = _CS_ROUTE_ATTR_RE.search(stripped)
             if route_match and i not in class_route_lines:
                 route_path = route_match.group(1)
-                if "[controller]" not in route_path.lower() and route_path not in seen_routes:
+                # Skip unresolved [controller] / [action] tokens in standalone routes
+                # (they need a class context we don't have here).
+                if "[controller]" not in route_path.lower() and "[action]" not in route_path.lower() and route_path not in seen_routes:
                     seen_routes.add(route_path)
                     node_id = f"endpoint:{route_path}"
                     nodes.append(
@@ -408,6 +462,59 @@ class CSharpRecognizer:
                         metadata={"handler": handler_name, "framework": "mediatr"},
                     )
                 )
+
+        # --- BackgroundService / IHostedService ---
+        for match in _CS_BACKGROUND_SERVICE_RE.finditer(content):
+            worker_name = match.group(1)
+            if worker_name not in captured_class_names:
+                captured_class_names.add(worker_name)
+                node_id = f"service:{worker_name}"
+                nodes.append(
+                    Node(
+                        id=node_id,
+                        type=NodeType.SERVICE,
+                        label=worker_name,
+                        file_path=rel_path,
+                        metadata={"class_name": worker_name, "kind": "background_worker"},
+                    )
+                )
+
+        # --- Autofac Module subclasses ---
+        for match in _CS_AUTOFAC_MODULE_RE.finditer(content):
+            module_name = match.group(1)
+            if module_name not in captured_class_names:
+                captured_class_names.add(module_name)
+                node_id = f"service:{module_name}"
+                nodes.append(
+                    Node(
+                        id=node_id,
+                        type=NodeType.SERVICE,
+                        label=module_name,
+                        file_path=rel_path,
+                        metadata={"class_name": module_name, "kind": "di_module", "framework": "autofac"},
+                    )
+                )
+
+        # --- Minimal API endpoints (app.MapGet/Post/etc.) ---
+        seen_minimal_routes: set[str] = set()
+        for match in _CS_MINIMAL_API_RE.finditer(content):
+            verb = match.group(1).upper()
+            route_path = match.group(2)
+            route_key = f"{verb}:{route_path}"
+            if route_key not in seen_minimal_routes:
+                seen_minimal_routes.add(route_key)
+                node_id = f"endpoint:{route_path}" if route_path.startswith('/') else f"endpoint:/{route_path}"
+                if node_id not in {n.id for n in nodes}:
+                    nodes.append(
+                        Node(
+                            id=node_id,
+                            type=NodeType.ENDPOINT,
+                            label=route_path,
+                            file_path=rel_path,
+                            metadata={"route": route_path, "framework": "aspnet", "http_method": verb, "kind": "minimal_api"},
+                        )
+                    )
+                    endpoint_ids.append(node_id)
 
         # --- DI registrations ---
         for match in _CS_DI_RE.finditer(content):

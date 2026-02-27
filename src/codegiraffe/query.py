@@ -29,6 +29,29 @@ from codegiraffe import embeddings as _embeddings_mod
 
 
 # ---------------------------------------------------------------------------
+# MultiDiGraph edge-access helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_edge_obj(graph_nx: Any, u: str, v: str) -> Any:
+    """Return the first Edge object on any edge between *u* and *v*, or None.
+
+    ``MultiDiGraph.get_edge_data(u, v)`` returns ``{key: {attrs}}``; this
+    helper extracts the ``"edge"`` attribute from the first parallel edge
+    found between the pair and is suitable for display / type-checking uses
+    where knowing *any* relationship between the pair is sufficient.
+    """
+    all_edges = graph_nx.get_edge_data(u, v)
+    if not all_edges:
+        return None
+    for attrs in all_edges.values():
+        edge_obj = attrs.get("edge")
+        if edge_obj is not None:
+            return edge_obj
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Performance guard constants
 # ---------------------------------------------------------------------------
 
@@ -38,6 +61,23 @@ _SIMILARITY_MATCH_LIMIT = 500
 
 # Maximum number of drift records returned before truncating the response.
 _MAX_DRIFT_RECORDS = 200
+
+# ---------------------------------------------------------------------------
+# Node type weight multipliers for relevance scoring
+# ---------------------------------------------------------------------------
+#: Applied as a post-multiplier after the keyword/semantic base score so that
+#: architecturally meaningful node types surface above file-level modules.
+#: Default weight for types not listed here is 1.0 (neutral).
+_NODE_TYPE_WEIGHTS: dict[str, float] = {
+    "service": 1.5,
+    "endpoint": 1.5,
+    "contract": 1.5,
+    "database_table": 1.2,
+    "external_api": 1.3,
+    "frontend_component": 1.1,
+    "env_var": 0.8,
+    "module": 0.5,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +179,10 @@ def _path_min_confidence(graph_nx: Any, path: list[str]) -> float:
     Walks consecutive pairs in *path*, looks up the edge data in *graph_nx*,
     and returns the minimum confidence found.  Returns 1.0 for empty paths
     or single-node paths (no edges to traverse).
+
+    Works with both DiGraph and MultiDiGraph.  For MultiDiGraph,
+    ``get_edge_data(u, v)`` returns ``{key: {attrs}}``; we take the minimum
+    confidence across all parallel edges between the pair.
     """
     if len(path) < 2:
         return 1.0
@@ -268,8 +312,14 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) > 1]
 
 
-def _score_node(node: Node, keywords: list[str]) -> int:
-    """Score a node by counting how many keywords appear in its searchable text."""
+def _score_node(node: Node, keywords: list[str]) -> float:
+    """Score a node by counting how many keywords appear in its searchable text.
+
+    A type-based weight multiplier (``_NODE_TYPE_WEIGHTS``) is applied after
+    the keyword count so that architecturally meaningful node types (services,
+    endpoints, contracts) rank above file-level module nodes that tend to match
+    many queries without carrying useful signal.
+    """
     searchable_parts: list[str] = [
         node.id.lower(),
         node.label.lower(),
@@ -282,11 +332,13 @@ def _score_node(node: Node, keywords: list[str]) -> int:
         searchable_parts.append(node.file_path.lower())
 
     combined = " ".join(searchable_parts)
-    score = 0
+    base_score = 0
     for kw in keywords:
         if kw in combined:
-            score += 1
-    return score
+            base_score += 1
+
+    weight = _NODE_TYPE_WEIGHTS.get(node.type, 1.0)
+    return base_score * weight
 
 
 def _merge_graph_data(parts: list[GraphData], base_data: GraphData) -> GraphData:
@@ -412,8 +464,19 @@ def query_by_text(
 
     Optionally pre-filter by *node_type* before applying the text search.
     Each matching node is expanded to depth=1 to include its immediate edges.
-    Results are capped at *limit* nodes (default 50).
+    Results are ranked by match specificity and capped at *limit* nodes (default 50).
+
+    Scoring:
+    - Exact label match (case-insensitive): 100
+    - Query equals a word-boundary portion of the label (e.g. "Ssh" in "SshAccountBasicPasswordChanger"): 80
+    - Query found in label: 60
+    - Query found in node ID: 40
+    - Query found in metadata values: 20
+
+    Within the same score, shorter labels are preferred (more specific matches).
     """
+    import re
+
     needle = query.lower()
     base_data = graph.to_data()
 
@@ -427,19 +490,50 @@ def query_by_text(
             if "node" in attrs
         ]
 
-    # Match against id, label, and metadata values
-    matching: list[Node] = []
+    # Score each candidate
+    scored: list[tuple[int, int, Node]] = []  # (score desc, label_len asc, node)
     for node in candidates:
-        if needle in node.id.lower() or needle in node.label.lower():
-            matching.append(node)
-            continue
-        for meta_val in node.metadata.values():
-            if isinstance(meta_val, str) and needle in meta_val.lower():
-                matching.append(node)
-                break
+        node_label_lower = node.label.lower()
+        node_id_lower = node.id.lower()
+        score = 0
 
-    # Cap results
-    matching = matching[:limit]
+        if node_label_lower == needle:
+            score = 100
+        elif re.search(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|[_\-\s]", node.label):
+            # Split CamelCase / snake_case into tokens and check if needle matches a token prefix
+            tokens = re.split(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|[_\-\s]+", node.label)
+            token_joined_lower = "".join(t.lower() for t in tokens)
+            # Check if query matches the start of any contiguous token sequence
+            for start in range(len(tokens)):
+                prefix = ""
+                for t in tokens[start:]:
+                    prefix += t.lower()
+                    if prefix == needle:
+                        score = 80
+                        break
+                if score == 80:
+                    break
+            if score == 0 and needle in node_label_lower:
+                score = 60
+        elif needle in node_label_lower:
+            score = 60
+
+        if score == 0 and needle in node_id_lower:
+            score = 40
+
+        if score == 0:
+            for meta_val in node.metadata.values():
+                if isinstance(meta_val, str) and needle in meta_val.lower():
+                    score = 20
+                    break
+
+        if score > 0:
+            scored.append((score, len(node.label), node))
+
+    # Sort: highest score first, then shortest label first (more specific)
+    scored.sort(key=lambda t: (-t[0], t[1]))
+
+    matching = [node for _, _, node in scored[:limit]]
 
     if not matching:
         return GraphData(
@@ -1013,7 +1107,7 @@ def _context_for_task_keywords(
         )
 
     # Score all nodes
-    scored: list[tuple[Node, int]] = []
+    scored: list[tuple[Node, float]] = []
     for nid, attrs in graph.graph.nodes(data=True):
         node: Node | None = attrs.get("node")
         if node is None:
@@ -1038,7 +1132,7 @@ def _context_for_task_keywords(
     seeds = scored[:seed_limit]
 
     # Build a score lookup so we can annotate nodes later
-    score_map: dict[str, int] = {node.id: score for node, score in scored}
+    score_map: dict[str, float] = {node.id: score for node, score in scored}
 
     # Expand each seed to depth=1 and merge
     base_data = graph.to_data()
@@ -1416,13 +1510,565 @@ def compute_blast_radius(
     return result
 
 
-def compute_risk_with_coverage(base_risk: float, node: "Node") -> float:
-    """Apply a 1.5x risk multiplier for nodes with no test coverage.
+def compute_enhanced_blast_radius(
+    graph: ArchGraph,
+    node_id: str,
+    max_depth: int | None = None,
+) -> dict[str, Any]:
+    """Compute a comprehensive impact analysis for *node_id*.
 
-    A node is considered uncovered when its ``_test_coverage`` metadata key is
-    present and equals ``0.0``, or when the key is absent entirely (unknown
-    coverage).  A node is considered covered when ``_test_coverage`` is present
-    and greater than zero.
+    Unlike :func:`compute_blast_radius`, this function analyses the node's
+    position in the broader architectural graph — its interface contracts,
+    sibling implementors, interface consumers, cross-repo consumers, data
+    layer dependencies, and both traditional downstream and upstream impact.
+
+    Parameters
+    ----------
+    graph:
+        The architecture graph to analyze.
+    node_id:
+        The node whose enhanced blast radius should be computed.
+    max_depth:
+        If set, limit the downstream/upstream traversal to this many hops.
+
+    Raises
+    ------
+    ValueError
+        If *node_id* is not present in the graph (includes fuzzy suggestions).
+    """
+    # Validate node exists
+    if node_id not in graph.graph:
+        candidates = _all_node_ids(graph)
+        suggestions = _fuzzy_suggestions(node_id, candidates)
+        msg = f"Node '{node_id}' not found in graph."
+        if suggestions:
+            suggestion_str = ", ".join(f"'{s}'" for s in suggestions)
+            msg += f" Did you mean one of: {suggestion_str}?"
+        raise ValueError(msg)
+
+    # --- Target node ---
+    target_node_data = graph.graph.nodes[node_id].get("node")
+    target_info: dict[str, Any] = {
+        "id": node_id,
+        "label": target_node_data.label if target_node_data else node_id,
+        "type": target_node_data.type if target_node_data else "unknown",
+        "file_path": target_node_data.file_path if target_node_data else None,
+    }
+
+    def _node_dict(nid: str, relationship: str) -> dict[str, Any] | None:
+        """Return a standardised dict for a node, or None if missing."""
+        ndata = graph.graph.nodes.get(nid, {}).get("node")
+        if ndata is None:
+            return None
+        return {
+            "node_id": nid,
+            "label": ndata.label,
+            "type": ndata.type,
+            "file_path": ndata.file_path,
+            "relationship": relationship,
+        }
+
+    # -----------------------------------------------------------------------
+    # Section 1 — Interface / Base Class Impact
+    # Find interfaces/bases that this node implements (outgoing `implements`
+    # edges), then find all other nodes that also implement those same
+    # interfaces (siblings).
+    # -----------------------------------------------------------------------
+    interfaces: list[dict[str, Any]] = []
+    siblings: list[dict[str, Any]] = []
+
+    for succ_id in graph.graph.successors(node_id):
+        edge_obj = _get_edge_obj(graph.graph, node_id, succ_id)
+        if edge_obj is not None and edge_obj.type == "implements":
+            entry = _node_dict(succ_id, f"implemented by {target_info['label']}")
+            if entry is not None:
+                interfaces.append(entry)
+
+    seen_siblings: set[str] = set()
+    for iface in interfaces:
+        iface_id = iface["node_id"]
+        # Walk all predecessors of the interface — any with an `implements`
+        # edge pointing here (that is NOT the target itself) is a sibling.
+        for pred_id in graph.graph.predecessors(iface_id):
+            if pred_id == node_id or pred_id in seen_siblings:
+                continue
+            edge_obj = _get_edge_obj(graph.graph, pred_id, iface_id)
+            if edge_obj is not None and edge_obj.type == "implements":
+                entry = _node_dict(
+                    pred_id,
+                    f"also implements {iface['label']}",
+                )
+                if entry is not None:
+                    siblings.append(entry)
+                    seen_siblings.add(pred_id)
+
+    # -----------------------------------------------------------------------
+    # Section 2 — Consumers via Interface
+    # For each interface the target implements, find nodes that have any
+    # incoming edge type (imports, calls, depends_on, etc.) pointing TO that
+    # interface — these are the actual consumers of the contract.
+    # -----------------------------------------------------------------------
+    seen_consumers: set[str] = set()
+    interface_consumers: list[dict[str, Any]] = []
+
+    for iface in interfaces:
+        iface_id = iface["node_id"]
+        for pred_id in graph.graph.predecessors(iface_id):
+            if pred_id == node_id or pred_id in seen_consumers:
+                continue
+            # Skip nodes that are themselves implementors (siblings) —
+            # they are already captured in the siblings section.
+            edge_obj = _get_edge_obj(graph.graph, pred_id, iface_id)
+            edge_type = edge_obj.type if edge_obj else "unknown"
+            if edge_type == "implements":
+                continue
+            entry = _node_dict(
+                pred_id,
+                f"{edge_type} {iface['label']}",
+            )
+            if entry is not None:
+                interface_consumers.append(entry)
+                seen_consumers.add(pred_id)
+
+    # -----------------------------------------------------------------------
+    # Section 3 — Cross-Repo Consumers
+    # Find the project-level module node that contains this file, then find
+    # all nodes connected to it via `cross_repo_depends_on` edges (reversed).
+    # -----------------------------------------------------------------------
+    cross_repo_consumers: list[dict[str, Any]] = []
+    target_file = target_info.get("file_path") or ""
+
+    project_node_id: str | None = None
+    for nid in graph.graph.nodes:
+        ndata = graph.graph.nodes[nid].get("node")
+        if ndata is None:
+            continue
+        if not nid.startswith("mod:"):
+            continue
+        if ndata.metadata.get("kind") != "project":
+            continue
+        # Check whether our target file lives inside this project's directory
+        project_dir = ndata.file_path or ""
+        if project_dir and target_file:
+            # Normalise to forward slashes for a portable prefix check
+            norm_project = project_dir.replace("\\", "/").rstrip("/")
+            norm_target = target_file.replace("\\", "/")
+            if norm_target.startswith(norm_project + "/") or norm_target == norm_project:
+                project_node_id = nid
+                break
+
+    if project_node_id is not None:
+        for pred_id in graph.graph.predecessors(project_node_id):
+            edge_obj = _get_edge_obj(graph.graph, pred_id, project_node_id)
+            if edge_obj is not None and edge_obj.type == "cross_repo_depends_on":
+                entry = _node_dict(
+                    pred_id,
+                    f"cross_repo_depends_on {graph.graph.nodes[project_node_id].get('node', project_node_id).label if graph.graph.nodes[project_node_id].get('node') else project_node_id}",
+                )
+                if entry is not None:
+                    cross_repo_consumers.append(entry)
+
+    # -----------------------------------------------------------------------
+    # Section 4 — Data Layer Impact
+    # Follow `reads` and `writes` edges from the target node AND from any
+    # module node whose file_path matches the target's file.  Also surface
+    # edges marked with cross_language=True.
+    # -----------------------------------------------------------------------
+    data_layer: list[dict[str, Any]] = []
+    seen_tables: set[tuple[str, str]] = set()  # (table_id, read_or_write)
+
+    def _collect_data_edges(source_id: str) -> None:
+        for succ_id in graph.graph.successors(source_id):
+            edge_obj = _get_edge_obj(graph.graph, source_id, succ_id)
+            if edge_obj is None:
+                continue
+            if edge_obj.type not in ("reads", "writes"):
+                continue
+            key = (succ_id, edge_obj.type)
+            if key in seen_tables:
+                continue
+            seen_tables.add(key)
+            entry = _node_dict(succ_id, edge_obj.type)
+            if entry is not None:
+                data_layer.append(entry)
+
+    _collect_data_edges(node_id)
+
+    # Also check containing module nodes for data edges
+    for nid in graph.graph.nodes:
+        if not nid.startswith("mod:"):
+            continue
+        ndata = graph.graph.nodes[nid].get("node")
+        if ndata is None:
+            continue
+        # Match by file_path equality or when the module contains the target
+        is_same_file = (ndata.file_path or "") == target_file and bool(target_file)
+        # Check for cross_language edges as well
+        for succ_id in graph.graph.successors(nid):
+            edge_obj = _get_edge_obj(graph.graph, nid, succ_id)
+            if edge_obj is None:
+                continue
+            meta = edge_obj.metadata or {}
+            is_cross_lang = meta.get("cross_language", False)
+            if is_same_file and edge_obj.type in ("reads", "writes"):
+                key = (succ_id, edge_obj.type)
+                if key not in seen_tables:
+                    seen_tables.add(key)
+                    entry = _node_dict(succ_id, edge_obj.type)
+                    if entry is not None:
+                        data_layer.append(entry)
+            elif is_cross_lang and (succ_id == node_id or (is_same_file)):
+                # Cross-language edge from this module touching the target
+                key = (succ_id, edge_obj.type)
+                if key not in seen_tables and edge_obj.type in ("reads", "writes"):
+                    seen_tables.add(key)
+                    entry = _node_dict(succ_id, f"{edge_obj.type} (cross-language)")
+                    if entry is not None:
+                        data_layer.append(entry)
+
+    # -----------------------------------------------------------------------
+    # Section 5 — Traditional Downstream (existing logic, kept intact)
+    # -----------------------------------------------------------------------
+    all_descendants = graph.get_all_descendants(node_id)
+    distances = dict(nx.single_source_shortest_path_length(graph.graph, node_id))
+    paths = dict(nx.single_source_shortest_path(graph.graph, node_id))
+
+    downstream: list[dict[str, Any]] = []
+    for desc_id in sorted(all_descendants):
+        dist = distances.get(desc_id)
+        if dist is None:
+            continue
+        if max_depth is not None and dist > max_depth:
+            continue
+        desc_node = graph.graph.nodes[desc_id].get("node")
+        if desc_node is None:
+            continue
+        path = paths.get(desc_id, [])
+        path_conf = _path_min_confidence(graph.graph, path)
+        downstream.append({
+            "node_id": desc_id,
+            "label": desc_node.label,
+            "type": desc_node.type,
+            "distance": dist,
+            "severity": _compute_severity_with_confidence(dist, path_conf),
+            "confidence": path_conf,
+            "path": path,
+            "file_path": desc_node.file_path,
+            "relationship": f"downstream ({_compute_severity_with_confidence(dist, path_conf)})",
+        })
+
+    downstream.sort(key=lambda x: (x["distance"], x["node_id"]))
+
+    # -----------------------------------------------------------------------
+    # Section 6 — Upstream Dependencies (always included)
+    # -----------------------------------------------------------------------
+    all_ancestors = graph.get_all_ancestors(node_id)
+    rev = graph.graph.reverse()
+    up_distances = dict(nx.single_source_shortest_path_length(rev, node_id))
+    up_paths = dict(nx.single_source_shortest_path(rev, node_id))
+
+    upstream: list[dict[str, Any]] = []
+    for anc_id in sorted(all_ancestors):
+        dist = up_distances.get(anc_id)
+        if dist is None:
+            continue
+        if max_depth is not None and dist > max_depth:
+            continue
+        anc_node = graph.graph.nodes[anc_id].get("node")
+        if anc_node is None:
+            continue
+        upstream.append({
+            "node_id": anc_id,
+            "label": anc_node.label,
+            "type": anc_node.type,
+            "distance": dist,
+            "severity": _compute_severity(dist),
+            "path": up_paths.get(anc_id, []),
+            "file_path": anc_node.file_path,
+            "relationship": f"upstream ({_compute_severity(dist)})",
+        })
+
+    upstream.sort(key=lambda x: (x["distance"], x["node_id"]))
+
+    # -----------------------------------------------------------------------
+    # Cycle detection and critical paths (reuse existing helpers)
+    # -----------------------------------------------------------------------
+    all_cycles = graph.detect_cycles(max_cycles=50)
+    relevant_cycles = [c for c in all_cycles if node_id in c]
+
+    impact_ids = all_descendants | {node_id}
+    if max_depth is not None:
+        downstream_ids = {item["node_id"] for item in downstream}
+        impact_ids = downstream_ids | {node_id}
+    sub = graph.graph.subgraph(impact_ids)
+    critical_paths: list[dict[str, Any]] = []
+    if len(sub) > 1:
+        betweenness = nx.betweenness_centrality(sub)
+        critical = sorted(betweenness.items(), key=lambda x: x[1], reverse=True)[:5]
+        for nid, score in critical:
+            cp_node = graph.graph.nodes[nid].get("node")
+            if cp_node is not None:
+                critical_paths.append({
+                    "node_id": nid,
+                    "label": cp_node.label,
+                    "centrality": round(score, 4),
+                })
+
+    contract_impact = _compute_contract_impact(graph, node_id)
+
+    return {
+        "target_node": target_info,
+        "interfaces": interfaces,
+        "siblings": siblings,
+        "interface_consumers": interface_consumers,
+        "cross_repo_consumers": cross_repo_consumers,
+        "data_layer": data_layer,
+        "downstream": downstream,
+        "upstream": upstream,
+        "cycles": relevant_cycles,
+        "critical_paths": critical_paths,
+        "contract_impact": contract_impact,
+    }
+
+
+def generate_enhanced_impact_summary(
+    blast_radius: dict[str, Any], graph: ArchGraph
+) -> str:
+    """Generate a comprehensive markdown impact report from enhanced blast radius data.
+
+    Sections are omitted when they contain no items.
+
+    Parameters
+    ----------
+    blast_radius:
+        The dict returned by :func:`compute_enhanced_blast_radius`.
+    graph:
+        The architecture graph (used to look up edge types for direct deps).
+    """
+    target = blast_radius["target_node"]
+    interfaces = blast_radius.get("interfaces", [])
+    siblings = blast_radius.get("siblings", [])
+    interface_consumers = blast_radius.get("interface_consumers", [])
+    cross_repo_consumers = blast_radius.get("cross_repo_consumers", [])
+    data_layer = blast_radius.get("data_layer", [])
+    downstream = blast_radius.get("downstream", [])
+    upstream = blast_radius.get("upstream", [])
+    cycles = blast_radius.get("cycles", [])
+    critical_paths = blast_radius.get("critical_paths", [])
+    contract_impact = blast_radius.get("contract_impact", [])
+
+    # Total = unique impacted nodes across all enhanced sections
+    all_impacted: set[str] = set()
+    for section in (siblings, interface_consumers, cross_repo_consumers, data_layer, downstream, upstream):
+        for item in section:
+            all_impacted.add(item["node_id"])
+    total = len(all_impacted)
+
+    lines: list[str] = []
+    lines.append(f"## Impact Analysis: {target['label']}")
+    lines.append("")
+    lines.append(f"**Total blast radius:** {total} nodes affected")
+    lines.append("")
+
+    # --- Implements ---
+    if interfaces:
+        lines.append("### Implements")
+        lines.append("")
+        for item in interfaces:
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(f"- **{item['label']}** ({item['type']}){fp}")
+        lines.append("")
+
+    # --- Sibling Implementations ---
+    if siblings:
+        lines.append(f"### Sibling Implementations ({len(siblings)}) — share same interface")
+        lines.append("")
+        for item in siblings:
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(f"- **{item['label']}** — {item['relationship']}{fp}")
+        lines.append("")
+
+    # --- Interface Consumers ---
+    if interface_consumers:
+        lines.append(f"### Interface Consumers ({len(interface_consumers)})")
+        lines.append("")
+        for item in interface_consumers:
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(f"- **{item['label']}** ({item['type']}) — {item['relationship']}{fp}")
+        lines.append("")
+
+    # --- Cross-Repo Consumers ---
+    if cross_repo_consumers:
+        lines.append(f"### Cross-Repo Consumers ({len(cross_repo_consumers)})")
+        lines.append("")
+        for item in cross_repo_consumers:
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(f"- **{item['label']}** ({item['type']}) — {item['relationship']}{fp}")
+        lines.append("")
+
+    # --- Data Layer ---
+    if data_layer:
+        lines.append(f"### Data Layer ({len(data_layer)} tables)")
+        lines.append("")
+        for item in data_layer:
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(f"- **{item['label']}** — {item['relationship']}{fp}")
+        lines.append("")
+
+    # --- Downstream Dependencies ---
+    if downstream:
+        direct_ds = [n for n in downstream if n["severity"] in ("direct", "uncertain_direct")]
+        transitive_ds = [n for n in downstream if n["severity"] in ("transitive", "uncertain_transitive")]
+        indirect_ds = [n for n in downstream if n["severity"] in ("indirect", "uncertain_indirect")]
+
+        lines.append(f"### Downstream Dependencies ({len(downstream)})")
+        lines.append("")
+
+        target_id = target["id"]
+
+        if direct_ds:
+            lines.append(f"#### Direct ({len(direct_ds)})")
+            lines.append("")
+            for item in direct_ds:
+                edge_obj = _get_edge_obj(graph.graph, target_id, item["node_id"])
+                edge_type = edge_obj.type if edge_obj else "unknown"
+                fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+                lines.append(
+                    f"- **{item['label']}** ({item['type']}) — via {edge_type} edge{fp}"
+                )
+            lines.append("")
+
+        if transitive_ds:
+            lines.append(f"#### Transitive ({len(transitive_ds)})")
+            lines.append("")
+            for item in transitive_ds:
+                path_summary = " -> ".join(item["path"])
+                fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+                lines.append(
+                    f"- **{item['label']}** ({item['type']}) — "
+                    f"{item['distance']} hops via {path_summary}{fp}"
+                )
+            lines.append("")
+
+        if indirect_ds:
+            lines.append(f"#### Indirect ({len(indirect_ds)})")
+            lines.append("")
+            for item in indirect_ds:
+                fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+                lines.append(
+                    f"- **{item['label']}** ({item['type']}) — {item['distance']} hops{fp}"
+                )
+            lines.append("")
+
+    # --- Upstream Dependencies ---
+    if upstream:
+        lines.append(f"### Upstream Dependencies ({len(upstream)})")
+        lines.append("")
+        for item in upstream:
+            fp = f" [{item['file_path']}]" if item.get("file_path") else ""
+            lines.append(
+                f"- **{item['label']}** ({item['type']}) — "
+                f"{item['distance']} hops upstream{fp}"
+            )
+        lines.append("")
+
+    # --- Circular Dependencies ---
+    if cycles:
+        lines.append("### Circular Dependencies")
+        lines.append("")
+        for cycle in cycles:
+            display = cycle + [cycle[0]]
+            lines.append(f"- {' -> '.join(display)}")
+        lines.append("")
+
+    # --- Hotspots in Impact Zone ---
+    if critical_paths:
+        lines.append("### Hotspots in Impact Zone")
+        lines.append("")
+        for cp in critical_paths:
+            lines.append(
+                f"- **{cp['label']}** (centrality: {cp['centrality']:.4f})"
+            )
+        lines.append("")
+
+    # --- Contract Impact ---
+    if contract_impact:
+        lines.append(f"### Contract Impact ({len(contract_impact)} consumers at risk)")
+        lines.append("")
+        for item in contract_impact:
+            contract_name = item.get("contract_name", "unknown")
+            contract_type = item.get("contract_type", "unknown")
+            lines.append(
+                f"- **{item['label']}** ({item['type']}) — CRITICAL: consumes "
+                f"{contract_type} contract \"{contract_name}\""
+            )
+        lines.append("")
+
+    # --- Recommendations ---
+    recommendations: list[str] = []
+
+    if contract_impact:
+        recommendations.append(
+            f"**CRITICAL:** Changing this node breaks {len(contract_impact)} contract "
+            f"consumer(s). Coordinate with dependent teams before proceeding."
+        )
+    if cross_repo_consumers:
+        recommendations.append(
+            f"**Cross-repo impact:** {len(cross_repo_consumers)} project(s) depend on "
+            f"this via NuGet/package references. Coordinate a version bump and "
+            f"downstream update before merging."
+        )
+    if siblings:
+        recommendations.append(
+            f"**Interface contract:** {len(siblings)} sibling implementation(s) share "
+            f"the same interface(s). Verify whether the same change is needed in each."
+        )
+    if interface_consumers:
+        recommendations.append(
+            f"**Interface consumers:** {len(interface_consumers)} consumer(s) depend on "
+            f"the implemented interface(s). Ensure the contract is not broken."
+        )
+    if data_layer:
+        table_labels = ", ".join(f"**{d['label']}**" for d in data_layer[:5])
+        if len(data_layer) > 5:
+            table_labels += f" and {len(data_layer) - 5} more"
+        recommendations.append(
+            f"**Data layer impact:** this node touches {table_labels}. "
+            f"Include DB migration tests if the schema changes."
+        )
+    if cycles:
+        for cycle in cycles:
+            display = cycle + [cycle[0]]
+            recommendations.append(
+                f"Warning: circular dependency detected: {' -> '.join(display)}"
+            )
+    if critical_paths:
+        top_hotspot = critical_paths[0]
+        if top_hotspot["centrality"] > 0:
+            recommendations.append(
+                f"**{top_hotspot['label']}** is the highest-centrality node in the "
+                f"impact zone — changes here amplify blast radius."
+            )
+
+    if recommendations:
+        lines.append("### Recommendations")
+        lines.append("")
+        for rec in recommendations:
+            lines.append(f"- {rec}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def compute_risk_with_coverage(base_risk: float, node: "Node") -> float:
+    """Apply a 1.5x risk multiplier for nodes confirmed to have no test coverage.
+
+    The penalty is only applied when coverage data is available (i.e. the
+    ``_test_coverage`` key is present in the node's metadata) **and** that
+    value is ``0.0``.  When the key is absent the coverage state is unknown —
+    typically because no coverage report has been loaded — and no penalty is
+    applied (neutral 1.0x multiplier).  This avoids inflating every node's
+    risk score in the common case where coverage mapping has not been run.
 
     Parameters
     ----------
@@ -1434,10 +2080,13 @@ def compute_risk_with_coverage(base_risk: float, node: "Node") -> float:
     Returns
     -------
     float
-        ``base_risk * 1.5`` if uncovered/unknown, ``base_risk`` otherwise.
+        ``base_risk * 1.5`` if coverage data is present and equals ``0.0``,
+        ``base_risk`` otherwise (covered or unknown).
     """
     coverage = node.metadata.get("_test_coverage")
-    if coverage is None or coverage == 0.0:
+    # Only penalise when the coverage key IS present and explicitly zero.
+    # Absent key means no coverage report was loaded — treat as neutral.
+    if "_test_coverage" in node.metadata and coverage == 0.0:
         return base_risk * 1.5
     return base_risk
 
