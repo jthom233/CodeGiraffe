@@ -96,24 +96,22 @@ codegiraffe_update_agent_status(
 
 ### `codegiraffe_release`
 
-Manually release an agent's claimed nodes without changing status.
+Manually release all of an agent's claimed nodes. Releases every node the agent currently holds — there is no per-node selection.
 
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
-| `agent_id` | `str` | — | yes | Agent identifier |
-| `node_ids` | `list[str]` | — | yes | Node IDs to release |
+| `agent_id` | `str` | — | yes | Agent identifier whose claims will be released |
 
-Use this when an agent needs to abandon claims due to an error or cancellation without completing the task.
+Use this when an agent needs to abandon all claims due to an error or cancellation without completing the task.
 
 **Example:**
 ```
 codegiraffe_release(
   project_path="/home/user/my-project",
-  agent_id="agent-1",
-  node_ids=["endpoint:/api/payments", "service:PaymentService"]
+  agent_id="agent-1"
 )
---> {"agent_id": "agent-1", "released_nodes": ["endpoint:/api/payments", "service:PaymentService"]}
+--> {"success": true, "released": 2}
 ```
 
 ---

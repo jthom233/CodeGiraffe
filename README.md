@@ -71,7 +71,7 @@ See the [full tool reference](docs/tools/README.md) for parameter tables and exa
 
 ## Key Capabilities
 
-- **[9-Language Scanner](docs/scanner.md)** — Regex + optional tree-sitter AST scanning for Python, TypeScript, Go, Rust, Java, C/C++, C#, PHP, Ruby
+- **[13-Language Scanner](docs/scanner.md)** — Regex scanning for 9 general-purpose languages (Python, TypeScript, Go, Rust, Java, C/C++, C#, PHP, Ruby) + 4 specialized recognizers (Lua, SQL, .csproj, packages.config); optional tree-sitter AST scanning for Python, TypeScript, Go, Rust, Java, C#
 - **[Edge Confidence Scoring](docs/edge-confidence.md)** — All edges carry confidence values (0.0–1.0) based on detection method
 - **[3 Storage Backends](docs/storage.md)** — JSON (default), SQLite, Neo4j with transparent StorageBackend protocol
 - **[Embedding-Based Scoring](docs/embeddings.md)** — Optional semantic similarity for smarter context retrieval
@@ -102,4 +102,4 @@ MIT
 
 ## Contributing
 
-Contributions welcome. Please follow the [project constitution](docs/architecture.md) and ensure all tests pass before submitting PRs.
+Contributions welcome. Please follow the [project constitution](.specify/memory/constitution.md) and ensure all tests pass before submitting PRs.

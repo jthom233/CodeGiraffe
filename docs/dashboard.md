@@ -8,7 +8,24 @@ Code Giraffe includes a built-in web dashboard for interactive graph exploration
 
 ## Launching the Dashboard
 
-Start the server with HTTP transport:
+### Via the MCP tool (primary method)
+
+Call the `codegiraffe_dashboard` MCP tool from any MCP client (Claude Code, Claude Desktop, etc.):
+
+```
+codegiraffe_dashboard(
+  project_path="/home/user/my-project",
+  port=8251
+)
+--> Dashboard running at http://localhost:8251/dashboard?project_path=...
+    Opened browser to the dashboard.
+```
+
+This starts a standalone Starlette/uvicorn HTTP server on port 8251 (default) as a background daemon thread and opens your default browser. If port 8251 is occupied, the next free port up to 8255 is used automatically. The project must be initialized first (`codegiraffe_init`).
+
+### Via HTTP transport (alternative)
+
+If you are running the MCP server with HTTP transport, you can also access the dashboard directly:
 
 ```bash
 python src/codegiraffe/server.py --transport streamable-http --port 8000

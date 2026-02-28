@@ -40,7 +40,9 @@ Query the graph by node ID or type. Returns a scoped subgraph — not the full g
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `node_id` | `str \| None` | `None` | no | Node ID for subgraph extraction |
 | `node_type` | `str \| None` | `None` | no | Node type for type-based filtering |
+| `query` | `str \| None` | `None` | no | Case-insensitive substring search across node IDs, labels, and metadata values. May be combined with `node_type`. |
 | `depth` | `int` | `2` | no | Maximum hops from the queried node |
+| `max_results` | `int` | `100` | no | Maximum nodes returned for type or text queries. Set to `0` to disable the cap. |
 
 **Example:**
 ```
@@ -87,6 +89,7 @@ Re-scan the project and synchronize the architecture graph, preserving manual an
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `include_tests` | `bool` | `false` | no | Include test files in the scan (excluded by default) |
+| `scanner_mode` | `str` | `"hybrid"` | no | Scanner mode: `"hybrid"` (default, regex + AST with fallback), `"regex"`, or `"ast"` (tree-sitter only) |
 
 **Example:**
 ```
@@ -110,9 +113,13 @@ Incrementally sync specific changed files without a full rescan. Faster than `co
 ```
 codegiraffe_sync_files(
   project_path="/home/user/my-project",
-  file_paths=["src/auth.py", "src/users.py"]
+  file_paths='["src/auth.py", "src/users.py"]'
 )
---> "Synced 2 files. Nodes: 47 -> 49 (delta +2). Edges: 63 -> 66 (delta +3)."
+--> {
+      "added":     {"nodes": 2, "edges": 3},
+      "removed":   {"nodes": 1, "edges": 2},
+      "preserved": {"nodes": 46, "edges": 61}
+    }
 ```
 
 ---
@@ -167,6 +174,7 @@ Check if the graph still matches the actual codebase. Re-scans the project and c
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
+| `scanner_mode` | `str` | `"hybrid"` | no | Scanner mode: `"hybrid"` (default, regex + AST with fallback), `"regex"`, or `"ast"`. Should match the mode used with `codegiraffe_init` to avoid false drift reports. |
 
 Reports four kinds of drift:
 

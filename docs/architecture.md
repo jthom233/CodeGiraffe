@@ -45,7 +45,11 @@ src/codegiraffe/
     ├── cpp.py           # C/C++ recognizer
     ├── csharp.py        # C# recognizer
     ├── php.py           # PHP recognizer
-    └── ruby.py          # Ruby recognizer
+    ├── ruby.py          # Ruby recognizer
+    ├── lua.py           # Lua recognizer
+    ├── sql.py           # SQL recognizer
+    ├── csproj.py        # .csproj project file recognizer
+    └── packages_config.py  # packages.config recognizer
 ```
 
 ---
@@ -107,6 +111,9 @@ All edges carry a `confidence` value (0.0–1.0) reflecting detection reliabilit
 | `external_api` | Third-party API call |
 | `module` | Source file (added in v0.4.0) |
 | `contract` | Cross-system contract (added in v0.8.0) |
+| `project` | Top-level project or repository |
+| `decision` | Architectural decision record (ADR) |
+| `domain` | Business domain grouping |
 
 ### Edge Types
 
@@ -132,6 +139,12 @@ All edges carry a `confidence` value (0.0–1.0) reflecting detection reliabilit
 | `cross_repo_depends_on` | Dependency across federated repos |
 | `cross_repo_publishes` | Publish across federated repos |
 | `cross_repo_consumes` | Consume across federated repos |
+| `constrains` | Architectural constraint relationship |
+| `motivated_by` | Decision motivated by a concern or context |
+| `supersedes` | One decision or node replaces another |
+| `belongs_to` | Node membership in a domain |
+| `tested_by` | Node is tested by a test node |
+| `project_contains` | Project-level containment |
 
 ### Custom Types
 

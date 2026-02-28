@@ -47,7 +47,7 @@ codegiraffe_context_for(
 )
 --> JSON subgraph with payments endpoint, its middleware, DB tables, env vars, ranked by relevance
     _token_estimate: 1856
-    _retrieval_strategy: "combined" (embedding + impact)
+    _retrieval_strategy: "modify"
 ```
 
 ---
@@ -113,8 +113,9 @@ Analyze the blast radius of changing a specific node. Returns what breaks downst
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
-| `node_id` | `str` | — | yes | Node to analyze blast radius for |
-| `include_upstream` | `bool` | `false` | no | Include upstream dependencies |
+| `node_id` | `str \| None` | `None` | no | Exact node ID to analyze. Takes precedence over `query`. |
+| `query` | `str \| None` | `None` | no | Free-text search to find the target node (substring + semantic match). Use when you don't know the exact node ID. |
+| `include_upstream` | `bool` | `false` | no | Accepted for backwards compatibility; upstream is always included in the report. |
 | `max_depth` | `int \| None` | `None` | no | Limit analysis to N hops |
 
 **Example:**
@@ -131,7 +132,7 @@ codegiraffe_blast_radius(
 
 ### `codegiraffe_risk_assessment`
 
-Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4) + (descendants/total * 0.2). Incorporates test coverage data — uncovered nodes receive a 1.5x risk multiplier.
+Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4) + (descendants/total * 0.2).
 
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|

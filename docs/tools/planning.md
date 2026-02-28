@@ -27,7 +27,7 @@ codegiraffe_annotate(
   stability="stable",
   notes="Stripe integration. Critical path. Do not break."
 )
---> "Annotated service:PaymentService: owner=payments-team, stability=stable"
+--> "Annotated node 'service:PaymentService' with: owner, stability, notes"
 ```
 
 ---
@@ -43,20 +43,9 @@ List all defined domains in the architecture graph.
 **Example:**
 ```
 codegiraffe_list_domains(project_path="/home/user/my-project")
---> {
-      "domains": [
-        {
-          "name": "auth",
-          "nodes": ["endpoint:/api/login", "service:AuthService", "table:users"],
-          "member_count": 3
-        },
-        {
-          "name": "payments",
-          "nodes": ["endpoint:/api/payments", "service:PaymentService"],
-          "member_count": 2
-        }
-      ]
-    }
+--> Domains:
+      auth [manual]: 3 member(s)
+      payments: 2 member(s)
 ```
 
 ---
@@ -74,20 +63,9 @@ Auto-clustering creates domains for any cluster with 2+ members. Manual domains 
 **Example:**
 ```
 codegiraffe_infer_domains(project_path="/home/user/my-project")
---> {
-      "domains": [
-        {
-          "name": "auth",
-          "nodes": ["endpoint:/api/login", "service:AuthService", "table:users"],
-          "inferred_from": "src/auth/*"
-        },
-        {
-          "name": "payments",
-          "nodes": ["endpoint:/api/payments", "service:PaymentService", "queue:payment-events"],
-          "inferred_from": "src/payments/*"
-        }
-      ]
-    }
+--> Inferred and added domains:
+      auth: 3 member(s)
+      payments: 3 member(s)
 ```
 
 ---
@@ -109,7 +87,7 @@ codegiraffe_add_domain(
   name="billing",
   node_ids="endpoint:/api/billing,service:BillingService,table:invoices"
 )
---> {"domain": "billing", "nodes": ["endpoint:/api/billing", "service:BillingService", "table:invoices"]}
+--> "Added domain 'billing' with 3 member(s)."
 ```
 
 ---
@@ -129,7 +107,7 @@ codegiraffe_remove_domain(
   project_path="/home/user/my-project",
   name="billing"
 )
---> {"status": "removed", "domain": "billing"}
+--> "Removed domain 'billing'."
 ```
 
 ---
@@ -180,30 +158,16 @@ codegiraffe_migration_plan(
   description="migrate auth from Firebase to JWT",
   target_nodes='["service:AuthService", "endpoint:/api/login"]'
 )
---> {
-      "phases": [
-        {
-          "phase": 1,
-          "title": "Create JWT infrastructure",
-          "nodes": ["service:TokenService"],
-          "estimated_effort": "1-2 days"
-        },
-        {
-          "phase": 2,
-          "title": "Dual-mode endpoints (Firebase + JWT)",
-          "nodes": ["endpoint:/api/login"],
-          "estimated_effort": "2-3 days"
-        },
-        {
-          "phase": 3,
-          "title": "Migrate consumers to JWT",
-          "nodes": ["service:UserService", "component:Dashboard"],
-          "estimated_effort": "1-2 days"
-        }
-      ],
-      "total_estimated_effort": "4-7 days",
-      "breaking_points": []
-    }
+--> ## Migration Plan: migrate auth from Firebase to JWT
+
+    **Steps:** 2  |  **Files affected:** 2  |  **Checkpoints:** 1
+
+    ### Steps
+    1. migrate `endpoint:/api/login` (`src/api/login.py`) ✓ checkpoint
+    2. migrate `service:AuthService` (`src/services/auth_service.py`)
+
+    ### Contract Implications
+    - **UserAuthContract**: producer changes — verify consumers
 ```
 
 ---

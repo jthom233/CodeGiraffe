@@ -45,7 +45,26 @@ Validate the integrity of cross-system contracts. Checks that all contract produ
 **Example:**
 ```
 codegiraffe_validate_contracts(project_path="/home/user/my-project")
---> {"valid": 12, "warnings": 2, "errors": 1, "details": [...]}
+--> ## Contract Validation Report
+
+    **Total contracts:** 15
+
+    ### Valid (12)
+
+    - **UserService API** (api)
+    - **PaymentService API** (api)
+
+    ### Broken -- Producer Missing (1)
+
+    - **LegacyAuthContract** -- producer `endpoint:/api/legacy-auth` not in graph
+
+    ### Orphaned -- All Consumers Missing (1)
+
+    - **InternalQueue** -- consumers ['service:OldWorker'] not in graph
+
+    ### Deprecated With Active Consumers (1)
+
+    - **UserV1Contract** -- deprecated but still consumed by ['component:Dashboard']
 ```
 
 ---

@@ -34,7 +34,7 @@ codegiraffe_validate_changes(project_path="/home/user/my-project")
 
 ### `codegiraffe_suggest_tests`
 
-Suggest test files to run based on uncommitted (or arbitrary) changes. Uses graph relationships, naming conventions, and blast radius analysis to identify the most relevant tests. Includes `coverage_status` field (covered/uncovered/unknown).
+Suggest test files to run based on uncommitted (or arbitrary) changes. Uses graph relationships, naming conventions, and blast radius analysis to identify the most relevant tests.
 
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
@@ -51,17 +51,14 @@ Tests are scored by three strategies:
 **Example:**
 ```
 codegiraffe_suggest_tests(project_path="/home/user/my-project")
---> ## Test Suggestions
-    **3 test(s) suggested**
-
-    ### High Relevance (score >= 0.7)
-    - tests/test_auth.py (0.90) — graph: imports changed module [graph] (coverage: covered)
-
-    ### Medium Relevance (0.3 <= score < 0.7)
-    - tests/test_users.py (0.60) — naming: matches changed file users.py [naming] (coverage: uncovered)
-
-    ### Low Relevance (score < 0.3)
-    - tests/test_api.py (0.30) — blast radius: transitive dependency [blast_radius] (coverage: unknown)
+--> {
+      "total_suggestions": 3,
+      "suggestions": [
+        {"file_path": "tests/test_auth.py", "score": 0.9, "reason": "imports changed module", "strategy": "graph", "relevance": "high"},
+        {"file_path": "tests/test_users.py", "score": 0.6, "reason": "matches changed file users.py", "strategy": "naming", "relevance": "medium"},
+        {"file_path": "tests/test_api.py", "score": 0.3, "reason": "transitive dependency", "strategy": "blast_radius", "relevance": "medium"}
+      ]
+    }
 ```
 
 ---
