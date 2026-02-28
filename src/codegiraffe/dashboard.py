@@ -797,32 +797,32 @@ body {
     });
     html += '<div class="legend-divider"></div>';
     var edgeStyles = {
-      imports: { color: '#E67E22', style: 'dashed' },
-      implements: { color: '#9B59B6', style: '' },
-      calls: { color: '#3498DB', style: '' },
-      contains: { color: '#2ECC71', style: 'dotted' },
-      produces: { color: '#8E44AD', style: '' },
-      consumes_contract: { color: '#9B59B6', style: 'dashed' },
-      validates: { color: '#27AE60', style: 'dotted' },
-      violates: { color: '#E74C3C', style: '' },
-      depends_on: { color: '#7af74e', style: '' },
-      uses: { color: '#4ef7f7', style: '' },
-      belongs_to: { color: '#f76a4e', style: 'dotted' },
-      constrains: { color: '#2196F3', style: 'dotted' },
-      supersedes: { color: '#9E9E9E', style: 'dashed' },
-      reads: { color: '#5DADE2', style: '' },
-      writes: { color: '#E74C3C', style: '' },
-      publishes: { color: '#F39C12', style: 'dashed' },
-      consumes: { color: '#1ABC9C', style: 'dashed' },
-      configures: { color: '#D4AC0D', style: 'dotted' },
-      owns: { color: '#BDC3C7', style: 'dotted' },
-      triggers: { color: '#E91E63', style: '' },
-      cross_repo_depends_on: { color: '#FF6B6B', style: 'dashed' },
-      cross_repo_calls: { color: '#FF9F43', style: 'dashed' },
-      cross_repo_publishes: { color: '#FECA57', style: 'dashed' },
-      cross_repo_consumes: { color: '#54A0FF', style: 'dashed' },
-      motivated_by: { color: '#A29BFE', style: 'dotted' },
-      tested_by: { color: '#00D2D3', style: 'dotted' }
+      imports: { color: '#E67E22' },
+      implements: { color: '#9B59B6' },
+      calls: { color: '#3498DB' },
+      contains: { color: '#2ECC71' },
+      produces: { color: '#8E44AD' },
+      consumes_contract: { color: '#9B59B6' },
+      validates: { color: '#27AE60' },
+      violates: { color: '#E74C3C' },
+      depends_on: { color: '#7af74e' },
+      uses: { color: '#4ef7f7' },
+      belongs_to: { color: '#f76a4e' },
+      constrains: { color: '#2196F3' },
+      supersedes: { color: '#9E9E9E' },
+      reads: { color: '#5DADE2' },
+      writes: { color: '#E74C3C' },
+      publishes: { color: '#F39C12' },
+      consumes: { color: '#1ABC9C' },
+      configures: { color: '#D4AC0D' },
+      owns: { color: '#BDC3C7' },
+      triggers: { color: '#E91E63' },
+      cross_repo_depends_on: { color: '#FF6B6B' },
+      cross_repo_calls: { color: '#FF9F43' },
+      cross_repo_publishes: { color: '#FECA57' },
+      cross_repo_consumes: { color: '#54A0FF' },
+      motivated_by: { color: '#A29BFE' },
+      tested_by: { color: '#00D2D3' }
     };
     // Collect edge types actually present in the graph
     var activeEdgeTypes = new Set();
@@ -834,7 +834,7 @@ body {
     Object.keys(edgeStyles).forEach(function(t) {
       if (graph && activeEdgeTypes.size > 0 && !activeEdgeTypes.has(t)) return;
       var s = edgeStyles[t];
-      html += '<div class="legend-item"><span class="legend-line ' + s.style + '" style="border-color:' + s.color + '"></span>' + escapeHtml(t) + '</div>';
+      html += '<div class="legend-item"><span class="legend-line" style="border-color:' + s.color + '"></span>' + escapeHtml(t) + '</div>';
     });
     $legend.innerHTML = html;
   }
