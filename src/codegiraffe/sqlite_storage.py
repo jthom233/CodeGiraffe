@@ -90,6 +90,10 @@ class SQLiteStorage:
 
         try:
             conn = self._connect(project_path)
+        except sqlite3.Error:
+            return None
+
+        try:
             self._ensure_schema(conn)
 
             # Load metadata
@@ -129,8 +133,6 @@ class SQLiteStorage:
                     )
                 )
 
-            conn.close()
-
             return GraphData(
                 nodes=nodes,
                 edges=edges,
@@ -140,6 +142,8 @@ class SQLiteStorage:
             )
         except (sqlite3.Error, ValueError, TypeError):
             return None
+        finally:
+            conn.close()
 
     def save(self, project_path: str, data: GraphData) -> None:
         """Save graph data to the SQLite database.
@@ -149,60 +153,61 @@ class SQLiteStorage:
         data within a single transaction.
         """
         conn = self._connect(project_path)
-        self._ensure_schema(conn)
+        try:
+            self._ensure_schema(conn)
 
-        with conn:
-            # Clear existing data
-            conn.execute("DELETE FROM edges")
-            conn.execute("DELETE FROM nodes")
-            conn.execute("DELETE FROM graph_meta")
+            with conn:
+                # Clear existing data
+                conn.execute("DELETE FROM edges")
+                conn.execute("DELETE FROM nodes")
+                conn.execute("DELETE FROM graph_meta")
 
-            # Save metadata
-            conn.execute(
-                "INSERT INTO graph_meta VALUES (?, ?)",
-                ("project_path", data.project_path),
-            )
-            conn.execute(
-                "INSERT INTO graph_meta VALUES (?, ?)",
-                ("last_scan", data.last_scan or ""),
-            )
-            conn.execute(
-                "INSERT INTO graph_meta VALUES (?, ?)",
-                ("schema_version", data.schema_version),
-            )
-
-            # Save nodes
-            for nid, node in data.nodes.items():
+                # Save metadata
                 conn.execute(
-                    "INSERT INTO nodes (id, type, label, file_path, metadata, manual) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        node.id,
-                        node.type,
-                        node.label,
-                        node.file_path,
-                        json.dumps(node.metadata),
-                        int(node.manual),
-                    ),
+                    "INSERT INTO graph_meta VALUES (?, ?)",
+                    ("project_path", data.project_path),
+                )
+                conn.execute(
+                    "INSERT INTO graph_meta VALUES (?, ?)",
+                    ("last_scan", data.last_scan or ""),
+                )
+                conn.execute(
+                    "INSERT INTO graph_meta VALUES (?, ?)",
+                    ("schema_version", data.schema_version),
                 )
 
-            # Save edges
-            for edge in data.edges:
-                conn.execute(
-                    "INSERT OR IGNORE INTO edges "
-                    "(source, target, type, metadata, manual, confidence) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        edge.source,
-                        edge.target,
-                        edge.type,
-                        json.dumps(edge.metadata),
-                        int(edge.manual),
-                        edge.confidence,
-                    ),
-                )
+                # Save nodes
+                for nid, node in data.nodes.items():
+                    conn.execute(
+                        "INSERT INTO nodes (id, type, label, file_path, metadata, manual) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            node.id,
+                            node.type,
+                            node.label,
+                            node.file_path,
+                            json.dumps(node.metadata),
+                            int(node.manual),
+                        ),
+                    )
 
-        conn.close()
+                # Save edges
+                for edge in data.edges:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO edges "
+                        "(source, target, type, metadata, manual, confidence) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            edge.source,
+                            edge.target,
+                            edge.type,
+                            json.dumps(edge.metadata),
+                            int(edge.manual),
+                            edge.confidence,
+                        ),
+                    )
+        finally:
+            conn.close()
 
     def exists(self, project_path: str) -> bool:
         """Check whether the SQLite database file exists on disk."""
