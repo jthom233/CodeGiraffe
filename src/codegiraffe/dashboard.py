@@ -495,8 +495,8 @@ body {
   const edgeReducer = function(edge, data) {
     var res = Object.assign({}, data);
     res.color = EDGE_COLORS[data.edgeType] || EDGE_COLORS.default;
-    res.size = 1.5;
-    if (data.highlighted) { res.color = '#F1C40F'; res.size = 3; }
+    res.size = 2.5;
+    if (data.highlighted) { res.color = '#F1C40F'; res.size = 4; }
     if (data.hidden) { res.hidden = true; }
     return res;
   };
@@ -787,11 +787,12 @@ body {
   }
 
   // ---- Legend ----
-  function buildLegend() {
+  function buildLegend(graph) {
     var $legend = document.getElementById('legend');
     if (!$legend) { return; }
     var html = '';
     Object.keys(TYPE_COLORS).sort().forEach(function(t) {
+      if (t === 'default') return;
       html += '<div class="legend-item"><span class="legend-swatch" style="background:' + TYPE_COLORS[t] + '"></span>' + escapeHtml(t) + '</div>';
     });
     html += '<div class="legend-divider"></div>';
@@ -821,12 +822,19 @@ body {
       cross_repo_publishes: { color: '#FECA57', style: 'dashed' },
       cross_repo_consumes: { color: '#54A0FF', style: 'dashed' },
       motivated_by: { color: '#A29BFE', style: 'dotted' },
-      tested_by: { color: '#00D2D3', style: 'dotted' },
-      default: { color: '#2a3a5e', style: '' }
+      tested_by: { color: '#00D2D3', style: 'dotted' }
     };
+    // Collect edge types actually present in the graph
+    var activeEdgeTypes = new Set();
+    if (graph) {
+      graph.forEachEdge(function(edge, attrs) {
+        if (attrs.edgeType) activeEdgeTypes.add(attrs.edgeType);
+      });
+    }
     Object.keys(edgeStyles).forEach(function(t) {
+      if (graph && activeEdgeTypes.size > 0 && !activeEdgeTypes.has(t)) return;
       var s = edgeStyles[t];
-      html += '<div class="legend-item"><span class="legend-line ' + s.style + '" style="border-color:' + s.color + '"></span>' + t + '</div>';
+      html += '<div class="legend-item"><span class="legend-line ' + s.style + '" style="border-color:' + s.color + '"></span>' + escapeHtml(t) + '</div>';
     });
     $legend.innerHTML = html;
   }
@@ -913,7 +921,7 @@ body {
       $search.disabled = false;
       $search.value = '';
       initSigma(graph);
-      buildLegend();
+      buildLegend(graph);
     } catch(e) {
       showError(e.message);
     } finally {
