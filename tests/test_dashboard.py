@@ -11,12 +11,14 @@ import json
 import pytest
 
 from codegiraffe.dashboard import (
-    DASHBOARD_HTML,
+    _load_dashboard_html,
     get_graph_json,
     get_node_detail,
     get_subgraph_json,
     register_dashboard_routes,
 )
+
+DASHBOARD_HTML = _load_dashboard_html()
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 
 

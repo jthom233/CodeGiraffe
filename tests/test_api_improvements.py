@@ -531,14 +531,16 @@ class TestUpdateAgentStatusTool:
         assert data["claim"]["status"] == "done"
 
 
-class TestOldStatusToolRemoved:
-    """codegiraffe_status has been renamed; the old name should not exist."""
+class TestStatusToolsExist:
+    """codegiraffe_status is a project health check tool (distinct from codegiraffe_update_agent_status)."""
 
-    def test_codegiraffe_status_does_not_exist(self):
-        """codegiraffe_status has been renamed to codegiraffe_update_agent_status."""
-        assert not hasattr(server_module, "codegiraffe_status"), (
-            "codegiraffe_status should have been renamed to "
-            "codegiraffe_update_agent_status"
+    def test_codegiraffe_status_exists(self):
+        """codegiraffe_status is a project health check tool (distinct from codegiraffe_update_agent_status)."""
+        assert hasattr(server_module, "codegiraffe_status"), (
+            "codegiraffe_status should exist as a project health check tool"
+        )
+        assert hasattr(server_module, "codegiraffe_update_agent_status"), (
+            "codegiraffe_update_agent_status should still exist for agent coordination"
         )
 
 
@@ -548,10 +550,10 @@ class TestOldStatusToolRemoved:
 
 
 class TestToolCount:
-    """Verify total MCP tool count is 40 after all changes."""
+    """Verify total MCP tool count is 41 after all changes."""
 
-    def test_tool_count_is_40(self):
-        """Server exposes exactly 40 MCP tools after API improvements."""
+    def test_tool_count_is_41(self):
+        """Server exposes exactly 41 MCP tools after API improvements."""
         # Get all @mcp.tool() decorated functions
         # FastMCP stores tools in _tool_manager or similar
         mcp = server_module.mcp
@@ -567,8 +569,8 @@ class TestToolCount:
             tools = getattr(tool_manager, "_tools", None)
             if tools is not None:
                 count = len(tools)
-                assert count == 40, (
-                    f"Expected 40 tools, got {count}. "
+                assert count == 41, (
+                    f"Expected 41 tools, got {count}. "
                     f"Tools: {sorted(tools.keys())}"
                 )
         # If we can't inspect the tool manager, skip the count test

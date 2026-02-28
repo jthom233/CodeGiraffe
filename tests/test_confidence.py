@@ -551,7 +551,8 @@ class TestDashboardConfidenceOpacity:
 
     def test_dashboard_html_contains_confidence_opacity_logic(self):
         """The dashboard HTML must reference confidence-based opacity for edges."""
-        from codegiraffe.dashboard import DASHBOARD_HTML
+        from codegiraffe.dashboard import _load_dashboard_html
+        DASHBOARD_HTML = _load_dashboard_html()
 
         # Check that the dashboard JS references confidence and opacity
         assert "confidence" in DASHBOARD_HTML, (

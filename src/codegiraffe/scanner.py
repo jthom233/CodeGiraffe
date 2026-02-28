@@ -349,6 +349,7 @@ _IGNORE_DIRS: frozenset[str] = frozenset(
         "venv",
         ".env",
         ".codegiraffe",
+        ".claude",
         ".tox",
         ".mypy_cache",
         ".pytest_cache",

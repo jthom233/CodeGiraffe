@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Code Giraffe post-commit hook
+# Automatically syncs changed files to the architecture graph after each commit.
+# 
+# Install: cp hooks/post-commit .git/hooks/post-commit && chmod +x .git/hooks/post-commit
+# Or:      ln -sf ../../hooks/post-commit .git/hooks/post-commit
+
+set -euo pipefail
+
+# Skip if codegiraffe hasn't been initialized for this project
+GRAPH_FILE=".codegiraffe/graph.json"
+if [ ! -f "$GRAPH_FILE" ]; then
+    exit 0
+fi
+
+# Get the list of files changed in the last commit
+CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+if [ -z "$CHANGED_FILES" ]; then
+    exit 0
+fi
+
+# Convert newline-separated list to JSON array
+JSON_ARRAY=$(echo "$CHANGED_FILES" | python3 -c "
+import sys, json
+files = [f.strip() for f in sys.stdin if f.strip()]
+print(json.dumps(files))
+")
+
+# Find the project's venv Python
+PROJECT_DIR="$(git rev-parse --show-toplevel)"
+VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
+
+if [ ! -x "$VENV_PYTHON" ]; then
+    # Fallback: try system python with codegiraffe installed
+    VENV_PYTHON="python3"
+fi
+
+# Run sync_files in the background (non-blocking)
+nohup "$VENV_PYTHON" -c "
+from codegiraffe.storage import JSONStorage
+from codegiraffe.scanner import scan_project, _scan_single_file
+from codegiraffe.graph import ArchGraph
+import json
+
+project_path = '$PROJECT_DIR'
+file_paths = json.loads('$JSON_ARRAY')
+
+storage = JSONStorage()
+if not storage.exists(project_path):
+    exit(0)
+
+data = storage.load(project_path)
+if data is None:
+    exit(0)
+
+graph = ArchGraph.from_data(data)
+
+# Use the same scan helper as sync_files
+from codegiraffe.registry import RecognizerRegistry
+from pathlib import Path
+registry = RecognizerRegistry()
+for fp in file_paths:
+    full_path = Path(project_path) / fp
+    if full_path.exists() and full_path.is_file():
+        _scan_single_file(graph, full_path, project_path, registry)
+
+storage.save(project_path, graph.to_data())
+" > /dev/null 2>&1 &
+
+exit 0

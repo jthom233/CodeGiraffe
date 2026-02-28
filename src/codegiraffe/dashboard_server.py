@@ -199,7 +199,7 @@ class DashboardServer:
         from starlette.routing import Route
 
         from codegiraffe.dashboard import (
-            DASHBOARD_HTML,
+            _load_dashboard_html,
             _load_logo_bytes,
             get_graph_json,
             get_node_detail,
@@ -210,7 +210,7 @@ class DashboardServer:
         storage = self._storage
 
         async def dashboard_page(request: Request) -> HTMLResponse:
-            return HTMLResponse(DASHBOARD_HTML)
+            return HTMLResponse(_load_dashboard_html())
 
         async def init_graph(request: Request) -> JSONResponse:
             """Initialize/scan a project so the dashboard can display it.

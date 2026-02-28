@@ -331,7 +331,8 @@ class TestUS4DashboardXssEscaping:
 
     def test_type_distribution_panel_uses_escape(self):
         """Type distribution panel must call escapeHtml() on the type key."""
-        from codegiraffe.dashboard import DASHBOARD_HTML
+        from codegiraffe.dashboard import _load_dashboard_html
+        DASHBOARD_HTML = _load_dashboard_html()
 
         # The type distribution HTML generation loop must use escapeHtml on 't'
         # Look for the pattern in the JS: escapeHtml(t) used in dist-row
@@ -342,7 +343,8 @@ class TestUS4DashboardXssEscaping:
 
     def test_legend_node_type_uses_escape(self):
         """Legend item generation must call escapeHtml() on the type key."""
-        from codegiraffe.dashboard import DASHBOARD_HTML
+        from codegiraffe.dashboard import _load_dashboard_html
+        DASHBOARD_HTML = _load_dashboard_html()
 
         # The legend item generation loop must use escapeHtml for node type labels
         # The pattern is: escapeHtml(t) used in legend-item generation
@@ -352,7 +354,8 @@ class TestUS4DashboardXssEscaping:
 
     def test_xss_payload_not_raw_in_dist_row(self):
         """The dist-row and legend-item template strings must use escapeHtml(t)."""
-        from codegiraffe.dashboard import DASHBOARD_HTML
+        from codegiraffe.dashboard import _load_dashboard_html
+        DASHBOARD_HTML = _load_dashboard_html()
 
         # Verify that `+ t +` is NOT present (only `+ escapeHtml(t) +` should be)
         # in the innerHTML-building sections for dist-row and legend-item.

@@ -2147,6 +2147,68 @@ def codegiraffe_agents(project_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Status tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def codegiraffe_status(project_path: str) -> str:
+    """Get the initialization status and health of a project's architecture graph.
+
+    Returns a JSON object with graph statistics, staleness, and active agents.
+    Does not require the graph to be loaded into memory — reads directly from storage.
+    """
+    try:
+        if not _storage.exists(project_path):
+            return json.dumps({"initialized": False, "project_path": project_path}, indent=2)
+
+        graph_data = _storage.load(project_path)
+        metadata = graph_data.metadata or {}
+
+        last_scan_raw = metadata.get("scanned_at")
+        if last_scan_raw:
+            try:
+                last_scan_dt = datetime.fromisoformat(last_scan_raw)
+                if last_scan_dt.tzinfo is None:
+                    last_scan_dt = last_scan_dt.replace(tzinfo=timezone.utc)
+                delta = datetime.now(timezone.utc) - last_scan_dt
+                total_seconds = delta.total_seconds()
+                if total_seconds < 3600:
+                    staleness = "fresh"
+                elif total_seconds < 86400:
+                    staleness = "stale"
+                else:
+                    staleness = "very_stale"
+            except (ValueError, TypeError):
+                staleness = "unknown"
+        else:
+            last_scan_raw = None
+            staleness = "unknown"
+
+        try:
+            active_agents = _coordinator.list_agents(project_path)
+        except Exception:
+            active_agents = []
+
+        return json.dumps(
+            {
+                "initialized": True,
+                "project_path": project_path,
+                "node_count": len(graph_data.nodes),
+                "edge_count": len(graph_data.edges),
+                "last_scan": last_scan_raw,
+                "staleness": staleness,
+                "storage_backend": type(_storage).__name__,
+                "active_agents": active_agents,
+                "schema_version": metadata.get("schema_version"),
+            },
+            indent=2,
+        )
+    except Exception as e:
+        return f"Error getting status: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Versioning tools
 # ---------------------------------------------------------------------------
 
