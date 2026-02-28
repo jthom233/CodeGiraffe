@@ -274,9 +274,9 @@ class DashboardServer:
                     {"error": "project_path query parameter required"}, status_code=400
                 )
             try:
-                max_nodes = int(request.query_params.get("max_nodes", "500"))
+                max_nodes = int(request.query_params.get("max_nodes", "20000"))
             except ValueError:
-                max_nodes = 500
+                max_nodes = 20000
 
             path_prefix = request.query_params.get("path_prefix", "")
             node_types_raw = request.query_params.get("node_types", "")

@@ -49,7 +49,7 @@ def _load_logo_bytes() -> bytes | None:
 def get_graph_json(
     ensure_graph_fn: Callable[[str], ArchGraph],
     project_path: str,
-    max_nodes: int = 500,
+    max_nodes: int = 20000,
     path_prefix: str = "",
     node_types: list[str] | None = None,
 ) -> dict:
@@ -877,7 +877,7 @@ body {
     var pathPrefix = $pathPrefix.value.trim();
 
     var apiUrl = '/api/graph?project_path=' + encodeURIComponent(path);
-    apiUrl += '&max_nodes=' + (isNaN(maxNodes) ? 500 : maxNodes);
+    apiUrl += '&max_nodes=' + (isNaN(maxNodes) ? 20000 : maxNodes);
     if (pathPrefix) { apiUrl += '&path_prefix=' + encodeURIComponent(pathPrefix); }
 
     try {
@@ -1291,9 +1291,9 @@ def register_dashboard_routes(
         if not project_path:
             return JSONResponse({"error": "project_path query parameter required"}, status_code=400)
         try:
-            max_nodes = int(request.query_params.get("max_nodes", "500"))
+            max_nodes = int(request.query_params.get("max_nodes", "20000"))
         except ValueError:
-            max_nodes = 500
+            max_nodes = 20000
 
         path_prefix = request.query_params.get("path_prefix", "")
         node_types_raw = request.query_params.get("node_types", "")
