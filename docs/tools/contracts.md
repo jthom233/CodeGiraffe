@@ -73,6 +73,8 @@ codegiraffe_validate_contracts(project_path="/home/user/my-project")
 
 Manually create a cross-system contract node with its producer and consumer relationships. The contract node and its edges are marked as manual so they survive re-scans.
 
+If `producer` or any `consumers` id does not already exist in the graph, a placeholder `service` node (`manual=True`, `metadata.placeholder = True`) is created for it so the edge never points at a dataless node; the result text includes a warning noting the placeholder was created.
+
 | Parameter | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |

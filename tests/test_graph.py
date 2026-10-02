@@ -361,6 +361,35 @@ class TestGetHotspots:
         hotspots = sample_graph.get_hotspots(top_n=2)
         assert len(hotspots) <= 2
 
+    def test_get_hotspots_ignores_dataless_nodes(self):
+        """A dataless (ghost) node with the highest degree must not consume
+        a top_n slot or appear in the results."""
+        graph = ArchGraph()
+        for nid in ("a", "b", "c", "d"):
+            graph.add_node(Node(id=nid, type=NodeType.SERVICE, label=nid))
+
+        # Real edges among the 4 real nodes.
+        graph.add_edge(Edge(source="a", target="b", type=EdgeType.CALLS))
+        graph.add_edge(Edge(source="a", target="c", type=EdgeType.CALLS))
+        graph.add_edge(Edge(source="a", target="d", type=EdgeType.CALLS))
+        graph.add_edge(Edge(source="b", target="c", type=EdgeType.CALLS))
+
+        # Ghost node fans out to every real node via add_edge only, so it is
+        # auto-created with no "node" payload but ranks highly on degree.
+        for nid in ("a", "b", "c", "d"):
+            graph.add_edge(Edge(source="ghost", target=nid, type=EdgeType.CALLS))
+
+        assert graph.graph.nodes["ghost"].get("node") is None
+
+        hotspots = graph.get_hotspots(top_n=3)
+
+        assert len(hotspots) == 3
+        result_ids = [node.id for node, _ in hotspots]
+        assert "ghost" not in result_ids
+
+        scores = [score for _, score in hotspots]
+        assert scores == sorted(scores, reverse=True)
+
 
 class TestMergeManualAnnotations:
     """test_merge_manual_annotations -- add manual nodes/edges, rescan,

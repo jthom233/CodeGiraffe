@@ -397,7 +397,10 @@ class TestBlastRadiusTool:
         assert isinstance(result, dict)
         assert "target" in result
         assert "total_affected" in result
-        assert "downstream" in result
+        assert "direct_impact" in result
+        assert "transitive_impact" in result
+        assert "indirect_impact" in result
+        assert "downstream" not in result
         assert "upstream" in result
 
     def test_blast_radius_missing_node(self, tmp_path):
@@ -436,9 +439,75 @@ class TestBlastRadiusTool:
         assert isinstance(result_full, dict)
         # The limited version should have fewer downstream nodes
         # D is 3 hops away, so it should be excluded at max_depth=1
-        limited_node_ids = {n["node_id"] for n in result_limited.get("downstream", [])}
-        full_node_ids = {n["node_id"] for n in result_full.get("downstream", [])}
+        def _downstream_ids(result: dict) -> set:
+            return {
+                n["node_id"]
+                for key in ("direct_impact", "transitive_impact", "indirect_impact")
+                for n in result.get(key, [])
+            }
+
+        limited_node_ids = _downstream_ids(result_limited)
+        full_node_ids = _downstream_ids(result_full)
         assert len(limited_node_ids) <= len(full_node_ids)
+
+    def test_blast_radius_severity_buckets_partition_downstream(self, tmp_path):
+        """direct_impact / transitive_impact / indirect_impact are disjoint and
+        together account for every downstream node exactly once (A->B->C->D->E)."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+        codegiraffe_add_relation(project_path, "B", "C", "calls")
+        codegiraffe_add_relation(project_path, "C", "D", "calls")
+        codegiraffe_add_relation(project_path, "D", "E", "calls")
+
+        result = codegiraffe_blast_radius(project_path, node_id="A")
+        assert isinstance(result, dict)
+        assert "downstream" not in result
+
+        direct_ids = {n["node_id"] for n in result["direct_impact"]}
+        transitive_ids = {n["node_id"] for n in result["transitive_impact"]}
+        indirect_ids = {n["node_id"] for n in result["indirect_impact"]}
+
+        assert "B" in direct_ids
+        assert "C" in transitive_ids
+        assert "D" in transitive_ids
+        assert "E" in indirect_ids
+
+        # Buckets are pairwise disjoint.
+        assert direct_ids.isdisjoint(transitive_ids)
+        assert direct_ids.isdisjoint(indirect_ids)
+        assert transitive_ids.isdisjoint(indirect_ids)
+
+        # No entry lost by the split: bucket sizes sum to the unique downstream count.
+        all_downstream_ids = direct_ids | transitive_ids | indirect_ids
+        assert (
+            len(direct_ids) + len(transitive_ids) + len(indirect_ids)
+            == len(all_downstream_ids)
+        )
+
+    def test_blast_preferred_types_includes_migration(self):
+        """The migration node type is a preferred fuzzy-query resolution target."""
+        assert "migration" in server_module._BLAST_PREFERRED_TYPES
+
+    def test_blast_radius_query_resolves_to_migration_node(self, tmp_path):
+        """A blast-radius query matching a migration-only .sql file's stem
+        resolves the target to its migration:<stem> node."""
+        sql_dir = tmp_path / "SqlServer" / "12.0"
+        sql_dir.mkdir(parents=True)
+        (sql_dir / "000025.sql").write_text(
+            "ALTER TABLE tbSession ADD Flag BIT;\n"
+        )
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+
+        result = codegiraffe_blast_radius(project_path, query="000025")
+
+        assert isinstance(result, dict)
+        assert "target" in result, result
+        target = result["target"]
+        target_id = target["id"] if isinstance(target, dict) else target
+        assert target_id == "migration:000025"
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +583,45 @@ class TestRiskAssessmentTool:
         assert isinstance(result, dict)
         assert "error" in result
         assert "Graph is empty" in result["error"]
+
+    def test_risk_assessment_applies_coverage_multiplier(self, tmp_path):
+        """Nodes with _test_coverage == 0.0 get a 1.5x risk multiplier."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+        codegiraffe_add_relation(project_path, "B", "C", "calls")
+
+        server_module._graph.graph.nodes["A"]["node"].metadata["_test_coverage"] = 0.0
+        server_module._graph.graph.nodes["B"]["node"].metadata["_test_coverage"] = 80.0
+
+        result = codegiraffe_risk_assessment(project_path, node_ids=["A", "B"])
+        by_id = {node["node_id"]: node for node in result["nodes"]}
+
+        uncovered = by_id["A"]
+        covered = by_id["B"]
+
+        assert uncovered["risk_score"] == pytest.approx(
+            uncovered["base_risk_score"] * 1.5, rel=1e-3
+        )
+        assert "no test coverage (1.5x risk)" in uncovered["risk_explanation"]
+
+        assert covered["risk_score"] == pytest.approx(covered["base_risk_score"])
+        assert "no test coverage (1.5x risk)" not in covered["risk_explanation"]
+
+    def test_risk_assessment_without_coverage_is_unchanged(self, tmp_path):
+        """When no coverage metadata exists, risk_score equals base_risk_score."""
+        (tmp_path / "app.py").write_text("class AppService:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+        codegiraffe_add_relation(project_path, "A", "B", "calls")
+        codegiraffe_add_relation(project_path, "B", "C", "calls")
+
+        result = codegiraffe_risk_assessment(project_path)
+        assert isinstance(result, dict)
+        for node in result["nodes"]:
+            assert node["risk_score"] == pytest.approx(node["base_risk_score"])
+            assert node.get("test_coverage") is None
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +886,34 @@ class TestContractTools:
         )
         assert "Error" in result
         assert "invalid_type" in result
+
+    def test_add_contract_creates_placeholder_nodes_for_unknown_ids(self, tmp_path):
+        """Unknown producer/consumer ids are created as placeholder nodes, not ghosts."""
+        (tmp_path / "app.py").write_text("class Svc:\n    pass\n")
+        project_path = str(tmp_path)
+        codegiraffe_init(project_path)
+
+        codegiraffe_add_contract(
+            project_path,
+            name="GhostContract",
+            contract_type="event",
+            producer="svc-unknown-producer",
+            consumers="svc-unknown-consumer",
+        )
+
+        from codegiraffe.server import _ensure_graph
+        graph = _ensure_graph(project_path)
+
+        for nid in ("svc-unknown-producer", "svc-unknown-consumer"):
+            assert nid in graph.graph
+            node_data = graph.graph.nodes[nid].get("node")
+            assert node_data is not None
+            assert node_data.metadata["placeholder"] is True
+            assert node_data.manual is True
+
+        # Hotspots should not error and should surface the placeholder nodes.
+        hotspots_result = codegiraffe_hotspots(project_path)
+        assert "Error" not in hotspots_result
 
 
 # ---------------------------------------------------------------------------
