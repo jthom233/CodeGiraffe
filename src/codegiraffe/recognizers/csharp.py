@@ -648,6 +648,7 @@ class CSharpRecognizer:
                             source=ep_id,
                             target=tbl_id,
                             type=EdgeType.READS,
+                            confidence=0.8,
                             metadata={"inferred": True},
                         )
                     )
@@ -686,6 +687,7 @@ class CSharpRecognizer:
                         source=file_module_id,
                         target=target_id,
                         type=EdgeType.READS,
+                        confidence=0.8,
                         metadata={"inferred": True, "cross_language": True},
                     )
                 )
@@ -702,6 +704,7 @@ class CSharpRecognizer:
                         source=file_module_id,
                         target=target_id,
                         type=EdgeType.READS,
+                        confidence=0.8,
                         metadata={"inferred": True, "cross_language": True},
                     )
                 )
@@ -718,6 +721,7 @@ class CSharpRecognizer:
                         source=file_module_id,
                         target=target_id,
                         type=EdgeType.CALLS,
+                        confidence=0.8,
                         metadata={"inferred": True, "cross_language": True},
                     )
                 )

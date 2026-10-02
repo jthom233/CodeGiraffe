@@ -534,6 +534,29 @@ class TestUpdateAgentStatusTool:
 class TestStatusToolsExist:
     """codegiraffe_status is a project health check tool (distinct from codegiraffe_update_agent_status)."""
 
+    def test_status_uninitialized_project(self, tmp_path):
+        """An uninitialized project reports initialized=False, not an error."""
+        data = json.loads(server_module.codegiraffe_status(str(tmp_path)))
+        assert data == {"initialized": False, "project_path": str(tmp_path)}
+
+    def test_status_initialized_project_reports_counts_and_freshness(self, tmp_path):
+        """Regression: the tool read a non-existent GraphData.metadata attribute
+        and returned 'Error getting status: ...' for every initialized project."""
+        (tmp_path / "app.py").write_text("class UserService:\n    pass\n")
+        server_module.codegiraffe_init(str(tmp_path))
+
+        raw = server_module.codegiraffe_status(str(tmp_path))
+        assert not raw.startswith("Error"), raw
+        data = json.loads(raw)
+        assert data["initialized"] is True
+        assert data["node_count"] >= 2
+        assert data["edge_count"] >= 1
+        assert data["last_scan"] is not None
+        assert data["staleness"] == "fresh"
+        assert data["storage_backend"] == "JSONStorage"
+        assert data["schema_version"]
+        assert data["active_agents"] == []
+
     def test_codegiraffe_status_exists(self):
         """codegiraffe_status is a project health check tool (distinct from codegiraffe_update_agent_status)."""
         assert hasattr(server_module, "codegiraffe_status"), (

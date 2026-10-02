@@ -54,6 +54,12 @@ src/codegiraffe/
 
 ---
 
+## Concurrency
+
+A module-level `threading.RLock` (`_graph_lock` in `server.py`) protects the shared `_graph` cache and `_storage` backend from races between concurrent callers — for example a query running on the MCP thread while a sync or the dashboard's background thread reloads the graph. All 40 MCP tools that read or mutate `_graph`/`_storage` hold this lock for the duration of that access: mutating tools (`codegiraffe_init`, `codegiraffe_sync`, `codegiraffe_annotate`, `codegiraffe_add_relation`, `codegiraffe_add_contract`, the domain tools, `codegiraffe_coverage`, etc.) wrap their body in `with _graph_lock:` directly, and read-only tools (`codegiraffe_query`, `codegiraffe_context_for`, `codegiraffe_blast_radius`, `codegiraffe_risk_assessment`, `codegiraffe_cycles`, `codegiraffe_contracts`, `codegiraffe_export`, `codegiraffe_cypher`, and the rest of the query/analysis tools) are wrapped with a `_with_graph_lock` decorator that acquires the same lock before delegating to the original function. Because the lock is reentrant, `_ensure_graph` can safely re-acquire it from within an already-locked tool body. The only tools that do not take the lock are the pure agent-coordination tools (`codegiraffe_claim`, `codegiraffe_release`, `codegiraffe_update_agent_status`, `codegiraffe_agents`), which only touch the separate coordination store and never read `_graph` or `_storage`. `codegiraffe_dashboard` holds the lock only around its `_storage` existence check, never across `webbrowser.open` or starting the background HTTP server.
+
+---
+
 ## Data Model
 
 The architecture graph is a directed graph of typed nodes connected by typed edges.

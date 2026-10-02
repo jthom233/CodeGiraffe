@@ -84,7 +84,7 @@ export const UserList = () => {};
         assert any("UserProfile" in nid for nid in ids)
 
     def test_export_const_component_detected(self, recognizer):
-        """Regression: `export const MyComponent = () => {}` must produce a component node.
+        r"""Regression: `export const MyComponent = () => {}` must produce a component node.
 
         The previous regex `const\s+(?!enum\b)` consumed the whitespace between `const`
         and the identifier, leaving nothing for the outer `\\s+` to match.  The fix uses
@@ -3326,6 +3326,25 @@ class TestSqlRecognizer:
             for e in writes_edges
         )
 
+    def test_create_table_then_alter_different_case_is_not_migration(self, recognizer):
+        """ALTER TABLE on a table created earlier in the same file with different
+        casing (T-SQL identifiers are case-insensitive) is a schema file, not a
+        migration -- CREATE TABLE tbOrder followed by ALTER TABLE TBORDER refers
+        to the same table."""
+        content = (
+            "CREATE TABLE tbOrder (\n"
+            "    OrderId INT PRIMARY KEY\n"
+            ")\n"
+            "GO\n"
+            "ALTER TABLE TBORDER ADD Total DECIMAL(10,2);\n"
+        )
+        result = recognizer.recognize(Path("schema_case.sql"), content)
+        assert not any(n.type == NodeType.MIGRATION for n in result.nodes), (
+            "CREATE TABLE tbOrder + ALTER TABLE TBORDER (same table, different "
+            "case) must not be treated as a migration"
+        )
+        assert not any(n.id.startswith("migration:") for n in result.nodes)
+
     def test_create_index_on_table_created_in_same_file_is_not_migration(self, recognizer):
         """CREATE INDEX on a table created in the same file is a schema file, not a migration."""
         content = (
@@ -3853,6 +3872,28 @@ class TestSqlRecognizer:
         assert "table:tbTwo" in targets
         assert "table:A" not in targets
         assert "table:B" not in targets
+
+    def test_cte_schema_qualified_reference_not_excluded(self, recognizer):
+        """A schema-qualified reference matching a CTE's bare name (e.g.
+        dbo.Users for a CTE named Users) is a genuine table read, not a
+        self-reference to the CTE, and must not be suppressed."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_Users]\n"
+            "AS\n"
+            "WITH Users AS (\n"
+            "    SELECT * FROM dbo.Users\n"
+            ")\n"
+            "SELECT * FROM Users\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        targets = {e.target for e in result.edges}
+        # The schema-qualified read inside the CTE's own body is preserved.
+        assert "table:Users" in targets
+        # The bare `FROM Users` reference after the CTE's closing paren is
+        # still excluded as the CTE reference, not a second real-table read.
+        reads_edges = [e for e in result.edges if e.type == EdgeType.READS]
+        assert len(reads_edges) == 1
 
     def test_cte_exclusion_is_scoped_per_body(self, recognizer):
         """A CTE name in one procedure body does not suppress a real table of the same name elsewhere."""

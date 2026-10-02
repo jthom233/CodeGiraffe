@@ -313,30 +313,131 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) > 1]
 
 
-def _score_node(node: Node, keywords: list[str]) -> float:
-    """Score a node by counting how many keywords appear in its searchable text.
+#: Boundary between a lowercase/digit and an uppercase letter (camelCase ->
+#: camel|Case), or between a run of uppercase letters and a trailing
+#: Titlecase word (HTTPServer -> HTTP|Server).
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+#: Any run of non-alphanumeric characters (punctuation, whitespace, path
+#: separators, underscores, hyphens, colons, slashes, ...).
+_NON_ALNUM_RE = re.compile(r"[^a-zA-Z0-9]+")
+
+
+def _tokenize_identifier(text: str) -> frozenset[str]:
+    """Tokenize identifier-like text into a set of lowercase tokens.
+
+    Splits on any non-alphanumeric boundary and additionally splits each
+    resulting chunk on camelCase / PascalCase boundaries, so e.g.
+    ``"PaymentService"`` yields ``{"payment", "service", "paymentservice"}``
+    and ``"tb_launcher_session"`` yields ``{"tb", "launcher", "session"}``.
+    The undivided (but lowercased) form of each punctuation-delimited chunk
+    is kept alongside its sub-tokens so whole compound identifiers can still
+    be matched exactly.
+
+    This exists so callers can match keywords against *tokens* instead of
+    testing raw substring containment (``kw in text``), which produces false
+    positives such as ``"auth"`` matching inside ``"author"`` or ``"log"``
+    matching inside ``"catalog"``.
+    """
+    tokens: set[str] = set()
+    for chunk in _NON_ALNUM_RE.split(text):
+        if not chunk:
+            continue
+        chunk_lower = chunk.lower()
+        if len(chunk_lower) > 1:
+            tokens.add(chunk_lower)
+        for part in _CAMEL_BOUNDARY_RE.split(chunk):
+            part_lower = part.lower()
+            if len(part_lower) > 1:
+                tokens.add(part_lower)
+    return frozenset(tokens)
+
+
+def _keyword_token_score(keyword: str, token: str) -> float:
+    """Score a single keyword against a single token.
+
+    - ``1.0`` for an exact match, including simple singular/plural
+      equivalence (``"payment"`` <-> ``"payments"``).
+    - ``0.5`` when *keyword* is a prefix of *token* and *token* is at least
+      4 characters longer (e.g. ``"pay"`` -> ``"payment"``).
+    - ``0.0`` otherwise.
+
+    The length margin on the prefix case is what keeps short, coincidental
+    prefixes (e.g. ``"auth"`` -> ``"author"``, a 2-character margin) from
+    scoring, while still allowing deliberate abbreviations through.
+    """
+    if keyword == token:
+        return 1.0
+    if keyword.endswith("s") and keyword[:-1] == token:
+        return 1.0
+    if token.endswith("s") and token[:-1] == keyword:
+        return 1.0
+    if token.startswith(keyword) and len(token) - len(keyword) >= 4:
+        return 0.5
+    return 0.0
+
+
+def _keyword_in_tokens(keyword: str, tokens: frozenset[str]) -> float:
+    """Return the best match score of *keyword* against any token in *tokens*."""
+    best = 0.0
+    for tok in tokens:
+        score = _keyword_token_score(keyword, tok)
+        if score > best:
+            best = score
+            if best >= 1.0:
+                break
+    return best
+
+
+def _tokens_satisfy_query(query_tokens: frozenset[str], haystack_tokens: frozenset[str]) -> bool:
+    """True if every token in *query_tokens* matches some token in *haystack_tokens*.
+
+    A "match" is an exact (or singular/plural-equivalent) or bounded-prefix
+    match per :func:`_keyword_token_score` -- never raw substring containment.
+    """
+    if not query_tokens:
+        return False
+    return all(_keyword_in_tokens(qt, haystack_tokens) > 0 for qt in query_tokens)
+
+
+def _score_node(
+    node: Node,
+    keywords: list[str],
+    token_cache: dict[str, frozenset[str]] | None = None,
+) -> float:
+    """Score a node by counting how many keywords match its tokenized searchable text.
+
+    Keywords are matched against tokens derived from the node's id, label,
+    type, metadata values, and file_path (see :func:`_tokenize_identifier`)
+    rather than via raw substring containment, so e.g. ``"auth"`` does not
+    match ``"author"`` and ``"log"`` does not match ``"catalog"``, while
+    ``"auth"`` still matches ``"AuthService"`` (via its ``auth`` sub-token)
+    and ``"user"`` still matches ``"tb_user_session"``.
 
     A type-based weight multiplier (``_NODE_TYPE_WEIGHTS``) is applied after
     the keyword count so that architecturally meaningful node types (services,
     endpoints, contracts) rank above file-level module nodes that tend to match
     many queries without carrying useful signal.
-    """
-    searchable_parts: list[str] = [
-        node.id.lower(),
-        node.label.lower(),
-        node.type.lower(),
-    ]
-    # Include metadata values (stringified)
-    for value in node.metadata.values():
-        searchable_parts.append(str(value).lower())
-    if node.file_path:
-        searchable_parts.append(node.file_path.lower())
 
-    combined = " ".join(searchable_parts)
-    base_score = 0
+    *token_cache*, when provided, caches the per-node token set (keyed by
+    node id) so repeated scoring of the same node within one query does not
+    re-tokenize it.
+    """
+    tokens: frozenset[str] | None = None
+    if token_cache is not None:
+        tokens = token_cache.get(node.id)
+    if tokens is None:
+        searchable_parts: list[str] = [node.id, node.label, str(node.type)]
+        for value in node.metadata.values():
+            searchable_parts.append(str(value))
+        if node.file_path:
+            searchable_parts.append(node.file_path)
+        tokens = _tokenize_identifier(" ".join(searchable_parts))
+        if token_cache is not None:
+            token_cache[node.id] = tokens
+
+    base_score = 0.0
     for kw in keywords:
-        if kw in combined:
-            base_score += 1
+        base_score += _keyword_in_tokens(kw, tokens)
 
     weight = _NODE_TYPE_WEIGHTS.get(node.type, 1.0)
     return base_score * weight
@@ -461,7 +562,7 @@ def query_by_text(
     node_type: str | None = None,
     limit: int = _QUERY_RESULT_LIMIT,
 ) -> GraphData:
-    """Return nodes whose label, ID, or metadata values contain *query* (case-insensitive).
+    """Return nodes whose label, ID, or metadata values match *query* (case-insensitive).
 
     Optionally pre-filter by *node_type* before applying the text search.
     Each matching node is expanded to depth=1 to include its immediate edges.
@@ -470,15 +571,22 @@ def query_by_text(
     Scoring:
     - Exact label match (case-insensitive): 100
     - Query equals a word-boundary portion of the label (e.g. "Ssh" in "SshAccountBasicPasswordChanger"): 80
-    - Query found in label: 60
-    - Query found in node ID: 40
-    - Query found in metadata values: 20
+    - Query tokens match the label's tokens: 60
+    - Query tokens match the node ID's tokens: 40
+    - Query tokens match a metadata value's tokens: 20
+
+    "Match" for the 60/40/20 tiers means every query token is found, exactly
+    or via a bounded prefix, among the tokens of the candidate text (see
+    ``_tokenize_identifier`` / ``_tokens_satisfy_query``) -- never raw
+    substring containment, so e.g. a query of "auth" does not match a label
+    of "Author" and "log" does not match "Catalog".
 
     Within the same score, shorter labels are preferred (more specific matches).
     """
     import re
 
     needle = query.lower()
+    query_tokens = _tokenize_identifier(needle)
     base_data = graph.to_data()
 
     # Gather candidate nodes, optionally filtered by type
@@ -495,7 +603,6 @@ def query_by_text(
     scored: list[tuple[int, int, Node]] = []  # (score desc, label_len asc, node)
     for node in candidates:
         node_label_lower = node.label.lower()
-        node_id_lower = node.id.lower()
         score = 0
 
         if node_label_lower == needle:
@@ -514,17 +621,19 @@ def query_by_text(
                         break
                 if score == 80:
                     break
-            if score == 0 and needle in node_label_lower:
+            if score == 0 and _tokens_satisfy_query(query_tokens, _tokenize_identifier(node.label)):
                 score = 60
-        elif needle in node_label_lower:
+        elif _tokens_satisfy_query(query_tokens, _tokenize_identifier(node.label)):
             score = 60
 
-        if score == 0 and needle in node_id_lower:
+        if score == 0 and _tokens_satisfy_query(query_tokens, _tokenize_identifier(node.id)):
             score = 40
 
         if score == 0:
             for meta_val in node.metadata.values():
-                if isinstance(meta_val, str) and needle in meta_val.lower():
+                if isinstance(meta_val, str) and _tokens_satisfy_query(
+                    query_tokens, _tokenize_identifier(meta_val)
+                ):
                     score = 20
                     break
 
@@ -1107,13 +1216,15 @@ def _context_for_task_keywords(
             schema_version=graph.to_data().schema_version,
         )
 
-    # Score all nodes
+    # Score all nodes. token_cache avoids re-tokenizing the same node's
+    # searchable text more than once within this call.
+    token_cache: dict[str, frozenset[str]] = {}
     scored: list[tuple[Node, float]] = []
     for nid, attrs in graph.graph.nodes(data=True):
         node: Node | None = attrs.get("node")
         if node is None:
             continue
-        score = _score_node(node, keywords)
+        score = _score_node(node, keywords, token_cache)
         if score > 0:
             scored.append((node, score))
 

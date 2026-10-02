@@ -133,12 +133,18 @@ class SQLiteStorage:
                     )
                 )
 
+            layout_raw = meta.get("layout", "")
+            layout: dict[str, list[float]] = json.loads(layout_raw) if layout_raw else {}
+
             return GraphData(
                 nodes=nodes,
                 edges=edges,
                 project_path=meta.get("project_path", project_path),
                 last_scan=meta.get("last_scan", ""),
                 schema_version=meta.get("schema_version", SCHEMA_VERSION),
+                layout=layout,
+                token_estimate=int(meta.get("token_estimate") or 0),
+                retrieval_strategy=meta.get("retrieval_strategy", ""),
             )
         except (sqlite3.Error, ValueError, TypeError):
             return None
@@ -174,6 +180,18 @@ class SQLiteStorage:
                 conn.execute(
                     "INSERT INTO graph_meta VALUES (?, ?)",
                     ("schema_version", data.schema_version),
+                )
+                conn.execute(
+                    "INSERT INTO graph_meta VALUES (?, ?)",
+                    ("layout", json.dumps(data.layout)),
+                )
+                conn.execute(
+                    "INSERT INTO graph_meta VALUES (?, ?)",
+                    ("token_estimate", str(data.token_estimate)),
+                )
+                conn.execute(
+                    "INSERT INTO graph_meta VALUES (?, ?)",
+                    ("retrieval_strategy", data.retrieval_strategy),
                 )
 
                 # Save nodes

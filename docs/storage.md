@@ -4,6 +4,8 @@
 
 Code Giraffe supports three storage backends, selectable via the `backend` parameter on `codegiraffe_init`. All backends implement the `StorageBackend` protocol, so switching between them is transparent to the rest of the system. Manual annotations and graph structure are preserved identically regardless of backend.
 
+All three backends persist the full `GraphData` model on every save: nodes, edges (including `confidence`), `project_path`, `last_scan`, `schema_version`, the dashboard's server-computed `layout` (node ID → `[x, y]` position), `token_estimate`, and `retrieval_strategy`. JSON persists this for free by serializing the whole model; SQLite and Neo4j store these as key/value entries alongside `project_path` and `last_scan` (a `graph_meta` row per key in SQLite, properties on the project's `_Meta` node in Neo4j). Loading a database written before a given field existed yields that field's default (an empty `layout` dict, `token_estimate` of `0`, etc.) rather than an error.
+
 ---
 
 ## JSON (default)

@@ -176,6 +176,13 @@ class Neo4jStorage:
                 pp = meta.get("project_path", project_path)
                 last_scan = meta.get("last_scan")
                 schema_version = meta.get("schema_version", "1.0")
+                layout_raw = meta.get("layout", "")
+                if isinstance(layout_raw, str):
+                    layout = json.loads(layout_raw) if layout_raw else {}
+                else:
+                    layout = layout_raw or {}
+                token_estimate = int(meta.get("token_estimate") or 0)
+                retrieval_strategy = meta.get("retrieval_strategy", "") or ""
 
                 # 3. Load all nodes
                 nodes_result = session.run(
@@ -233,6 +240,9 @@ class Neo4jStorage:
                     project_path=pp,
                     last_scan=last_scan,
                     schema_version=schema_version,
+                    layout=layout,
+                    token_estimate=token_estimate,
+                    retrieval_strategy=retrieval_strategy,
                 )
         except Exception:
             logger.warning(
@@ -263,10 +273,16 @@ class Neo4jStorage:
                     f"CREATE (m:`{label}_Meta`) "
                     f"SET m.project_path = $project_path, "
                     f"    m.last_scan = $last_scan, "
-                    f"    m.schema_version = $schema_version",
+                    f"    m.schema_version = $schema_version, "
+                    f"    m.layout = $layout, "
+                    f"    m.token_estimate = $token_estimate, "
+                    f"    m.retrieval_strategy = $retrieval_strategy",
                     project_path=data.project_path,
                     last_scan=data.last_scan or "",
                     schema_version=data.schema_version,
+                    layout=json.dumps(data.layout),
+                    token_estimate=data.token_estimate,
+                    retrieval_strategy=data.retrieval_strategy,
                 )
 
                 # 3. Batch-create nodes

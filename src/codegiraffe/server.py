@@ -7,6 +7,7 @@ architectural graphs for Python projects.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import threading
@@ -90,6 +91,20 @@ MAX_BLAST_DEPTH = 20
 _BLAST_PREFERRED_TYPES = frozenset({"service", "module", "database_table", "endpoint", "migration"})
 
 
+def _record_version(project_path: str, old_data: GraphData, new_data: GraphData, message: str) -> str:
+    """Append a version entry, returning a warning suffix instead of raising.
+
+    Called after the graph has already been persisted, so a failure here must
+    surface as a note on an otherwise successful result rather than turn the
+    whole operation into an error.
+    """
+    try:
+        _version_store.add_version(project_path, old_data, new_data, message)
+    except Exception as exc:  # noqa: BLE001 - never fail init/sync over history
+        return f" Warning: version history not updated ({exc})."
+    return ""
+
+
 def _get_storage(backend: str = "json"):
     """Get a storage backend by name."""
     if backend == "sqlite":
@@ -130,6 +145,31 @@ def _ensure_graph(project_path: str) -> ArchGraph:
 
         _graph = ArchGraph(stored)
         return _graph
+
+
+def _with_graph_lock(fn):
+    """Decorator that holds ``_graph_lock`` for the duration of a tool call.
+
+    Applied to read-only tools that access ``_graph`` and/or ``_storage``
+    (directly, via ``_ensure_graph``, or via helpers in ``query.py`` that
+    traverse the cached graph) but do not already wrap their body in
+    ``with _graph_lock:``. Mutating tools wrap their own body explicitly
+    instead of using this decorator, since several of them need finer-
+    grained control (e.g. releasing the lock before a long-running
+    subprocess). ``_graph_lock`` is an RLock, so nested acquisition from
+    within ``_ensure_graph`` is safe.
+
+    Uses ``functools.wraps`` so FastMCP's ``@mcp.tool()`` decorator (applied
+    above this one) still sees the wrapped function's original name,
+    docstring, and signature when generating the tool's parameter schema.
+    """
+
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        with _graph_lock:
+            return fn(*args, **kwargs)
+
+    return _wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +263,8 @@ def codegiraffe_init(
 
         # Auto-version after init/rescan (outside lock — version store has its own safety)
         prev_data = old_data if old_data is not None else GraphData()
-        _version_store.add_version(
-            project_path, prev_data, graph.to_data(),
-            "Rescan" if rescan else "Init",
+        version_note = _record_version(
+            project_path, prev_data, graph.to_data(), "Rescan" if rescan else "Init",
         )
 
         final_data = graph.to_data()
@@ -244,13 +283,14 @@ def codegiraffe_init(
 
         return (
             f"Initialized graph with {len(final_data.nodes)} nodes "
-            f"and {len(final_data.edges)} edges"
+            f"and {len(final_data.edges)} edges" + version_note
         )
     except Exception as exc:
         return f"Error initializing graph: {exc}"
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_query(
     project_path: str,
     node_id: str | None = None,
@@ -265,7 +305,7 @@ def codegiraffe_query(
     *depth* hops), or *node_type* to retrieve all nodes of that type with
     their direct edges.
 
-    Use *query* for case-insensitive substring search across node IDs, labels,
+    Use *query* for case-insensitive token search across node IDs, labels,
     and metadata values (e.g. class_name, kind).  You may combine *query* with
     *node_type* to search within a specific type.  Results are capped at 50
     nodes.
@@ -389,6 +429,7 @@ def codegiraffe_add_relation(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_context_for(
     project_path: str,
     task: str,
@@ -506,6 +547,7 @@ def codegiraffe_context_for(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_detect_drift(project_path: str, scanner_mode: str = "hybrid") -> str:
     """Detect drift between the architecture graph and the actual codebase.
 
@@ -534,6 +576,7 @@ def codegiraffe_detect_drift(project_path: str, scanner_mode: str = "hybrid") ->
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_hotspots(
     project_path: str, top_n: int = 10, metrics: str = "degree"
 ) -> str:
@@ -616,6 +659,7 @@ def codegiraffe_hotspots(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_blast_radius(
     project_path: str,
     node_id: str | None = None,
@@ -635,7 +679,7 @@ def codegiraffe_blast_radius(
     When *query* is provided two strategies are tried and the best result is
     selected:
 
-    - **Substring match** (good for partial class/symbol names)
+    - **Token match** (identifier tokens split on case and underscores; good for partial class/symbol names)
     - **Semantic match** via context_for_task (good for natural-language phrases
       such as "SSH password changer" or "unix account changer")
 
@@ -667,7 +711,7 @@ def codegiraffe_blast_radius(
             target_id = node_id
             other_matches: list[str] = []
         elif query is not None:
-            # Strategy A: substring / label match
+            # Strategy A: token / label match
             text_matches = query_by_text(graph, query)
             text_ids = list(text_matches.nodes.keys())
 
@@ -683,7 +727,7 @@ def codegiraffe_blast_radius(
 
             target_id = None
 
-            # Prefer an exact label match from the substring strategy
+            # Prefer an exact label match from the token strategy
             for nid in text_ids:
                 node = text_matches.nodes[nid]
                 if node.label.lower() == query.lower():
@@ -700,7 +744,7 @@ def codegiraffe_blast_radius(
                 if target_id is None and context_ids:
                     target_id = context_ids[0]
 
-            # Fall back to the best substring match if semantic returned nothing
+            # Fall back to the best token match if semantic returned nothing
             if target_id is None and text_ids:
                 target_id = text_ids[0]
 
@@ -758,6 +802,7 @@ def codegiraffe_blast_radius(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_risk_assessment(
     project_path: str,
     node_ids: list[str] | None = None,
@@ -833,6 +878,7 @@ def codegiraffe_risk_assessment(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_cycles(project_path: str, max_cycles: int = 20) -> str:
     """Detect circular dependencies in the architecture graph.
 
@@ -900,6 +946,7 @@ VALID_CONTRACT_TYPES = {"api", "event", "data", "config"}
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_contracts(
     project_path: str,
     contract_type: str | None = None,
@@ -955,6 +1002,7 @@ def codegiraffe_contracts(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_validate_contracts(project_path: str) -> str:
     """Validate all contracts in the architecture graph.
 
@@ -1390,6 +1438,7 @@ def codegiraffe_remove_domain(project_path: str, name: str) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_validate_changes(
     project_path: str,
     diff: str | None = None,
@@ -1440,6 +1489,7 @@ def codegiraffe_validate_changes(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_suggest_tests(
     project_path: str,
     diff: str | None = None,
@@ -1493,6 +1543,7 @@ def codegiraffe_suggest_tests(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_file_coupling(
     project_path: str,
     file_path: str | None = None,
@@ -1529,6 +1580,7 @@ def codegiraffe_file_coupling(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_order_tasks(
     project_path: str,
     tasks: str,
@@ -1991,10 +2043,10 @@ def codegiraffe_sync(
             _storage.save(project_path, data)
             _graph = new_graph
 
-        # Auto-version after sync (outside lock — version store has its own safety)
-        _version_store.add_version(
-            project_path, old_data, new_graph.to_data(), "Sync",
-        )
+        # Auto-version after sync (outside lock — version store has its own safety).
+        # The graph is already persisted at this point, so a versioning failure
+        # must not be reported as a failed sync.
+        version_note = _record_version(project_path, old_data, new_graph.to_data(), "Sync")
 
         final_data = new_graph.to_data()
         new_node_count = len(final_data.nodes)
@@ -2006,6 +2058,7 @@ def codegiraffe_sync(
             f"(delta {new_node_count - old_node_count:+d}). "
             f"Edges: {old_edge_count} -> {new_edge_count} "
             f"(delta {new_edge_count - old_edge_count:+d})."
+            + version_note
         )
     except Exception as exc:
         return f"Error syncing graph: {exc}"
@@ -2075,6 +2128,7 @@ def codegiraffe_sync_files(
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_export(
     project_path: str,
     format: str = "mermaid",
@@ -2203,6 +2257,7 @@ def codegiraffe_agents(project_path: str) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_status(project_path: str) -> str:
     """Get the initialization status and health of a project's architecture graph.
 
@@ -2214,9 +2269,10 @@ def codegiraffe_status(project_path: str) -> str:
             return json.dumps({"initialized": False, "project_path": project_path}, indent=2)
 
         graph_data = _storage.load(project_path)
-        metadata = graph_data.metadata or {}
+        if graph_data is None:
+            return json.dumps({"initialized": False, "project_path": project_path}, indent=2)
 
-        last_scan_raw = metadata.get("scanned_at")
+        last_scan_raw = graph_data.last_scan
         if last_scan_raw:
             try:
                 last_scan_dt = datetime.fromisoformat(last_scan_raw)
@@ -2251,7 +2307,7 @@ def codegiraffe_status(project_path: str) -> str:
                 "staleness": staleness,
                 "storage_backend": type(_storage).__name__,
                 "active_agents": active_agents,
-                "schema_version": metadata.get("schema_version"),
+                "schema_version": graph_data.schema_version,
             },
             indent=2,
         )
@@ -2265,6 +2321,7 @@ def codegiraffe_status(project_path: str) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_history(project_path: str, limit: int = 20) -> str:
     """List version history for a project's architecture graph.
 
@@ -2279,6 +2336,7 @@ def codegiraffe_history(project_path: str, limit: int = 20) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_diff(project_path: str, version_a: int, version_b: int | None = None) -> str:
     """Compare two versions of the architecture graph.
 
@@ -2312,6 +2370,7 @@ def codegiraffe_diff(project_path: str, version_a: int, version_b: int | None = 
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_snapshot(project_path: str, message: str = "Manual snapshot") -> str:
     """Create a named snapshot of the current architecture graph state.
 
@@ -2341,6 +2400,7 @@ def codegiraffe_snapshot(project_path: str, message: str = "Manual snapshot") ->
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_federate(project_paths: list[str]) -> str:
     """Register multiple repositories and build a unified federated graph.
 
@@ -2379,6 +2439,7 @@ def codegiraffe_federate(project_paths: list[str]) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_cross_query(node_id: str, depth: int = 2) -> str:
     """Query across all federated graphs for a specific node.
 
@@ -2394,6 +2455,7 @@ def codegiraffe_cross_query(node_id: str, depth: int = 2) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_cross_edges() -> str:
     """List all edges that cross repository boundaries in the federation.
 
@@ -2423,6 +2485,7 @@ def codegiraffe_cross_edges() -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_cypher(project_path: str, query: str) -> str:
     """Run a read-only Cypher query against the Neo4j-stored architecture graph.
 
@@ -2457,6 +2520,7 @@ def codegiraffe_cypher(project_path: str, query: str) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_patterns(
     project_path: str,
     node_type: str,
@@ -2542,6 +2606,7 @@ def _format_pattern_report(result: dict) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_pr_diff(
     project_path: str,
     base_ref: str,
@@ -2659,6 +2724,7 @@ def _format_pr_diff_report(diff: dict, base_ref: str, head_ref: str) -> str:
 
 
 @mcp.tool()
+@_with_graph_lock
 def codegiraffe_migration_plan(
     project_path: str,
     description: str,
@@ -2768,7 +2834,10 @@ def codegiraffe_dashboard(project_path: str, port: int = 8251) -> str:
     import webbrowser
     from codegiraffe.dashboard_server import get_or_start_server
 
-    if not _storage.exists(project_path):
+    with _graph_lock:
+        project_exists = _storage.exists(project_path)
+
+    if not project_exists:
         return (
             f"No architecture graph found for '{project_path}'. "
             "Run codegiraffe_init first, then launch the dashboard."

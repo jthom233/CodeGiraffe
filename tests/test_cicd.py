@@ -348,3 +348,52 @@ class TestArchitecturalReviewScript:
         assert "exceeds the threshold" in comment
         assert "Uncovered Nodes" in comment
         assert "src/app/payments.py" in comment
+
+
+# ---------------------------------------------------------------------------
+# TestPostCommitHook — hooks/post-commit must only call public, existing API
+# ---------------------------------------------------------------------------
+
+HOOK_PATH = REPO_ROOT / "hooks" / "post-commit"
+
+
+class TestPostCommitHook:
+    def test_hook_exists(self):
+        assert HOOK_PATH.exists()
+
+    def test_hook_uses_public_sync_api(self):
+        """Regression: the hook called ArchGraph.from_data() and a private
+        _scan_single_file() with the wrong signature, so it always failed
+        silently in the background."""
+        content = HOOK_PATH.read_text()
+        assert "from codegiraffe.scanner import sync_files" in content
+        assert "ArchGraph(data)" in content
+        assert "from_data" not in content
+        assert "_scan_single_file" not in content
+
+    def test_hook_python_block_is_valid(self):
+        """The embedded Python heredoc must parse and reference real symbols."""
+        import ast
+
+        content = HOOK_PATH.read_text()
+        start = content.index("\n", content.index("<<'PY'")) + 1
+        end = content.index("\nPY\n", start)
+        block = content[start:end]
+        tree = ast.parse(block)
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        assert {"ArchGraph", "sync_files", "JSONStorage"} <= imported
+
+        import codegiraffe.graph, codegiraffe.scanner, codegiraffe.storage
+        assert hasattr(codegiraffe.scanner, "sync_files")
+        assert hasattr(codegiraffe.storage, "JSONStorage")
+        assert hasattr(codegiraffe.graph, "ArchGraph")
+
+    def test_hook_supports_windows_venv_layout(self):
+        content = HOOK_PATH.read_text()
+        assert ".venv/bin/python" in content
+        assert ".venv/Scripts/python.exe" in content

@@ -94,8 +94,12 @@ class ScanResult:
     _node_index: dict[str, Node] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
-    _seen_edges: set[tuple] = field(
-        default_factory=set, init=False, repr=False, compare=False
+    # Maps (source, target, type) -> index into self.edges, so that a later
+    # duplicate edge (e.g. an AST-parsed edge merged in after a regex-inferred
+    # one for the same relationship) can replace the existing entry when it
+    # carries higher confidence, instead of being silently dropped.
+    _seen_edges: dict[tuple, int] = field(
+        default_factory=dict, init=False, repr=False, compare=False
     )
     _seen_imports: set[tuple] = field(
         default_factory=set, init=False, repr=False, compare=False
@@ -116,7 +120,9 @@ class ScanResult:
     def __post_init__(self) -> None:
         """Populate incremental indexes from any data passed at construction time."""
         self._node_index = {n.id: n for n in self.nodes}
-        self._seen_edges = {(e.source, e.target, e.type) for e in self.edges}
+        self._seen_edges = {
+            (e.source, e.target, e.type): idx for idx, e in enumerate(self.edges)
+        }
         self._seen_imports = {(i.module_path, i.style) for i in self.imports}
         self._seen_implementations = {
             (i.child_class, i.parent_class, i.file_path) for i in self.implementations
@@ -153,9 +159,14 @@ class ScanResult:
 
         for edge in other.edges:
             key = (edge.source, edge.target, edge.type)
-            if key not in self._seen_edges:
+            existing_idx = self._seen_edges.get(key)
+            if existing_idx is None:
+                self._seen_edges[key] = len(self.edges)
                 self.edges.append(edge)
-                self._seen_edges.add(key)
+            elif edge.confidence > self.edges[existing_idx].confidence:
+                # Keep the higher-confidence edge (e.g. an AST-parsed edge
+                # merged in after a lower-confidence regex-inferred one).
+                self.edges[existing_idx] = edge
 
         for imp in other.imports:
             key = (imp.module_path, imp.style)
@@ -1015,6 +1026,7 @@ class PythonRecognizer:
                             source=ep_id,
                             target=tbl_id,
                             type=EdgeType.READS.value,
+                            confidence=0.8,
                             metadata={"inferred": True},
                         )
                     )
@@ -1127,6 +1139,7 @@ def _infer_cross_file_edges(
                                 source=ep_id,
                                 target=table_id,
                                 type=EdgeType.READS.value,
+                                confidence=0.8,
                                 metadata={"inferred": True, "cross_file": True},
                             )
                         )
@@ -1747,7 +1760,12 @@ def _infer_call_edges(result: ScanResult) -> None:
 
     # Build a language map for all nodes keyed by node id
     node_language: dict[str, str | None] = {}
+    # Build a file_path map for all nodes keyed by node id, used to determine
+    # call-edge confidence: a callee resolved to a node in the same file as the
+    # call site is higher certainty than one resolved cross-file/cross-module.
+    node_file_path: dict[str, str | None] = {}
     for node in result.nodes:
+        node_file_path[node.id] = node.file_path
         fp = node.file_path
         if fp:
             suffix = "." + fp.rsplit(".", 1)[-1] if "." in fp else ""
@@ -1835,11 +1853,25 @@ def _infer_call_edges(result: ScanResult) -> None:
 
         edge_key = (caller_node_id, callee_node_id, EdgeType.CALLS.value)
         if edge_key not in existing_edges:
+            # High certainty (0.8) when the callee resolves to a node in the
+            # same file/module as the call site; lower certainty (0.6) when it
+            # resolves cross-file via the global symbol/module registry, since
+            # that resolution is more likely to collide on a common name. When
+            # file_path information is unavailable on either side, default to
+            # the higher-certainty value rather than penalizing missing data.
+            callee_file = node_file_path.get(callee_node_id)
+            if call.file_path is None or callee_file is None:
+                call_confidence = 0.8
+            elif callee_file == call.file_path:
+                call_confidence = 0.8
+            else:
+                call_confidence = 0.6
+
             result.edges.append(Edge(
                 source=caller_node_id,
                 target=callee_node_id,
                 type=EdgeType.CALLS.value,
-                confidence=0.8,
+                confidence=call_confidence,
                 metadata={
                     "inferred": True,
                     "caller": call.caller,

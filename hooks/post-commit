@@ -1,70 +1,73 @@
 #!/usr/bin/env bash
 # Code Giraffe post-commit hook
-# Automatically syncs changed files to the architecture graph after each commit.
-# 
+# Incrementally syncs the files changed by each commit into the architecture graph.
+#
 # Install: cp hooks/post-commit .git/hooks/post-commit && chmod +x .git/hooks/post-commit
 # Or:      ln -sf ../../hooks/post-commit .git/hooks/post-commit
+#
+# Set CODEGIRAFFE_HOOK_LOG to a file path to capture the sync output for debugging.
 
 set -euo pipefail
 
+PROJECT_DIR="$(git rev-parse --show-toplevel)"
+
 # Skip if codegiraffe hasn't been initialized for this project
-GRAPH_FILE=".codegiraffe/graph.json"
-if [ ! -f "$GRAPH_FILE" ]; then
+if [ ! -f "$PROJECT_DIR/.codegiraffe/graph.json" ]; then
     exit 0
 fi
 
-# Get the list of files changed in the last commit
+# Files changed in the last commit (empty for the root commit)
 CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
 if [ -z "$CHANGED_FILES" ]; then
     exit 0
 fi
 
-# Convert newline-separated list to JSON array
-JSON_ARRAY=$(echo "$CHANGED_FILES" | python3 -c "
-import sys, json
-files = [f.strip() for f in sys.stdin if f.strip()]
-print(json.dumps(files))
-")
-
-# Find the project's venv Python
-PROJECT_DIR="$(git rev-parse --show-toplevel)"
-VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
-
-if [ ! -x "$VENV_PYTHON" ]; then
-    # Fallback: try system python with codegiraffe installed
-    VENV_PYTHON="python3"
+# Find the project's venv Python (POSIX or Windows layout), else fall back to PATH
+VENV_PYTHON=""
+for candidate in "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/.venv/Scripts/python.exe"; do
+    if [ -x "$candidate" ]; then
+        VENV_PYTHON="$candidate"
+        break
+    fi
+done
+if [ -z "$VENV_PYTHON" ]; then
+    VENV_PYTHON="$(command -v python3 || command -v python || true)"
+fi
+if [ -z "$VENV_PYTHON" ]; then
+    exit 0
 fi
 
-# Run sync_files in the background (non-blocking)
-nohup "$VENV_PYTHON" -c "
-from codegiraffe.storage import JSONStorage
-from codegiraffe.scanner import scan_project, _scan_single_file
-from codegiraffe.graph import ArchGraph
-import json
+LOG_TARGET="${CODEGIRAFFE_HOOK_LOG:-/dev/null}"
 
-project_path = '$PROJECT_DIR'
-file_paths = json.loads('$JSON_ARRAY')
+# The file list goes through a temp file to avoid quoting problems with paths;
+# the Python side deletes it when done.
+FILE_LIST="$(mktemp)"
+printf '%s\n' "$CHANGED_FILES" > "$FILE_LIST"
+
+# Run the sync in the background so the commit returns immediately.
+nohup "$VENV_PYTHON" - "$PROJECT_DIR" "$FILE_LIST" >"$LOG_TARGET" 2>&1 <<'PY' &
+import os
+import sys
+
+from codegiraffe.graph import ArchGraph
+from codegiraffe.scanner import sync_files
+from codegiraffe.storage import JSONStorage
+
+project_path = sys.argv[1]
+list_path = sys.argv[2]
+with open(list_path, encoding="utf-8") as fh:
+    file_paths = [line.strip() for line in fh if line.strip()]
+os.unlink(list_path)
 
 storage = JSONStorage()
-if not storage.exists(project_path):
-    exit(0)
-
 data = storage.load(project_path)
-if data is None:
-    exit(0)
+if data is None or not file_paths:
+    sys.exit(0)
 
-graph = ArchGraph.from_data(data)
-
-# Use the same scan helper as sync_files
-from codegiraffe.registry import RecognizerRegistry
-from pathlib import Path
-registry = RecognizerRegistry()
-for fp in file_paths:
-    full_path = Path(project_path) / fp
-    if full_path.exists() and full_path.is_file():
-        _scan_single_file(graph, full_path, project_path, registry)
-
+graph = ArchGraph(data)
+summary = sync_files(graph, project_path, file_paths)
 storage.save(project_path, graph.to_data())
-" > /dev/null 2>&1 &
+print(summary)
+PY
 
 exit 0

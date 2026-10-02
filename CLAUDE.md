@@ -1,12 +1,12 @@
 # Code Giraffe Development Guidelines
 
 ## Active Technologies
-- **Version**: 0.16.0
+- **Version**: 0.17.0
 - **Language**: Python 3.11+
 - **Framework**: FastMCP (mcp[cli] >= 1.2.0), NetworkX >= 3.0, Pydantic v2
 - **MCP Tools**: 41 tools in server.py
 - **Storage**: JSON files (atomic writes) + SQLite + Neo4j (optional, all via StorageBackend protocol)
-- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (1703+ tests)
+- **Testing**: pytest >= 8.0, pytest-asyncio >= 0.23 (1900+ tests)
 - **Package Management**: uv
 - **Optional**: sentence-transformers >= 2.0 (embeddings), neo4j >= 6.0, tree-sitter >= 0.23 (AST scanning)
 
@@ -51,7 +51,7 @@ src/codegiraffe/          # Main package
     ├── php.py
     └── ruby.py
 
-tests/                    # 1703+ tests
+tests/                    # 1900+ tests
 specs/                    # Spec-kit artifacts (spec.md, plan.md, research.md, data-model.md)
 ```
 
@@ -123,6 +123,12 @@ python src/codegiraffe/server.py
 - Depth/scope parameters are capped: `MAX_QUERY_DEPTH=20`, `MAX_BLAST_DEPTH=20`, `MAX_COUPLING_DEPTH=500`
 - Domain management uses 4 focused tools: `codegiraffe_list_domains`, `codegiraffe_infer_domains`, `codegiraffe_add_domain`, `codegiraffe_remove_domain`
 - Agent coordination lifecycle: `codegiraffe_claim` → `codegiraffe_update_agent_status` → `codegiraffe_release`
+- Every MCP tool that reads `_graph` or `_storage` holds `_graph_lock`, either explicitly or via the `_with_graph_lock` decorator; only the four coordination tools are exempt, and `tests/test_lock_coverage.py` pins that allow-list
+- `CoordinationStore` mutators run under a per-store `threading.Lock` plus an OS file lock (`msvcrt`/`fcntl`) on `agents.json.lock`, and save atomically; `LockTimeoutError` after 5s
+- Keyword matching (`context_for_task`, `query_by_text`, migration planning) is token-based: identifiers are split on case/underscore boundaries via `_tokenize_identifier()`; no substring containment
+- `_record_version()` wraps `add_version` so a version-history failure after a successful persist becomes a warning suffix, never an error
+- Dependency pin `mcp[cli]>=1.2.0,<2`: mcp 2.x renamed FastMCP to MCPServer; migrating is a tracked follow-up
+- `hooks/post-commit` syncs committed files through `scanner.sync_files`; `.github/scripts/architectural-review.py` powers the PR review workflow
 
 ## Constitution
 
@@ -134,13 +140,19 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
-- Unreleased (branch `feature/quality-improvements`):
+- v0.17.0: Correctness release — every verified defect from a full-codebase audit, plus CI repairs:
   - **`migration` node type**: `NodeType.MIGRATION` in `schema.py`; `SqlRecognizer` emits `migration:<stem>` nodes (with `writes` edges) for `.sql` files that `ALTER TABLE`/`CREATE INDEX` tables not created in the same file and define no procs/views. SQL views are now `database_table` nodes with `metadata.kind = "view"` (previously `mod:` module nodes). `migration` weighted 0.3 in `_NODE_TYPE_WEIGHTS`; dashboard `TYPE_COLORS` has `migration` and `project` entries
   - **SQL recognizer accuracy**: CTE names (`WITH x AS (...)`) are excluded from table read/write detection per body; schema files that only alter their own tables no longer produce a migration node
   - **Breaking: `codegiraffe_blast_radius` output** no longer includes the combined `downstream` key; downstream nodes are split into disjoint `direct_impact`, `transitive_impact`, `indirect_impact` buckets. `migration` added to the fuzzy-query preferred types (`_BLAST_PREFERRED_TYPES`)
   - **`codegiraffe_risk_assessment`** now applies the documented 1.5x multiplier for nodes with `_test_coverage == 0.0` via `compute_risk_with_coverage`; adds `base_risk_score` and `test_coverage` fields
   - **`ArchGraph.get_hotspots`** filters dataless nodes before slicing so `top_n` is honored; **`codegiraffe_add_contract`** creates placeholder `service` nodes (`manual=True`, `metadata.placeholder=True`) for unknown producer/consumer ids instead of leaving ghost nodes
-  - Fixed stale `TestUS5ParameterBounds` tests that patched the unused `compute_blast_radius`; removed the dead import. `TestSuggestion.__test__ = False` silences the pytest collection warning. `.gitignore` covers `.codelynx/` and `.serena/memories/`; 1792 tests
+  - Fixed stale `TestUS5ParameterBounds` tests that patched the unused `compute_blast_radius`; removed the dead import. `TestSuggestion.__test__ = False` silences the pytest collection warning. `.gitignore` covers `.codelynx/` and `.serena/memories/`
+  - **Concurrency**: all graph-reading tools hold `_graph_lock` (`_with_graph_lock` decorator); `CoordinationStore.claim/update_status/release` are serialized across threads and processes with atomic saves
+  - **Storage**: SQLite and Neo4j persist `layout`, `token_estimate`, `retrieval_strategy` (previously dropped)
+  - **Query accuracy**: token-based keyword matching replaces substring containment in `context_for_task`, `query_by_text`, and `migration.py`
+  - **Recognizer confidence**: non-Python regex recognizers emit the confidence values documented in `docs/edge-confidence.md` (imports 0.9, implements 0.8, inferred SQL 0.7, FK 0.9); hybrid dedup keeps the higher value. SQL migration detection compares table names case-insensitively
+  - **Fixes**: `codegiraffe_status` returned an error for every initialized project (read a non-existent `GraphData.metadata`); init/sync no longer report failure when only version history fails; `hooks/post-commit` called two non-existent functions
+  - **CI**: `mcp` pinned `<2` (mcp 2.x removed `mcp.server.fastmcp`, breaking every fresh install); architectural-review workflow rewritten to install from the checkout and use the real API, with threshold flagging and uncovered-node reporting; 1900+ tests, 0 skipped with `[ast]` extras installed
 - v0.16.0: Major reliability & performance release — 5 phases of improvements:
   - **Graph Correctness**: `nx.MultiDiGraph` migration (multi-edges preserved), Cypher write-rejection, `threading.RLock` concurrency protection, 4 new `ArchGraph` edge helpers
   - **Data Integrity**: Confidence persistence in SQLite/Neo4j, atomic JSON writes (`tempfile` + `os.replace`), coverage annotation persistence, per-class `__tablename__` scoping fix, edge dedup type normalization

@@ -765,3 +765,129 @@ class TestNeo4jConfidencePersistence:
         assert loaded is not None
         assert len(loaded.edges) == 1
         assert loaded.edges[0].confidence == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Layout (and other GraphData meta fields) persistence in Neo4j
+# ---------------------------------------------------------------------------
+
+
+class TestNeo4jLayoutPersistence:
+    """GraphData.layout, token_estimate, retrieval_strategy round-trip through Neo4j."""
+
+    def test_save_passes_layout_and_meta_fields_to_meta_node(
+        self, storage, mock_driver
+    ):
+        """save() must include layout/token_estimate/retrieval_strategy in the
+        Meta node SET clause so they are not silently dropped."""
+        _, session, tx = mock_driver
+
+        data = GraphData(
+            nodes={"mod:a": Node(id="mod:a", type="module", label="a")},
+            edges=[],
+            project_path="/tmp/test",
+            layout={"mod:a": [3.0, 4.5]},
+            token_estimate=99,
+            retrieval_strategy="hybrid",
+        )
+
+        storage.save("/tmp/test", data)
+
+        meta_call = None
+        for call in tx.run.call_args_list:
+            query = call[0][0] if call[0] else ""
+            if "Meta" in query and "SET" in query:
+                meta_call = call
+                break
+
+        assert meta_call is not None, "Expected a Meta node SET query"
+        kwargs = meta_call[1] if meta_call[1] else {}
+        assert kwargs.get("layout") == json.dumps({"mod:a": [3.0, 4.5]})
+        assert kwargs.get("token_estimate") == 99
+        assert kwargs.get("retrieval_strategy") == "hybrid"
+
+    def test_load_returns_layout_and_meta_fields(self, storage, mock_driver):
+        """load() must parse layout/token_estimate/retrieval_strategy back out
+        of the Meta node."""
+        _, session, _ = mock_driver
+
+        exists_record = MagicMock()
+        exists_record.__getitem__ = MagicMock(return_value=True)
+        exists_result = MagicMock()
+        exists_result.single.return_value = exists_record
+
+        meta_record = MagicMock()
+        meta_record.data.return_value = {
+            "meta": {
+                "project_path": "/tmp/test",
+                "last_scan": "",
+                "schema_version": "1.0",
+                "layout": json.dumps({"mod:a": [1.0, 2.0]}),
+                "token_estimate": 55,
+                "retrieval_strategy": "keyword",
+            }
+        }
+        meta_result = MagicMock()
+        meta_result.single.return_value = meta_record
+
+        nodes_result = MagicMock()
+        nodes_result.__iter__ = MagicMock(return_value=iter([]))
+
+        edges_result = MagicMock()
+        edges_result.__iter__ = MagicMock(return_value=iter([]))
+
+        session.run.side_effect = [
+            exists_result,
+            meta_result,
+            nodes_result,
+            edges_result,
+        ]
+
+        loaded = storage.load("/tmp/test")
+
+        assert loaded is not None
+        assert loaded.layout == {"mod:a": [1.0, 2.0]}
+        assert loaded.token_estimate == 55
+        assert loaded.retrieval_strategy == "keyword"
+
+    def test_load_missing_layout_defaults_to_empty_dict(self, storage, mock_driver):
+        """Simulate a Meta node from before layout persistence existed --
+        loaded.layout must be {} rather than raising."""
+        _, session, _ = mock_driver
+
+        exists_record = MagicMock()
+        exists_record.__getitem__ = MagicMock(return_value=True)
+        exists_result = MagicMock()
+        exists_result.single.return_value = exists_record
+
+        meta_record = MagicMock()
+        meta_record.data.return_value = {
+            "meta": {
+                "project_path": "/tmp/test",
+                "last_scan": "",
+                "schema_version": "1.0",
+                # NOTE: no "layout", "token_estimate", or "retrieval_strategy" keys
+            }
+        }
+        meta_result = MagicMock()
+        meta_result.single.return_value = meta_record
+
+        nodes_result = MagicMock()
+        nodes_result.__iter__ = MagicMock(return_value=iter([]))
+
+        edges_result = MagicMock()
+        edges_result.__iter__ = MagicMock(return_value=iter([]))
+
+        session.run.side_effect = [
+            exists_result,
+            meta_result,
+            nodes_result,
+            edges_result,
+        ]
+
+        loaded = storage.load("/tmp/test")
+
+        assert loaded is not None
+        assert loaded.layout == {}
+        assert loaded.token_estimate == 0
+        assert loaded.retrieval_strategy == ""

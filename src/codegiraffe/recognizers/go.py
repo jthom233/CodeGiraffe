@@ -457,6 +457,7 @@ class GoRecognizer:
                     source=ipc_client_id,
                     target=ipc_server_id,
                     type=EdgeType.CALLS,
+                    confidence=0.8,
                     metadata={"inferred": True, "mechanism": "unix_socket"},
                 )
             )
@@ -526,6 +527,7 @@ class GoRecognizer:
                             source=src_pkg_id,
                             target=tgt_pkg_id,
                             type=EdgeType.DEPENDS_ON,
+                            confidence=0.8,
                             metadata={"inferred": True},
                         )
                     )
@@ -543,6 +545,7 @@ class GoRecognizer:
                             source=ep_id,
                             target=tbl_id,
                             type=EdgeType.READS,
+                            confidence=0.8,
                             metadata={"inferred": True},
                         )
                     )
@@ -556,6 +559,7 @@ class GoRecognizer:
                             source=svc_id,
                             target=env_id,
                             type=EdgeType.CONFIGURES,
+                            confidence=0.8,
                             metadata={"inferred": True},
                         )
                     )

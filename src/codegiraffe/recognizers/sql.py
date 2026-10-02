@@ -207,6 +207,24 @@ def _extract_param_text(batch: str, object_end: int) -> str:
     return ""
 
 
+def _find_matching_paren_end(text: str, open_paren_end: int) -> int:
+    """Return the index just past the ``)`` that closes the ``(`` ending at *open_paren_end*.
+
+    *open_paren_end* is the index immediately after the opening paren (depth
+    starts at 1). If the parens are unbalanced, returns ``len(text)``.
+    """
+    depth = 1
+    i = open_paren_end
+    while i < len(text) and depth > 0:
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        i += 1
+    return i
+
+
 # ---------------------------------------------------------------------------
 # Recognizer
 # ---------------------------------------------------------------------------
@@ -328,6 +346,7 @@ class SqlRecognizer:
                                 source=node_id,
                                 target=f"table:{ref_name}",
                                 type=EdgeType.DEPENDS_ON,
+                                confidence=0.9,
                                 metadata={"relationship": "foreign_key", "inferred": True},
                             )
                         )
@@ -362,6 +381,7 @@ class SqlRecognizer:
                             source=f"table:{name}",
                             target=f"table:{ref_name}",
                             type=EdgeType.DEPENDS_ON,
+                            confidence=0.9,
                             metadata={"relationship": "foreign_key", "inferred": True},
                         )
                     )
@@ -480,14 +500,35 @@ class SqlRecognizer:
         seen_edges: set[tuple[str, str, str]] = set()
 
         for source_id, (obj_kind, body) in object_bodies.items():
-            # Names introduced as CTEs (WITH x AS (...), y AS (...)) in this body.
-            # These are not real tables and must not be treated as read/write targets.
-            cte_names = {_strip_name(m.group(1)).upper() for m in _SQL_CTE_RE.finditer(body)}
+            # Names introduced as CTEs (WITH x AS (...), y AS (...)) in this body,
+            # paired with the end offset of their own defining closing paren. A
+            # reference is only treated as "the CTE" (and excluded from table
+            # read/write detection) when it appears AFTER that closing paren AND
+            # is not schema-qualified -- a schema-qualified reference (e.g.
+            # dbo.Users) can never be a CTE reference, and a bare reference that
+            # happens to recur inside the CTE's own definition body is a real
+            # table reference, not a self-reference to the CTE.
+            cte_ranges: list[tuple[str, int]] = []
+            for cte_m in _SQL_CTE_RE.finditer(body):
+                cte_name_u = _strip_name(cte_m.group(1)).upper()
+                close_end = _find_matching_paren_end(body, cte_m.end())
+                cte_ranges.append((cte_name_u, close_end))
+
+            def _is_cte_self_reference(ref_m: re.Match, ref_name_upper: str) -> bool:
+                raw_captured = ref_m.group(1)
+                if "." in raw_captured:
+                    return False  # schema-qualified -> never a CTE reference
+                return any(
+                    name_u == ref_name_upper and ref_m.start() >= close_end
+                    for name_u, close_end in cte_ranges
+                )
 
             # READ references: FROM / JOIN
             for ref_m in _SQL_READ_REF_RE.finditer(body):
                 ref_name = _strip_name(ref_m.group(1))
-                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS or ref_name.upper() in cte_names:
+                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS:
+                    continue
+                if _is_cte_self_reference(ref_m, ref_name.upper()):
                     continue
                 target_id = f"table:{ref_name}"
                 key = (source_id, target_id, EdgeType.READS)
@@ -498,6 +539,7 @@ class SqlRecognizer:
                             source=source_id,
                             target=target_id,
                             type=EdgeType.READS,
+                            confidence=0.7,
                             metadata={"inferred": True},
                         )
                     )
@@ -505,7 +547,9 @@ class SqlRecognizer:
             # WRITE references: INSERT INTO / UPDATE / DELETE FROM
             for ref_m in _SQL_WRITE_REF_RE.finditer(body):
                 ref_name = _strip_name(ref_m.group(1))
-                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS or ref_name.upper() in cte_names:
+                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS:
+                    continue
+                if _is_cte_self_reference(ref_m, ref_name.upper()):
                     continue
                 target_id = f"table:{ref_name}"
                 key = (source_id, target_id, EdgeType.WRITES)
@@ -516,6 +560,7 @@ class SqlRecognizer:
                             source=source_id,
                             target=target_id,
                             type=EdgeType.WRITES,
+                            confidence=0.7,
                             metadata={"inferred": True},
                         )
                     )
@@ -523,7 +568,9 @@ class SqlRecognizer:
             # MERGE INTO: treats target as a write (upsert)
             for ref_m in _SQL_MERGE_RE.finditer(body):
                 ref_name = _strip_name(ref_m.group(1))
-                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS or ref_name.upper() in cte_names:
+                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS:
+                    continue
+                if _is_cte_self_reference(ref_m, ref_name.upper()):
                     continue
                 target_id = f"table:{ref_name}"
                 key = (source_id, target_id, EdgeType.WRITES)
@@ -534,6 +581,7 @@ class SqlRecognizer:
                             source=source_id,
                             target=target_id,
                             type=EdgeType.WRITES,
+                            confidence=0.7,
                             metadata={"inferred": True, "via": "merge"},
                         )
                     )
@@ -559,6 +607,7 @@ class SqlRecognizer:
                             source=source_id,
                             target=target_id,
                             type=EdgeType.CALLS,
+                            confidence=0.7,
                             metadata={"inferred": True, "style": "exec"},
                         )
                     )
@@ -569,24 +618,34 @@ class SqlRecognizer:
         # created in the same file (and that do NOT define procedures/views), emit
         # a migration:<stem> node with writes edges to those pre-existing tables.
         # -----------------------------------------------------------------------
-        migration_targets: set[str] = set()
+        # Keyed case-insensitively (T-SQL identifiers are case-insensitive) but
+        # keeping the first-seen spelling for the node id / edge target.
+        migration_targets_ci: dict[str, str] = {}
 
         # ALTER TABLE as migration change
         for m in _SQL_ALTER_TABLE_RE.finditer(content):
             name = _strip_name(m.group(1))
             if name and name.upper() not in self._SQL_KEYWORDS:
-                migration_targets.add(name)
+                migration_targets_ci.setdefault(name.upper(), name)
 
         # CREATE INDEX as migration change
         for m in _SQL_CREATE_INDEX_RE.finditer(content):
             name = _strip_name(m.group(1))
             if name and name.upper() not in self._SQL_KEYWORDS:
-                migration_targets.add(name)
+                migration_targets_ci.setdefault(name.upper(), name)
+
+        migration_targets = set(migration_targets_ci.values())
 
         # Tables altered/indexed here that were NOT also created in this file (these
         # are the ones that make this a migration against pre-existing schema). A file
         # that only touches tables it just CREATEd is an ordinary schema file.
-        external_targets = migration_targets - created_tables
+        # Compared case-insensitively since T-SQL identifiers are case-insensitive
+        # (e.g. CREATE TABLE tbOrder ... ALTER TABLE TBORDER is the same table).
+        created_tables_upper = {t.upper() for t in created_tables}
+        external_targets = {
+            name for name in migration_targets
+            if name.upper() not in created_tables_upper
+        }
 
         if external_targets and not object_bodies:
             # This is a migration-only file (no procs/views); emit a file-level migration node
@@ -615,6 +674,7 @@ class SqlRecognizer:
                             source=file_node_id,
                             target=target_id,
                             type=EdgeType.WRITES,
+                            confidence=0.7,
                             metadata={"inferred": True},
                         )
                     )

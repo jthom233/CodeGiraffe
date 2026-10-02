@@ -469,3 +469,109 @@ class TestSQLiteConfidencePersistence:
         assert loaded is not None
         assert len(loaded.edges) == 1
         assert loaded.edges[0].confidence == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Layout (and other GraphData meta fields) persistence
+# ---------------------------------------------------------------------------
+
+
+class TestSQLiteLayoutPersistence:
+    """GraphData.layout round-trips through SQLite with zero data loss."""
+
+    def test_layout_survives_round_trip(self, storage, tmp_path):
+        """Save a GraphData with a non-empty layout; reload; verify exact match."""
+        project = str(tmp_path)
+        data = GraphData(
+            nodes={
+                "mod:a": Node(id="mod:a", type="module", label="a"),
+                "mod:b": Node(id="mod:b", type="module", label="b"),
+            },
+            edges=[],
+            project_path=project,
+            layout={
+                "mod:a": [1.5, -2.25],
+                "mod:b": [100.0, 0.0],
+            },
+        )
+        storage.save(project, data)
+        loaded = storage.load(project)
+
+        assert loaded is not None
+        assert loaded.layout == {
+            "mod:a": [1.5, -2.25],
+            "mod:b": [100.0, 0.0],
+        }
+
+    def test_empty_layout_round_trips_as_empty_dict(self, storage, tmp_path):
+        project = str(tmp_path)
+        data = GraphData(project_path=project, layout={})
+        storage.save(project, data)
+        loaded = storage.load(project)
+
+        assert loaded is not None
+        assert loaded.layout == {}
+
+    def test_token_estimate_and_retrieval_strategy_survive_round_trip(
+        self, storage, tmp_path
+    ):
+        project = str(tmp_path)
+        data = GraphData(
+            project_path=project,
+            token_estimate=4242,
+            retrieval_strategy="hybrid",
+        )
+        storage.save(project, data)
+        loaded = storage.load(project)
+
+        assert loaded is not None
+        assert loaded.token_estimate == 4242
+        assert loaded.retrieval_strategy == "hybrid"
+
+    def test_old_database_without_layout_key_loads_empty_layout(self, tmp_path):
+        """A graph_meta table that predates the layout/token_estimate/retrieval_strategy
+        keys must load with layout == {} rather than raising."""
+        import sqlite3 as _sqlite3
+        from codegiraffe.sqlite_storage import STORAGE_DIR, DB_FILENAME
+
+        db_dir = tmp_path / STORAGE_DIR
+        db_dir.mkdir(parents=True)
+        db_path = db_dir / DB_FILENAME
+
+        conn = _sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE nodes (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                file_path TEXT DEFAULT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                manual INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                type TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                manual INTEGER NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                UNIQUE(source, target, type)
+            );
+        """)
+        # Only the fields the pre-layout schema wrote -- no "layout",
+        # "token_estimate", or "retrieval_strategy" keys present.
+        conn.execute("INSERT INTO graph_meta VALUES ('project_path', ?)", (str(tmp_path),))
+        conn.execute("INSERT INTO graph_meta VALUES ('last_scan', '')")
+        conn.execute("INSERT INTO graph_meta VALUES ('schema_version', '1')")
+        conn.commit()
+        conn.close()
+
+        storage = SQLiteStorage()
+        loaded = storage.load(str(tmp_path))
+
+        assert loaded is not None
+        assert loaded.layout == {}
+        assert loaded.token_estimate == 0
+        assert loaded.retrieval_strategy == ""
