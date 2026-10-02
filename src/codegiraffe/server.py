@@ -91,6 +91,20 @@ MAX_BLAST_DEPTH = 20
 _BLAST_PREFERRED_TYPES = frozenset({"service", "module", "database_table", "endpoint", "migration"})
 
 
+def _record_version(project_path: str, old_data: GraphData, new_data: GraphData, message: str) -> str:
+    """Append a version entry, returning a warning suffix instead of raising.
+
+    Called after the graph has already been persisted, so a failure here must
+    surface as a note on an otherwise successful result rather than turn the
+    whole operation into an error.
+    """
+    try:
+        _version_store.add_version(project_path, old_data, new_data, message)
+    except Exception as exc:  # noqa: BLE001 - never fail init/sync over history
+        return f" Warning: version history not updated ({exc})."
+    return ""
+
+
 def _get_storage(backend: str = "json"):
     """Get a storage backend by name."""
     if backend == "sqlite":
@@ -249,9 +263,8 @@ def codegiraffe_init(
 
         # Auto-version after init/rescan (outside lock — version store has its own safety)
         prev_data = old_data if old_data is not None else GraphData()
-        _version_store.add_version(
-            project_path, prev_data, graph.to_data(),
-            "Rescan" if rescan else "Init",
+        version_note = _record_version(
+            project_path, prev_data, graph.to_data(), "Rescan" if rescan else "Init",
         )
 
         final_data = graph.to_data()
@@ -270,7 +283,7 @@ def codegiraffe_init(
 
         return (
             f"Initialized graph with {len(final_data.nodes)} nodes "
-            f"and {len(final_data.edges)} edges"
+            f"and {len(final_data.edges)} edges" + version_note
         )
     except Exception as exc:
         return f"Error initializing graph: {exc}"
@@ -2030,10 +2043,10 @@ def codegiraffe_sync(
             _storage.save(project_path, data)
             _graph = new_graph
 
-        # Auto-version after sync (outside lock — version store has its own safety)
-        _version_store.add_version(
-            project_path, old_data, new_graph.to_data(), "Sync",
-        )
+        # Auto-version after sync (outside lock — version store has its own safety).
+        # The graph is already persisted at this point, so a versioning failure
+        # must not be reported as a failed sync.
+        version_note = _record_version(project_path, old_data, new_graph.to_data(), "Sync")
 
         final_data = new_graph.to_data()
         new_node_count = len(final_data.nodes)
@@ -2045,6 +2058,7 @@ def codegiraffe_sync(
             f"(delta {new_node_count - old_node_count:+d}). "
             f"Edges: {old_edge_count} -> {new_edge_count} "
             f"(delta {new_edge_count - old_edge_count:+d})."
+            + version_note
         )
     except Exception as exc:
         return f"Error syncing graph: {exc}"

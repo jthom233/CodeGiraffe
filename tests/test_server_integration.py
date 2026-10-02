@@ -8,6 +8,7 @@ cypher tool through the server-level function interface.
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 import os
 import tempfile
 import threading
@@ -319,15 +320,49 @@ class TestInitVariations:
 
 
 class TestSyncVersioning:
+    def test_versioning_failure_does_not_fail_persisted_sync(self, project_dir):
+        """The graph is saved before the version entry is written; a history
+        failure must surface as a warning on a successful result, not as an
+        error that hides the fact that the sync landed."""
+        import codegiraffe.server as srv
+
+        codegiraffe_init(project_dir)
+
+        def boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        with patch.object(srv._version_store, "add_version", side_effect=boom):
+            result = codegiraffe_sync(project_dir)
+
+        assert result.startswith("Sync complete"), result
+        assert "Warning: version history not updated" in result
+        assert "disk full" in result
+        # The graph itself is intact and loadable
+        assert srv._storage.exists(project_dir)
+
+    def test_init_versioning_failure_still_reports_success(self, tmp_path):
+        import codegiraffe.server as srv
+
+        (tmp_path / "app.py").write_text("class A:\n    pass\n")
+
+        with patch.object(srv._version_store, "add_version", side_effect=RuntimeError("nope")):
+            result = codegiraffe_init(str(tmp_path))
+
+        assert result.startswith("Initialized graph"), result
+        assert "Warning: version history not updated" in result
+        assert srv._storage.exists(str(tmp_path))
+
     def test_sync_creates_version(self, project_dir):
         """Init, sync, check history has 2 entries (init + sync)."""
-        codegiraffe_init(project_dir)
-        codegiraffe_sync(project_dir)
+        init_result = codegiraffe_init(project_dir)
+        assert "Initialized graph" in init_result, init_result
+        sync_result = codegiraffe_sync(project_dir)
+        assert sync_result.startswith("Sync complete"), sync_result
 
         result = codegiraffe_history(project_dir)
         history = json.loads(result)
 
-        assert len(history) >= 2
+        assert len(history) >= 2, history
         messages = [entry["message"] for entry in history]
         assert "Init" in messages
         assert "Sync" in messages
