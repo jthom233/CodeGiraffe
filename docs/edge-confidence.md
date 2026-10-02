@@ -12,14 +12,22 @@ All edges in the architecture graph carry a `confidence` value (0.0–1.0) that 
 |---|---|
 | AST-parsed edges (tree-sitter) | 1.0 |
 | `contains` edges (module → entity) | 1.0 |
-| Regex imports with exact matches | 0.9 |
-| Inheritance (extends/implements) | 0.8 |
-| Call-graph edges (high certainty) | 0.8 |
-| Call-graph edges (lower certainty) | 0.6 |
-| Interface satisfaction (Go) | 0.7 |
+| Regex imports with exact matches (Python direct + the universal `ImportInfo` → `imports` edge pipeline shared by every other language recognizer) | 0.9 |
+| XML-parsed dependency edges (`.csproj` `PackageReference`/`ProjectReference`, `packages.config`) | 0.9 |
+| SQL foreign key `depends_on` edges (`FOREIGN KEY ... REFERENCES`, including `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY`) | 0.9 |
+| Inheritance (extends/implements) — regex, via the universal `ImplementationInfo` → `implements` edge pipeline | 0.8 |
+| Call-graph edges (high certainty — callee resolves to a node in the same file as the call site) | 0.8 |
+| Regex pattern-match edges emitted directly inside a recognizer (not via `ImportInfo`/`ImplementationInfo`/`CallInfo`) — e.g. `reads`/`writes`/`depends_on`/`configures`/`calls` inferred from endpoint↔table co-occurrence, Go internal package imports, Go unix-socket IPC, C#/SQL cross-language string references | 0.8 |
+| Interface satisfaction (Go duck-typing, `_infer_interface_satisfaction`) | 0.7 |
+| SQL inferred body edges (`reads`/`writes`/`calls` from `FROM`/`JOIN`/`INSERT`/`UPDATE`/`DELETE`/`MERGE`/`EXEC` pattern matches) and SQL migration `writes` edges (`migration:<file>` → pre-existing table) | 0.7 |
+| Call-graph edges (lower certainty — callee resolves cross-file/cross-module via the global symbol registry) | 0.6 |
 | Contract inference | 0.5 |
 
+When neither side of a call edge has file-path information available, the scanner cannot determine same-file vs. cross-file certainty and defaults to the higher-certainty value (0.8) rather than penalizing missing data.
+
 Edges created manually via `codegiraffe_add_relation` or `codegiraffe_add_contract` carry a confidence value of `1.0` since they are explicitly asserted.
+
+In hybrid scan mode, regex recognizers run first and AST recognizers are merged in second (`ScanResult.merge`). When the same `(source, target, type)` edge is produced by both, the merge keeps whichever has higher confidence (the AST edge, typically 1.0) rather than silently discarding it in favor of whichever was inserted first.
 
 ---
 

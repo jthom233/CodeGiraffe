@@ -282,6 +282,7 @@ class PhpRecognizer:
                             source=ep_id,
                             target=tbl_id,
                             type=EdgeType.READS,
+                            confidence=0.8,
                             metadata={"inferred": True},
                         )
                     )

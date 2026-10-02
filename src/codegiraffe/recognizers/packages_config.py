@@ -81,6 +81,7 @@ class PackagesConfigRecognizer:
                     source=project_id,
                     target=target_id,
                     type=EdgeType.DEPENDS_ON,
+                    confidence=0.9,
                     metadata=meta,
                 )
             )

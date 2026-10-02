@@ -17,16 +17,27 @@ from codegiraffe.schema import EdgeType, NodeType
 from codegiraffe.scanner import (
     scan_project,
     _infer_import_edges,
+    _infer_import_edges_universal,
+    _infer_inheritance_edges_universal,
     _infer_call_edges,
     _infer_interface_satisfaction,
     _infer_contract_edges,
     _infer_inheritance_edges,
     ScanResult,
     CallInfo,
+    ImportInfo,
+    ImplementationInfo,
     InterfaceInfo,
     MethodSetEntry,
 )
 from codegiraffe.query import context_for_task, compute_blast_radius
+from codegiraffe.recognizers import (
+    TypeScriptRecognizer,
+    GoRecognizer,
+    JavaRecognizer,
+    CSharpRecognizer,
+    RustRecognizer,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +259,318 @@ class TestConfidenceAssignment:
         # Direct match (receiver resolved): confidence=0.8
         for edge in call_edges:
             assert edge.confidence == 0.8
+
+    def test_call_edge_same_file_resolution_is_0_8(self):
+        """A call resolved to a node whose file_path matches the call site's
+        file_path is high certainty -> confidence=0.8."""
+        result = ScanResult()
+        result.nodes.extend([
+            Node(id="service:CallerSvc", type=NodeType.SERVICE, label="CallerSvc",
+                 file_path="same.py", metadata={"class_name": "CallerSvc"}),
+            Node(id="service:CalleeSvc", type=NodeType.SERVICE, label="CalleeSvc",
+                 file_path="same.py", metadata={"class_name": "CalleeSvc"}),
+        ])
+        result.calls.append(CallInfo(
+            caller="CallerSvc.run",
+            callee="method",
+            receiver="CalleeSvc",
+            file_path="same.py",
+            style="method",
+        ))
+
+        _infer_call_edges(result)
+
+        call_edges = [e for e in result.edges if e.type == EdgeType.CALLS]
+        assert call_edges
+        for edge in call_edges:
+            assert edge.confidence == 0.8
+
+    def test_call_edge_cross_file_resolution_is_0_6(self):
+        """A call resolved to a node whose file_path differs from the call
+        site's file_path is lower certainty -> confidence=0.6."""
+        result = ScanResult()
+        result.nodes.extend([
+            Node(id="service:CallerSvc", type=NodeType.SERVICE, label="CallerSvc",
+                 file_path="caller.py", metadata={"class_name": "CallerSvc"}),
+            Node(id="service:CalleeSvc", type=NodeType.SERVICE, label="CalleeSvc",
+                 file_path="callee.py", metadata={"class_name": "CalleeSvc"}),
+        ])
+        result.calls.append(CallInfo(
+            caller="CallerSvc.run",
+            callee="method",
+            receiver="CalleeSvc",
+            file_path="caller.py",
+            style="method",
+        ))
+
+        _infer_call_edges(result)
+
+        call_edges = [e for e in result.edges if e.type == EdgeType.CALLS]
+        assert call_edges
+        for edge in call_edges:
+            assert edge.confidence == 0.6
+
+
+class TestSqlConfidence:
+    """SQL recognizer edges: body reads/writes/merge/exec are inferred at 0.7,
+    foreign-key depends_on edges are 0.9 (higher certainty: FK constraints are
+    explicit DDL, not a loosely pattern-matched DML reference)."""
+
+    def test_sql_inferred_body_edges_are_0_7(self):
+        from codegiraffe.recognizers.sql import SqlRecognizer
+
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_ListSecrets]\n"
+            "AS\n"
+            "BEGIN\n"
+            "    SELECT * FROM tbSecret\n"
+            "    INSERT INTO tbLog (Msg) VALUES ('x')\n"
+            "    EXEC usp_Helper\n"
+            "END\n"
+            "GO\n"
+        )
+        result = SqlRecognizer().recognize(Path("procs.sql"), content)
+        inferred = [
+            e for e in result.edges
+            if e.type in (EdgeType.READS, EdgeType.WRITES, EdgeType.CALLS)
+        ]
+        assert inferred, "Expected reads/writes/calls edges"
+        for e in inferred:
+            assert e.confidence == 0.7, (
+                f"Edge {e.source}->{e.target} ({e.type}) has confidence "
+                f"{e.confidence}, expected 0.7"
+            )
+
+    def test_sql_migration_writes_edge_is_0_7(self):
+        from codegiraffe.recognizers.sql import SqlRecognizer
+
+        content = "ALTER TABLE [dbo].[tbLauncherSession] ADD Col BIT NOT NULL;"
+        result = SqlRecognizer().recognize(Path("SqlServer/12.0/000025.sql"), content)
+        writes = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert writes
+        for e in writes:
+            assert e.confidence == 0.7
+
+    def test_sql_foreign_key_depends_on_is_0_9(self):
+        from codegiraffe.recognizers.sql import SqlRecognizer
+
+        content = (
+            "CREATE TABLE tbSecretItem (\n"
+            "    SecretItemId INT PRIMARY KEY,\n"
+            "    SecretId INT NOT NULL,\n"
+            "    FOREIGN KEY (SecretId) REFERENCES [dbo].[tbSecret](SecretId)\n"
+            ");\n"
+        )
+        result = SqlRecognizer().recognize(Path("schema.sql"), content)
+        depends_on = [e for e in result.edges if e.type == EdgeType.DEPENDS_ON]
+        assert depends_on
+        for e in depends_on:
+            assert e.confidence == 0.9
+
+    def test_sql_alter_table_add_fk_depends_on_is_0_9(self):
+        from codegiraffe.recognizers.sql import SqlRecognizer
+
+        content = (
+            "ALTER TABLE tbSecretItem\n"
+            "ADD CONSTRAINT FK_SecretItem_Secret\n"
+            "FOREIGN KEY (SecretId) REFERENCES tbSecret(SecretId);\n"
+        )
+        result = SqlRecognizer().recognize(Path("fk.sql"), content)
+        depends_on = [e for e in result.edges if e.type == EdgeType.DEPENDS_ON]
+        assert depends_on
+        for e in depends_on:
+            assert e.confidence == 0.9
+
+
+class TestPerLanguageImportAndImplementsConfidence:
+    """Verify the shared universal pipeline (_infer_import_edges_universal /
+    _infer_inheritance_edges_universal) assigns the documented confidence
+    (0.9 for imports, 0.8 for implements) to the ImportInfo/ImplementationInfo
+    that each language's regex recognizer actually emits.
+
+    Before v0.16.1 these recognizers never passed ``confidence=`` on edges
+    they built directly, which only matters for edges built *outside* this
+    shared pipeline (see TestDirectRecognizerEdgeConfidence below). The
+    ImportInfo/ImplementationInfo -> Edge conversion itself was already
+    centralized and correct; these tests pin that down per language using
+    real recognizer output rather than hand-rolled data.
+    """
+
+    def _assert_import_edge_is_0_9(self, module_path: str, caller_file: str) -> None:
+        result = ScanResult()
+        result.nodes.extend([
+            Node(id="mod:a", type=NodeType.MODULE.value, label="a", file_path="a.ext"),
+            Node(id="mod:" + module_path, type=NodeType.MODULE.value, label=module_path, file_path=caller_file),
+        ])
+        per_file_results = {
+            Path(caller_file): ScanResult(
+                imports=[ImportInfo(module_path="a", symbols=["X"], style="absolute")]
+            ),
+        }
+        _infer_import_edges_universal(result, per_file_results)
+
+        import_edges = [e for e in result.edges if e.type == EdgeType.IMPORTS]
+        assert import_edges, "Expected at least one import edge"
+        for edge in import_edges:
+            assert edge.confidence == 0.9
+
+    def _assert_implements_edge_is_0_8(self, child: str, parent: str, file_path: str) -> None:
+        result = ScanResult()
+        result.nodes.extend([
+            Node(id=f"service:{child}", type=NodeType.SERVICE.value, label=child,
+                 file_path=file_path, metadata={"class_name": child}),
+            Node(id=f"service:{parent}", type=NodeType.SERVICE.value, label=parent,
+                 file_path=file_path, metadata={"class_name": parent}),
+        ])
+        per_file_results = {
+            Path(file_path): ScanResult(
+                implementations=[ImplementationInfo(child_class=child, parent_class=parent, file_path=file_path)]
+            ),
+        }
+        _infer_inheritance_edges_universal(result, per_file_results)
+
+        implements_edges = [e for e in result.edges if e.type == EdgeType.IMPLEMENTS]
+        assert implements_edges, "Expected at least one implements edge"
+        for edge in implements_edges:
+            assert edge.confidence == 0.8
+
+    def test_typescript_import_and_implements_confidence(self):
+        ts = TypeScriptRecognizer()
+        r = ts.recognize(Path("b.ts"), "import { Base } from './a';\nclass Child extends Base {}\n")
+        assert r.imports and r.imports[0].module_path == "a"
+        assert r.implementations
+
+        self._assert_import_edge_is_0_9("b", "b.ts")
+        self._assert_implements_edge_is_0_8(
+            r.implementations[0].child_class, r.implementations[0].parent_class, "b.ts"
+        )
+
+    def test_go_import_and_implements_confidence(self, tmp_path):
+        go_mod = tmp_path / "go.mod"
+        go_mod.write_text("module example.com/proj\n\ngo 1.21\n")
+        go = GoRecognizer()
+        go.set_project_root(str(tmp_path))
+        r_imports = go.recognize(
+            Path("main.go"),
+            'package main\n\nimport (\n    "example.com/proj/foo"\n)\n',
+        )
+        assert r_imports.imports and r_imports.imports[0].module_path == "foo"
+
+        r_impl = go.recognize(
+            Path("storage/base.go"),
+            "package storage\n\ntype Saver interface {\n    Save()\n}\n\n"
+            "type Base struct{}\n\nfunc (b *Base) Save() {}\n",
+        )
+        assert r_impl.implementations
+
+        self._assert_import_edge_is_0_9("main", "main.go")
+        self._assert_implements_edge_is_0_8(
+            r_impl.implementations[0].child_class,
+            r_impl.implementations[0].parent_class,
+            "storage/base.go",
+        )
+
+    def test_java_import_and_implements_confidence(self):
+        java = JavaRecognizer()
+        java._project_packages = {"com.example"}
+        r = java.recognize(
+            Path("Child.java"),
+            "package com.example;\nimport com.example.Base;\nclass Child extends Base {}\n",
+        )
+        assert r.imports and r.imports[0].module_path == "com.example.Base"
+        assert r.implementations
+
+        self._assert_import_edge_is_0_9("Child", "Child.java")
+        self._assert_implements_edge_is_0_8(
+            r.implementations[0].child_class, r.implementations[0].parent_class, "Child.java"
+        )
+
+    def test_csharp_import_and_implements_confidence(self):
+        cs = CSharpRecognizer()
+        cs._project_namespaces = {"MyApp"}
+        r = cs.recognize(
+            Path("Child.cs"),
+            "using MyApp;\nnamespace MyApp { class Child : Base {} }\n",
+        )
+        assert r.imports and r.imports[0].module_path == "MyApp"
+        assert r.implementations
+
+        self._assert_import_edge_is_0_9("Child", "Child.cs")
+        self._assert_implements_edge_is_0_8(
+            r.implementations[0].child_class, r.implementations[0].parent_class, "Child.cs"
+        )
+
+    def test_rust_import_and_implements_confidence(self):
+        rs = RustRecognizer()
+        r = rs.recognize(Path("lib.rs"), "use crate::foo;\nimpl Trait for Child {}\n")
+        assert r.imports and r.imports[0].module_path == "foo"
+        assert r.implementations
+
+        self._assert_import_edge_is_0_9("lib", "lib.rs")
+        self._assert_implements_edge_is_0_8(
+            r.implementations[0].child_class, r.implementations[0].parent_class, "lib.rs"
+        )
+
+
+class TestDirectRecognizerEdgeConfidence:
+    """Edges built directly inside a recognizer's recognize() (not routed through
+    ImportInfo/ImplementationInfo/CallInfo) must not default to the undocumented
+    1.0 confidence. These are regex pattern-match edges (reads/writes/depends_on/
+    configures/calls) and must be 0.8 per the documented table."""
+
+    def test_typescript_endpoint_reads_table_is_0_8(self, tmp_path):
+        (tmp_path / "app.ts").write_text(
+            "app.get('/api/users', h);\nmodel User {\n  id Int\n}\n"
+        )
+        result = scan_project(str(tmp_path))
+        reads = [e for e in result.edges if e.type == EdgeType.READS]
+        assert reads, "Expected a reads edge"
+        for e in reads:
+            assert e.confidence == 0.8
+
+    def test_go_depends_on_and_reads_are_0_8(self, tmp_path):
+        go_mod = tmp_path / "go.mod"
+        go_mod.write_text("module example.com/proj\n\ngo 1.21\n")
+        (tmp_path / "main.go").write_text(
+            'package main\n\n'
+            'import "example.com/proj/internal/store"\n\n'
+            'func main() {\n'
+            '    http.HandleFunc("/api/items", h)\n'
+            '}\n'
+            'type Item struct{ gorm.Model }\n'
+        )
+        result = scan_project(str(tmp_path))
+        depends_on = [e for e in result.edges if e.type == EdgeType.DEPENDS_ON]
+        reads = [e for e in result.edges if e.type == EdgeType.READS]
+        assert depends_on, "Expected a depends_on edge for internal package import"
+        for e in depends_on:
+            assert e.confidence == 0.8
+        assert reads, "Expected a reads edge"
+        for e in reads:
+            assert e.confidence == 0.8
+
+    def test_java_endpoint_reads_table_is_0_8(self, tmp_path):
+        (tmp_path / "App.java").write_text(
+            "@GetMapping(\"/api/users\")\npublic void users() {}\n"
+            "@Table(name = \"users\")\nclass User {}\n"
+        )
+        result = scan_project(str(tmp_path))
+        reads = [e for e in result.edges if e.type == EdgeType.READS]
+        assert reads, "Expected a reads edge"
+        for e in reads:
+            assert e.confidence == 0.8
+
+    def test_csproj_nuget_dependency_is_0_9(self, tmp_path):
+        (tmp_path / "App.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">'
+            '<ItemGroup><PackageReference Include="Newtonsoft.Json" Version="13.0.1" /></ItemGroup>'
+            '</Project>'
+        )
+        result = scan_project(str(tmp_path))
+        depends_on = [e for e in result.edges if e.type == EdgeType.DEPENDS_ON]
+        assert depends_on, "Expected a depends_on edge for the NuGet package reference"
+        for e in depends_on:
+            assert e.confidence == 0.9
 
 
 # ---------------------------------------------------------------------------

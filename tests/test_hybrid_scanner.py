@@ -145,6 +145,68 @@ class TestScanResultMergeEdgeDeduplication:
 
         assert len(r1.edges) == 2
 
+    def test_merge_keeps_higher_confidence_ast_over_regex(self):
+        """When a regex edge is merged first and an AST edge for the same
+        (source, target, type) is merged in afterwards with higher confidence,
+        the higher-confidence (AST) edge replaces the regex one instead of
+        being dropped. This mirrors hybrid-mode ordering: regex recognizers
+        run first, then AST recognizers are merged in second."""
+        regex_edge = Edge(
+            source="service:A",
+            target="service:B",
+            type=EdgeType.READS,
+            confidence=0.8,
+            metadata={"inferred": True},
+        )
+        ast_edge = Edge(
+            source="service:A",
+            target="service:B",
+            type=EdgeType.READS,
+            confidence=1.0,
+            metadata={"inferred": True, "source": "ast"},
+        )
+        r1 = ScanResult(edges=[regex_edge])
+        r2 = ScanResult(edges=[ast_edge])
+
+        r1.merge(r2)
+
+        matching = [
+            edge for edge in r1.edges
+            if edge.source == "service:A" and edge.target == "service:B"
+            and edge.type == EdgeType.READS
+        ]
+        assert len(matching) == 1
+        assert matching[0].confidence == 1.0
+        assert matching[0].metadata.get("source") == "ast"
+
+    def test_merge_keeps_existing_when_new_edge_has_lower_confidence(self):
+        """A lower-confidence duplicate merged in later does not replace an
+        existing higher-confidence edge."""
+        high_conf_edge = Edge(
+            source="service:A",
+            target="service:B",
+            type=EdgeType.READS,
+            confidence=1.0,
+        )
+        low_conf_edge = Edge(
+            source="service:A",
+            target="service:B",
+            type=EdgeType.READS,
+            confidence=0.6,
+        )
+        r1 = ScanResult(edges=[high_conf_edge])
+        r2 = ScanResult(edges=[low_conf_edge])
+
+        r1.merge(r2)
+
+        matching = [
+            edge for edge in r1.edges
+            if edge.source == "service:A" and edge.target == "service:B"
+            and edge.type == EdgeType.READS
+        ]
+        assert len(matching) == 1
+        assert matching[0].confidence == 1.0
+
 
 class TestScanResultMergeCallInfo:
     """test_merge_deduplicates_call_info — identical CallInfo appears once."""
