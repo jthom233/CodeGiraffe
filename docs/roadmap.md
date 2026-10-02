@@ -186,6 +186,35 @@ Complete version history and future plans for Code Giraffe.
 
 ---
 
+## v0.17.0 — Correctness (completed)
+
+### Graph model & scanner
+- [x] `migration` node type: migration-only `.sql` files become `migration:<stem>` nodes; SQL views become `database_table` nodes with `kind=view`
+- [x] SQL recognizer: CTE names excluded from table edges; schema files that only alter their own tables are not migrations; case-insensitive table-name comparison
+- [x] Non-Python regex recognizers emit documented per-method edge confidence; hybrid dedup keeps the higher value
+
+### Tool correctness
+- [x] `codegiraffe_blast_radius`: disjoint `direct_impact` / `transitive_impact` / `indirect_impact` buckets (breaking: combined `downstream` key removed)
+- [x] `codegiraffe_risk_assessment` applies the documented 1.5x uncovered-node multiplier; reports `base_risk_score` and `test_coverage`
+- [x] `codegiraffe_status` fixed (returned an error for every initialized project) and documented
+- [x] `codegiraffe_add_contract` creates placeholder nodes instead of ghost edges; `get_hotspots` honors `top_n`
+- [x] init/sync report success with a warning when only version history fails
+- [x] Token-based keyword matching in `context_for_task`, `query_by_text`, and migration planning
+
+### Concurrency & storage
+- [x] Every graph-reading tool holds `_graph_lock` (`_with_graph_lock` decorator, allow-list pinned by test)
+- [x] `CoordinationStore` serialized across threads and processes with atomic saves
+- [x] SQLite and Neo4j persist `layout`, `token_estimate`, `retrieval_strategy`
+
+### CI & tooling
+- [x] `mcp` pinned `<2` after mcp 2.x removed `mcp.server.fastmcp`
+- [x] Architectural-review PR workflow rewritten: installs from checkout, real API, threshold flagging, uncovered nodes
+- [x] `hooks/post-commit` repaired to use `sync_files`
+- [x] 1900+ tests; 0 skipped when `[ast]` extras are installed
+
+---
+
 ## Future
 
+- [ ] Migrate from FastMCP to the mcp 2.x `MCPServer` API and lift the `<2` pin
 - [ ] Publish to PyPI

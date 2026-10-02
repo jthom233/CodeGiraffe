@@ -94,7 +94,7 @@ python -m pytest tests/ -v
 
 > **Windows note:** Replace `source .venv/bin/activate` with the appropriate activate command for your shell (see [Quick Start](#quick-start)).
 
-1703+ tests covering all subsystems. See [Roadmap](docs/roadmap.md) for version history (v0.2.0–v0.16.0).
+1900+ tests covering all subsystems. See [Roadmap](docs/roadmap.md) for version history (v0.2.0–v0.17.0).
 
 ## License
 
