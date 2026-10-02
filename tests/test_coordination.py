@@ -1,4 +1,5 @@
 """Tests for multi-agent coordination (codegiraffe.coordination)."""
+import concurrent.futures
 import json
 import time
 import pytest
@@ -9,6 +10,19 @@ from codegiraffe.coordination import AgentClaim, CoordinationStore, DEFAULT_TTL
 @pytest.fixture
 def store():
     return CoordinationStore()
+
+
+def _claim_in_subprocess(args):
+    """Top-level (picklable) helper used by the cross-process test below.
+
+    Each subprocess constructs its own ``CoordinationStore`` -- this is what
+    exercises the inter-process file lock rather than the in-process
+    ``threading.Lock``, which is per-process and wouldn't be shared here.
+    """
+    project_path, agent_id, node_ids, task = args
+    from codegiraffe.coordination import CoordinationStore as _Store
+
+    return _Store().claim(project_path, agent_id, node_ids, task)
 
 
 class TestAgentClaim:
@@ -110,3 +124,88 @@ class TestCoordinationStore:
     def test_empty_store(self, store, tmp_path):
         agents = store.list_agents(str(tmp_path))
         assert agents == []
+
+
+class TestConcurrency:
+    """Covers the race documented in the coordination correctness fix:
+    unsynchronized load -> check -> save let two agents both "win" a claim
+    on the same node. These tests pin down that exactly one claim wins."""
+
+    def test_concurrent_claims_single_winner(self, store, tmp_path):
+        """8 threads race to claim the same node on one shared store
+        instance. Exactly one must succeed; the rest get the conflict
+        shape, and the store ends up holding exactly one claim."""
+        n_threads = 8
+
+        def do_claim(i):
+            return store.claim(
+                str(tmp_path), f"agent-{i}", ["node:shared"], f"task-{i}"
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as pool:
+            results = list(pool.map(do_claim, range(n_threads)))
+
+        successes = [r for r in results if r["success"]]
+        conflicts = [r for r in results if not r["success"]]
+
+        assert len(successes) == 1
+        assert len(conflicts) == n_threads - 1
+        for c in conflicts:
+            assert c["reason"] == "conflict"
+            assert "conflicts" in c
+
+        agents = store.list_agents(str(tmp_path))
+        assert len(agents) == 1
+
+    def test_cross_process_claims_single_winner(self, tmp_path):
+        """Two separate OS processes race to claim the same node. Only
+        the inter-process file lock (msvcrt/fcntl) can serialize this --
+        a threading.Lock alone would not, since each process has its own."""
+        n_procs = 4
+        args_list = [
+            (str(tmp_path), f"proc-agent-{i}", ["node:shared"], f"task-{i}")
+            for i in range(n_procs)
+        ]
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_procs) as pool:
+            results = list(pool.map(_claim_in_subprocess, args_list))
+
+        successes = [r for r in results if r["success"]]
+        assert len(successes) == 1
+
+        store = CoordinationStore()
+        agents = store.list_agents(str(tmp_path))
+        assert len(agents) == 1
+
+
+class TestCrashSafety:
+    """`_save_claims` must write atomically (tempfile + os.replace): a
+    failure partway through must never leave the store truncated or
+    corrupted, matching the pattern in storage.py's JSONStorage.save."""
+
+    def test_save_claims_atomic_on_replace_failure(self, store, tmp_path, monkeypatch):
+        # Seed a known-good claim on disk.
+        store.claim(str(tmp_path), "agent-1", ["node:a"], "Initial task")
+        path = store._store_path(str(tmp_path))
+        original_content = path.read_text(encoding="utf-8")
+
+        def boom(*_args, **_kwargs):
+            raise OSError("simulated crash during os.replace")
+
+        monkeypatch.setattr("codegiraffe.coordination.os.replace", boom)
+
+        with pytest.raises(OSError):
+            # Distinct node -- no conflict, so this reaches _save_claims.
+            store.claim(str(tmp_path), "agent-2", ["node:b"], "Second task")
+
+        # Original file must be untouched, not partially written/corrupted.
+        assert path.read_text(encoding="utf-8") == original_content
+        # The tempfile must have been cleaned up, not left behind.
+        assert list(path.parent.glob("*.tmp")) == []
+
+        monkeypatch.undo()
+
+        # The lock must have been released despite the exception, so a
+        # subsequent call is not left deadlocked.
+        result = store.claim(str(tmp_path), "agent-3", ["node:c"], "Third task")
+        assert result["success"] is True

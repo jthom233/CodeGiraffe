@@ -12,6 +12,26 @@ When multiple AI agents work on the same codebase simultaneously, Code Giraffe p
 4. **Visibility** — Any agent can call `codegiraffe_agents` to see who is working on what, enabling informed coordination decisions.
 5. **Expiration** — Claims automatically expire after their TTL (default: 30 minutes) to prevent deadlocks from crashed or abandoned agents.
 
+## Concurrency
+
+Every claim/status-update/release call is serialized around a load-modify-save
+cycle on the on-disk store (`<project>/.codegiraffe/agents.json`), so two
+agents racing for the same nodes can never both "win":
+
+- **Cross-process locking** — an OS-level exclusive lock on a sibling
+  `agents.json.lock` file (`msvcrt.locking` on Windows, `fcntl.flock`
+  elsewhere), acquired with a bounded retry (every 50 ms, up to ~5 s total).
+  If the lock can't be acquired in that window, the call fails with a clear
+  timeout error rather than hanging indefinitely.
+- **In-process locking** — a `threading.Lock` held alongside the file lock,
+  since the MCP server and its dashboard thread share one `CoordinationStore`
+  instance in the same process, and OS file locks alone don't serialize
+  threads within a process.
+- **Atomic writes** — the store file is written to a tempfile in the same
+  directory and swapped into place with `os.replace()` (the same pattern
+  `JSONStorage` uses for the graph file), so a crash or failure mid-write
+  can never leave `agents.json` truncated or corrupted.
+
 ## Example Workflow
 
 ```
