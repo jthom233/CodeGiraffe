@@ -9,6 +9,7 @@ from __future__ import annotations
 import networkx as nx
 
 from codegiraffe.graph import ArchGraph
+from codegiraffe.query import _keyword_in_tokens, _tokenize_identifier
 from codegiraffe.schema import NodeType
 
 
@@ -143,21 +144,31 @@ def generate_migration_plan(
 
 
 def _keyword_match(graph: ArchGraph, description: str) -> list[str]:
-    """Return node ids whose label or id contains keywords from *description*.
+    """Return node ids whose label or id tokens match keywords from *description*.
 
-    Keywords are lowercased words with punctuation stripped.
+    Keywords are lowercased words with punctuation stripped. Matching is
+    token-based (see ``codegiraffe.query._tokenize_identifier``), not raw
+    substring containment, so e.g. a description containing "auth" does not
+    match a node labelled "Author" and "log" does not match "Catalog". Node
+    ids/labels are additionally split on camelCase and snake_case boundaries
+    (so "PaymentService" matches "payment" or "service") before comparison.
     """
     words = set(_tokenize(description))
     if not words:
         return []
 
     matched: list[str] = []
+    # Cache each node's token set within this one call so it is computed once
+    # even though a node may be checked against several keywords.
+    token_cache: dict[str, frozenset[str]] = {}
     for node_id in graph.graph.nodes:
         node_data = graph.graph.nodes[node_id].get("node")
         label: str = node_data.label if node_data is not None else ""
-        # Match if any keyword appears in the node id or label
-        haystack = (node_id + " " + label).lower()
-        if any(w in haystack for w in words):
+        tokens = token_cache.get(node_id)
+        if tokens is None:
+            tokens = _tokenize_identifier(f"{node_id} {label}")
+            token_cache[node_id] = tokens
+        if any(_keyword_in_tokens(w, tokens) > 0 for w in words):
             matched.append(node_id)
 
     return matched

@@ -305,7 +305,7 @@ def codegiraffe_query(
     *depth* hops), or *node_type* to retrieve all nodes of that type with
     their direct edges.
 
-    Use *query* for case-insensitive substring search across node IDs, labels,
+    Use *query* for case-insensitive token search across node IDs, labels,
     and metadata values (e.g. class_name, kind).  You may combine *query* with
     *node_type* to search within a specific type.  Results are capped at 50
     nodes.
@@ -679,7 +679,7 @@ def codegiraffe_blast_radius(
     When *query* is provided two strategies are tried and the best result is
     selected:
 
-    - **Substring match** (good for partial class/symbol names)
+    - **Token match** (identifier tokens split on case and underscores; good for partial class/symbol names)
     - **Semantic match** via context_for_task (good for natural-language phrases
       such as "SSH password changer" or "unix account changer")
 
@@ -711,7 +711,7 @@ def codegiraffe_blast_radius(
             target_id = node_id
             other_matches: list[str] = []
         elif query is not None:
-            # Strategy A: substring / label match
+            # Strategy A: token / label match
             text_matches = query_by_text(graph, query)
             text_ids = list(text_matches.nodes.keys())
 
@@ -727,7 +727,7 @@ def codegiraffe_blast_radius(
 
             target_id = None
 
-            # Prefer an exact label match from the substring strategy
+            # Prefer an exact label match from the token strategy
             for nid in text_ids:
                 node = text_matches.nodes[nid]
                 if node.label.lower() == query.lower():
@@ -744,7 +744,7 @@ def codegiraffe_blast_radius(
                 if target_id is None and context_ids:
                     target_id = context_ids[0]
 
-            # Fall back to the best substring match if semantic returned nothing
+            # Fall back to the best token match if semantic returned nothing
             if target_id is None and text_ids:
                 target_id = text_ids[0]
 

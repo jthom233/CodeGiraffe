@@ -40,7 +40,7 @@ Query the graph by node ID or type. Returns a scoped subgraph — not the full g
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `node_id` | `str \| None` | `None` | no | Node ID for subgraph extraction |
 | `node_type` | `str \| None` | `None` | no | Node type for type-based filtering |
-| `query` | `str \| None` | `None` | no | Case-insensitive substring search across node IDs, labels, and metadata values. May be combined with `node_type`. |
+| `query` | `str \| None` | `None` | no | Case-insensitive token search across node IDs, labels, and metadata values (identifiers are split on case and underscore boundaries, so `auth` matches `AuthService` but not `Author`). May be combined with `node_type`. |
 | `depth` | `int` | `2` | no | Maximum hops from the queried node |
 | `max_results` | `int` | `100` | no | Maximum nodes returned for type or text queries. Set to `0` to disable the cap. |
 

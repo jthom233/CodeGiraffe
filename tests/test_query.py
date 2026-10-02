@@ -341,6 +341,28 @@ class TestQueryByText:
 
         assert "service:SecretService" in result.nodes
 
+    def test_query_by_text_auth_does_not_match_author(self, sample_graph):
+        """Token-based matching: "auth" must not match a label/id of "Author"."""
+        sample_graph.add_node(
+            Node(id="service:Author", type=NodeType.SERVICE, label="Author")
+        )
+
+        result = query_by_text(sample_graph, "auth")
+
+        assert "service:Author" not in result.nodes
+        # The existing AuthService node (real "auth" token) must still match.
+        assert "service:AuthService" in result.nodes
+
+    def test_query_by_text_log_does_not_match_catalog(self, sample_graph):
+        """Token-based matching: "log" must not match a label/id of "Catalog"."""
+        sample_graph.add_node(
+            Node(id="service:Catalog", type=NodeType.SERVICE, label="Catalog")
+        )
+
+        result = query_by_text(sample_graph, "log")
+
+        assert "service:Catalog" not in result.nodes
+
 
 class TestQueryByTextServerIntegration:
     """test_query_by_text_server -- verify codegiraffe_query routes to text search."""
@@ -554,6 +576,81 @@ class TestNodeTypeWeights:
         assert "service:AuthService" in scores
         assert "mod:auth_module" in scores
         assert scores["service:AuthService"] > scores["mod:auth_module"]
+
+
+# ---------------------------------------------------------------------------
+# Token-based keyword matching (replaces raw substring containment)
+# ---------------------------------------------------------------------------
+
+
+class TestTokenBasedKeywordMatching:
+    """_score_node matches on tokens, not raw substrings.
+
+    Regression coverage for the false-positive bug where "auth" matched
+    "author" and "log" matched "catalog" because scoring used ``kw in
+    combined_text`` instead of comparing against tokenized words.
+    """
+
+    def test_author_label_does_not_score_for_auth(self):
+        """"auth" must not match "Author" -- it's a coincidental prefix, not a word."""
+        node = _make_node("service:Author", NodeType.SERVICE, "Author")
+
+        score = _score_node(node, ["auth"])
+
+        assert score == 0.0
+
+    def test_catalog_label_does_not_score_for_log(self):
+        """"log" is a substring of "Catalog" but not a token or prefix of one."""
+        node = _make_node("service:Catalog", NodeType.SERVICE, "Catalog")
+
+        score = _score_node(node, ["log"])
+
+        assert score == 0.0
+
+    def test_auth_service_scores_for_auth(self):
+        """"auth" must still match "AuthService" via its camelCase-split "auth" token."""
+        node = _make_node("service:AuthService", NodeType.SERVICE, "AuthService")
+
+        score = _score_node(node, ["auth"])
+
+        assert score > 0.0
+
+    def test_snake_case_identifier_scores_for_user_and_session(self):
+        """"tb_user_session" must match both "user" and "session" via snake_case splitting."""
+        node = _make_node(
+            "table:tb_user_session", NodeType.DATABASE_TABLE, "tb_user_session"
+        )
+
+        assert _score_node(node, ["user"]) > 0.0
+        assert _score_node(node, ["session"]) > 0.0
+
+    def test_payment_service_outranks_payment_catalog_exporter(self):
+        """For task 'payment service', PaymentService should outrank
+        PaymentCatalogExporter: both share the "payment" token, but only
+        PaymentService's label/id also contains a "service" token --
+        PaymentCatalogExporter's "Catalog"/"Exporter" tokens are unrelated
+        words that must not be credited for the "service" keyword."""
+        graph = ArchGraph()
+        graph.add_node(
+            _make_node("service:PaymentService", NodeType.SERVICE, "PaymentService")
+        )
+        graph.add_node(
+            _make_node(
+                "mod:PaymentCatalogExporter", NodeType.MODULE, "PaymentCatalogExporter"
+            )
+        )
+
+        result = context_for_task(
+            graph, "payment service", max_nodes=10, use_embeddings=False
+        )
+
+        scores = {
+            nid: n.metadata.get("_relevance_score", 0)
+            for nid, n in result.nodes.items()
+        }
+        assert "service:PaymentService" in scores
+        assert "mod:PaymentCatalogExporter" in scores
+        assert scores["service:PaymentService"] > scores["mod:PaymentCatalogExporter"]
 
 
 # ---------------------------------------------------------------------------

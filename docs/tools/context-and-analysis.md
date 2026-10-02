@@ -26,7 +26,7 @@ The killer tool. Given a natural-language task description, returns the minimal 
 - `_token_estimate` — Estimated token count for the response
 - `_retrieval_strategy` — Classified task intent used to steer retrieval: `create`, `debug`, `refactor`, `delete`, `test`, or `modify`
 
-When `sentence-transformers` is installed and `use_embeddings` is `true`, scoring uses embedding-based semantic similarity for significantly better relevance ranking. Otherwise, it falls back to keyword overlap scoring.
+When `sentence-transformers` is installed and `use_embeddings` is `true`, scoring uses embedding-based semantic similarity for significantly better relevance ranking. Otherwise, it falls back to keyword overlap scoring: the task description and each node's id/label/type/metadata/file path are tokenized (splitting on punctuation and on camelCase/snake_case boundaries, e.g. `PaymentService` → `payment`, `service`, `paymentservice`), and a keyword scores only when it exactly matches a token or is a bounded prefix of one — not on raw substring containment. This keeps a task mentioning "auth" from matching an unrelated node labelled "Author", or "log" from matching "Catalog".
 
 When `include_changes` is `true`, nodes affected by uncommitted git changes receive a +0.3 score boost (directly changed) or +0.15 boost (in blast radius of changes), ensuring change-relevant context surfaces first.
 
@@ -114,7 +114,7 @@ Analyze the blast radius of changing a specific node. Returns what breaks downst
 |---|---|---|---|---|
 | `project_path` | `str` | — | yes | Root directory of the project |
 | `node_id` | `str \| None` | `None` | no | Exact node ID to analyze. Takes precedence over `query`. |
-| `query` | `str \| None` | `None` | no | Free-text search to find the target node (substring + semantic match). Use when you don't know the exact node ID. |
+| `query` | `str \| None` | `None` | no | Free-text search to find the target node (token-based match against id/label/metadata, plus fuzzy-suggestion fallback). Use when you don't know the exact node ID. |
 | `include_upstream` | `bool` | `false` | no | Accepted for backwards compatibility; upstream is always included in the report. |
 | `max_depth` | `int \| None` | `None` | no | Limit analysis to N hops |
 

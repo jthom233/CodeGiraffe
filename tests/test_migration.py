@@ -348,3 +348,75 @@ class TestMigrationPlanToolContract:
             target_nodes='["service:A"]',
         )
         assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# Token-based keyword matching (replaces raw substring containment)
+# ---------------------------------------------------------------------------
+
+
+class TestKeywordMatchTokenization:
+    """_keyword_match matches on tokens, not raw substrings.
+
+    Regression coverage for the false-positive bug where a description
+    keyword like "auth" would match a node labelled "Author" (and "log"
+    would match "Catalog") because matching used ``kw in haystack`` instead
+    of comparing against tokenized words.
+    """
+
+    def _graph_with(self, node_id: str, label: str) -> ArchGraph:
+        graph = ArchGraph()
+        graph.add_node(Node(id=node_id, type=NodeType.SERVICE, label=label))
+        return graph
+
+    def test_author_label_does_not_match_auth(self):
+        from codegiraffe.migration import _keyword_match
+
+        graph = self._graph_with("service:Author", "Author")
+
+        matched = _keyword_match(graph, "fix the auth bug")
+
+        assert "service:Author" not in matched
+
+    def test_catalog_label_does_not_match_log(self):
+        from codegiraffe.migration import _keyword_match
+
+        graph = self._graph_with("service:Catalog", "Catalog")
+
+        matched = _keyword_match(graph, "clean up the log output")
+
+        assert "service:Catalog" not in matched
+
+    def test_auth_service_matches_auth(self):
+        from codegiraffe.migration import _keyword_match
+
+        graph = self._graph_with("service:AuthService", "AuthService")
+
+        matched = _keyword_match(graph, "migrate the auth flow")
+
+        assert "service:AuthService" in matched
+
+    def test_snake_case_identifier_matches_user_and_session(self):
+        from codegiraffe.migration import _keyword_match
+
+        graph = self._graph_with("table:tb_user_session", "tb_user_session")
+
+        assert "table:tb_user_session" in _keyword_match(graph, "migrate user data")
+        assert "table:tb_user_session" in _keyword_match(graph, "migrate session data")
+
+    def test_migration_plan_excludes_author_for_auth_description(self):
+        """End-to-end: generate_migration_plan must not pull in an unrelated
+        'Author' node when the description mentions 'auth'."""
+        from codegiraffe.migration import generate_migration_plan
+
+        graph = ArchGraph()
+        graph.add_node(
+            Node(id="service:AuthService", type=NodeType.SERVICE, label="AuthService")
+        )
+        graph.add_node(Node(id="service:Author", type=NodeType.SERVICE, label="Author"))
+
+        plan = generate_migration_plan(graph, "migrate the auth flow")
+
+        step_nodes = {s["node_id"] for s in plan["steps"]}
+        assert "service:AuthService" in step_nodes
+        assert "service:Author" not in step_nodes
