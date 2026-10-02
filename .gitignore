@@ -11,3 +11,6 @@ build/
 *.db
 .pytest_cache/
 uv.lock
+.codelynx/
+.serena/memories/
+.serena/cache/

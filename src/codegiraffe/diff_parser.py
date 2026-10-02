@@ -37,6 +37,8 @@ class DiffFile(BaseModel):
 class TestSuggestion(BaseModel):
     """A suggested test file for validating a change, with scoring and reasoning."""
 
+    __test__ = False  # not a pytest test class despite the name
+
     file_path: str
     score: float = 0.0
     reason: str = ""
