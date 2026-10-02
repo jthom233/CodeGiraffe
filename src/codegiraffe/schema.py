@@ -22,6 +22,7 @@ class NodeType(StrEnum):
     EXTERNAL_API = "external_api"
     MODULE = "module"
     PROJECT = "project"
+    MIGRATION = "migration"
     CONTRACT = "contract"
     DECISION = "decision"
     DOMAIN = "domain"

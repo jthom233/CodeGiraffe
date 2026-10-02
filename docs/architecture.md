@@ -110,10 +110,14 @@ All edges carry a `confidence` value (0.0–1.0) reflecting detection reliabilit
 | `event` | Domain event or message |
 | `external_api` | Third-party API call |
 | `module` | Source file (added in v0.4.0) |
+| `project` | Project root node (e.g. a `.csproj` or `packages.config` file), linked to its contained modules via `project_contains` edges |
+| `migration` | Database migration script (SQL files that alter or index tables not created in the same file; added in v0.16.x) |
 | `contract` | Cross-system contract (added in v0.8.0) |
 | `project` | Top-level project or repository |
 | `decision` | Architectural decision record (ADR) |
 | `domain` | Business domain grouping |
+
+SQL views are represented as `database_table` nodes with `metadata.kind = "view"`, and stored procedures/functions are represented as `service` nodes with `metadata.kind = "stored_procedure"` or `metadata.kind = "function"`.
 
 ### Edge Types
 

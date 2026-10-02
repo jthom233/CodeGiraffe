@@ -186,6 +186,12 @@ class TestDashboardHTML:
         assert "legend-swatch" in DASHBOARD_HTML
         assert "legend-line" in DASHBOARD_HTML
 
+    def test_type_colors_includes_migration_and_project(self):
+        """TYPE_COLORS must have entries for the migration and project node
+        types so they don't silently fall back to the default service color."""
+        assert "migration:" in DASHBOARD_HTML
+        assert "project:" in DASHBOARD_HTML
+
     # --- Enhanced stats tests ---
     def test_contains_avg_degree_stat(self):
         """Average degree stat should exist."""
