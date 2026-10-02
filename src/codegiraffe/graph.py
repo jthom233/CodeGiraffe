@@ -183,16 +183,14 @@ class ArchGraph:
         """
         centrality = nx.degree_centrality(self._graph)
 
-        ranked: list[tuple[str, float]] = sorted(
-            centrality.items(), key=lambda item: item[1], reverse=True
-        )
-
-        result: list[tuple[Node, float]] = []
-        for nid, score in ranked[:top_n]:
+        scored: list[tuple[Node, float]] = []
+        for nid, score in centrality.items():
             node_data = self._graph.nodes[nid].get("node")
             if node_data is not None:
-                result.append((node_data, score))
-        return result
+                scored.append((node_data, score))
+
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[:top_n]
 
     def get_all_descendants(self, node_id: str) -> set[str]:
         """Return all nodes transitively reachable from *node_id* via outgoing edges."""

@@ -902,23 +902,23 @@ class TestConditionalModuleCreation:
             "Scanner must not create a redundant mod:MyApp for the .csproj file"
         )
 
-    def test_sql_migration_file_gets_recognizer_module(self, tmp_path):
+    def test_sql_migration_file_gets_recognizer_migration_node(self, tmp_path):
         """T054: A SQL migration file (ALTER TABLE only) gets the recognizer-emitted
-        migration mod: node but NOT an additional scanner-level file mod: node."""
+        migration: node but NOT a mod: node."""
         (tmp_path / "V2__add_column.sql").write_text(
             "ALTER TABLE Users ADD Email NVARCHAR(200);\n"
         )
         result = scan_project(str(tmp_path))
 
-        module_ids = {n.id for n in result.nodes if n.type == NodeType.MODULE}
-        # The SqlRecognizer emits a migration mod: node for the file stem
-        assert "mod:V2__add_column" in module_ids, (
-            f"Expected migration mod: node from SqlRecognizer, got: {module_ids}"
+        migration_ids = {n.id for n in result.nodes if n.type == NodeType.MIGRATION}
+        # The SqlRecognizer emits a migration: node for the file stem
+        assert "migration:V2__add_column" in migration_ids, (
+            f"Expected migration:V2__add_column node from SqlRecognizer, got: {migration_ids}"
         )
-        # There must only be ONE such node — the scanner must not add a second one
-        all_module_nodes = [n for n in result.nodes if n.type == NodeType.MODULE]
-        assert len([n for n in all_module_nodes if n.id == "mod:V2__add_column"]) == 1, (
-            "Expected exactly one mod:V2__add_column; scanner must not duplicate it"
+        # No mod: node must be created for the migration file
+        module_ids = {n.id for n in result.nodes if n.type == NodeType.MODULE}
+        assert "mod:V2__add_column" not in module_ids, (
+            "mod: prefix must not be used for SQL migration files"
         )
 
     def test_config_file_with_no_recognizer_produces_no_nodes(self, tmp_path):

@@ -77,6 +77,7 @@ _NODE_TYPE_WEIGHTS: dict[str, float] = {
     "frontend_component": 1.1,
     "env_var": 0.8,
     "module": 0.5,
+    "migration": 0.3,  # migration scripts are low architectural signal
 }
 
 

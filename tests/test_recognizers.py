@@ -3255,12 +3255,15 @@ class TestSqlRecognizer:
     # Migration file → table writes edge
     # -----------------------------------------------------------------------
 
-    def test_migration_file_emits_module_node_and_writes_edge(self, recognizer):
-        """A migration-only file emits a mod node and writes edges to altered tables."""
+    def test_migration_file_emits_migration_node_and_writes_edge(self, recognizer):
+        """A migration-only file emits a migration: node and writes edges to altered tables."""
         content = "ALTER TABLE [dbo].[tbLauncherSession] ADD PlatformSessionStarted BIT NOT NULL;"
         result = recognizer.recognize(Path("SqlServer/12.0/000025.sql"), content)
-        # Module node for the migration file
-        assert any(n.id == "mod:000025" for n in result.nodes)
+        # Migration node for the migration file (not mod: prefix)
+        assert any(n.id == "migration:000025" for n in result.nodes)
+        assert not any(n.id == "mod:000025" for n in result.nodes)
+        node = next(n for n in result.nodes if n.id == "migration:000025")
+        assert node.type == NodeType.MIGRATION
         # Writes edge to the table
         writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
         assert any(e.target == "table:tbLauncherSession" for e in writes_edges)
@@ -3273,11 +3276,68 @@ class TestSqlRecognizer:
         assert table_node.metadata.get("version") == "10.5"
 
     def test_create_index_emits_writes_edge(self, recognizer):
-        """CREATE INDEX ... ON tbX emits a writes edge from the file module."""
+        """CREATE INDEX ... ON tbX emits a writes edge from the migration node."""
         content = "CREATE INDEX IX_tbSecret_Name ON tbSecret (SecretName);"
         result = recognizer.recognize(Path("index.sql"), content)
         writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
         assert any(e.target == "table:tbSecret" for e in writes_edges)
+        assert any(e.source == "migration:index" for e in writes_edges)
+
+    def test_schema_file_with_create_and_alter_same_table_has_no_migration_node(self, recognizer):
+        """CREATE TABLE + ALTER TABLE on the same table is a schema file, not a migration."""
+        content = (
+            "CREATE TABLE tbOrder (\n"
+            "    OrderId INT PRIMARY KEY,\n"
+            "    CustomerId INT NOT NULL\n"
+            ")\n"
+            "GO\n"
+            "ALTER TABLE tbOrder ADD CONSTRAINT FK_Order_Customer\n"
+            "FOREIGN KEY (CustomerId) REFERENCES tbCustomer(CustomerId);\n"
+        )
+        result = recognizer.recognize(Path("schema_with_fk.sql"), content)
+        assert not any(n.type == NodeType.MIGRATION for n in result.nodes)
+        assert not any(n.id.startswith("migration:") for n in result.nodes)
+        ids = {n.id for n in result.nodes}
+        assert "table:tbOrder" in ids
+        depends_edges = [e for e in result.edges if e.type == EdgeType.DEPENDS_ON]
+        assert any(
+            e.source == "table:tbOrder" and e.target == "table:tbCustomer"
+            for e in depends_edges
+        )
+
+    def test_mixed_file_new_table_plus_alter_of_existing_table_keeps_migration_node(self, recognizer):
+        """A file creating one table and altering a different, pre-existing table is still a migration."""
+        content = (
+            "CREATE TABLE tbNew (\n"
+            "    NewId INT PRIMARY KEY\n"
+            ")\n"
+            "GO\n"
+            "ALTER TABLE tbExisting ADD Col INT;\n"
+        )
+        result = recognizer.recognize(Path("SqlServer/12.0/000050.sql"), content)
+        assert any(n.id == "migration:000050" for n in result.nodes)
+        writes_edges = [e for e in result.edges if e.type == EdgeType.WRITES]
+        assert any(
+            e.source == "migration:000050" and e.target == "table:tbExisting"
+            for e in writes_edges
+        )
+        assert not any(
+            e.source == "migration:000050" and e.target == "table:tbNew"
+            for e in writes_edges
+        )
+
+    def test_create_index_on_table_created_in_same_file_is_not_migration(self, recognizer):
+        """CREATE INDEX on a table created in the same file is a schema file, not a migration."""
+        content = (
+            "CREATE TABLE tbX (\n"
+            "    Col INT\n"
+            ")\n"
+            "GO\n"
+            "CREATE INDEX IX_X ON tbX (Col);\n"
+        )
+        result = recognizer.recognize(Path("schema_with_index.sql"), content)
+        assert not any(n.type == NodeType.MIGRATION for n in result.nodes)
+        assert not any(n.id.startswith("migration:") for n in result.nodes)
 
     # -----------------------------------------------------------------------
     # FOREIGN KEY → depends_on edge
@@ -3403,7 +3463,7 @@ class TestSqlRecognizer:
     # -----------------------------------------------------------------------
 
     def test_create_view(self, recognizer):
-        """CREATE VIEW emits a module node with kind=view."""
+        """CREATE VIEW emits a database_table node with kind=view."""
         content = (
             "CREATE VIEW [dbo].[vw_SecretSummary]\n"
             "AS\n"
@@ -3413,17 +3473,19 @@ class TestSqlRecognizer:
         )
         result = recognizer.recognize(Path("views.sql"), content)
         ids = {n.id for n in result.nodes}
-        assert "mod:vw_SecretSummary" in ids
-        node = next(n for n in result.nodes if n.id == "mod:vw_SecretSummary")
-        assert node.type == NodeType.MODULE
+        assert "table:vw_SecretSummary" in ids
+        assert "mod:vw_SecretSummary" not in ids
+        node = next(n for n in result.nodes if n.id == "table:vw_SecretSummary")
+        assert node.type == NodeType.DATABASE_TABLE
         assert node.metadata.get("kind") == "view"
 
     def test_create_or_alter_view(self, recognizer):
-        """CREATE OR ALTER VIEW is detected."""
+        """CREATE OR ALTER VIEW is detected and uses table: prefix."""
         content = "CREATE OR ALTER VIEW [dbo].[vw_Secrets] AS SELECT * FROM tbSecret\n"
         result = recognizer.recognize(Path("views.sql"), content)
         ids = {n.id for n in result.nodes}
-        assert "mod:vw_Secrets" in ids
+        assert "table:vw_Secrets" in ids
+        assert "mod:vw_Secrets" not in ids
 
     # -----------------------------------------------------------------------
     # Procedure/view body → table edges
@@ -3527,7 +3589,7 @@ class TestSqlRecognizer:
         result = recognizer.recognize(Path("views.sql"), content)
         reads_edges = [
             e for e in result.edges
-            if e.type == EdgeType.READS and e.source == "mod:vw_ActiveSecrets"
+            if e.type == EdgeType.READS and e.source == "table:vw_ActiveSecrets"
         ]
         targets = {e.target for e in reads_edges}
         assert "table:tbSecret" in targets
@@ -3751,6 +3813,97 @@ class TestSqlRecognizer:
         ]
         assert len(merge_writes) == 1
         assert merge_writes[0].metadata.get("inferred") is True
+
+    # -----------------------------------------------------------------------
+    # CTE names are not treated as tables
+    # -----------------------------------------------------------------------
+
+    def test_cte_name_is_not_treated_as_table(self, recognizer):
+        """A WITH <name> AS (...) CTE alias does not produce a spurious table edge."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_ActiveCustomers]\n"
+            "AS\n"
+            "WITH ActiveCustomers AS (\n"
+            "    SELECT CustomerId FROM tbCustomer WHERE IsActive = 1\n"
+            ")\n"
+            "SELECT * FROM ActiveCustomers\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        assert any(e.target == "table:tbCustomer" for e in result.edges)
+        assert not any(e.target == "table:ActiveCustomers" for e in result.edges)
+
+    def test_multiple_ctes_all_excluded(self, recognizer):
+        """Every comma-separated CTE in a WITH clause is excluded, only real tables remain."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_MultiCte]\n"
+            "AS\n"
+            "WITH A AS (\n"
+            "    SELECT Id FROM tbOne\n"
+            "),\n"
+            "B (Col1) AS (\n"
+            "    SELECT Id FROM tbTwo\n"
+            ")\n"
+            "SELECT * FROM A JOIN B ON A.Id = B.Id\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        targets = {e.target for e in result.edges}
+        assert "table:tbOne" in targets
+        assert "table:tbTwo" in targets
+        assert "table:A" not in targets
+        assert "table:B" not in targets
+
+    def test_cte_exclusion_is_scoped_per_body(self, recognizer):
+        """A CTE name in one procedure body does not suppress a real table of the same name elsewhere."""
+        content = (
+            "CREATE PROCEDURE [dbo].[proc_One]\n"
+            "AS\n"
+            "WITH Recent AS (\n"
+            "    SELECT Id FROM tbOrder WHERE CreatedAt > '2024-01-01'\n"
+            ")\n"
+            "SELECT * FROM Recent\n"
+            "GO\n"
+            "CREATE PROCEDURE [dbo].[proc_Two]\n"
+            "AS\n"
+            "SELECT * FROM Recent\n"
+            "GO\n"
+        )
+        result = recognizer.recognize(Path("procs.sql"), content)
+        proc_one_targets = {e.target for e in result.edges if e.source == "service:proc_One"}
+        proc_two_targets = {e.target for e in result.edges if e.source == "service:proc_Two"}
+        assert "table:Recent" not in proc_one_targets
+        assert "table:Recent" in proc_two_targets
+
+    # -----------------------------------------------------------------------
+    # Node type correctness
+    # -----------------------------------------------------------------------
+
+    def test_migration_file_uses_migration_prefix_not_mod(self, recognizer):
+        """Migration files produce migration: nodes, never mod: nodes."""
+        content = "ALTER TABLE [dbo].[tbUser] ADD IsActive BIT NOT NULL DEFAULT 1;"
+        result = recognizer.recognize(Path("SqlServer/12.0/000042.sql"), content)
+        node_ids = {n.id for n in result.nodes}
+        assert "migration:000042" in node_ids, f"Expected migration:000042, got: {node_ids}"
+        assert "mod:000042" not in node_ids, "mod: prefix must not be used for migration files"
+        migration_node = next(n for n in result.nodes if n.id == "migration:000042")
+        assert migration_node.type == NodeType.MIGRATION
+        assert migration_node.metadata.get("kind") == "migration"
+
+    def test_view_uses_table_prefix_with_kind_view(self, recognizer):
+        """SQL views produce table: nodes with kind=view, never mod: nodes."""
+        content = (
+            "CREATE VIEW [dbo].[vw_UserList]\n"
+            "AS\n"
+            "SELECT UserId, UserName FROM tbUser\n"
+        )
+        result = recognizer.recognize(Path("views.sql"), content)
+        node_ids = {n.id for n in result.nodes}
+        assert "table:vw_UserList" in node_ids, f"Expected table:vw_UserList, got: {node_ids}"
+        assert "mod:vw_UserList" not in node_ids, "mod: prefix must not be used for views"
+        view_node = next(n for n in result.nodes if n.id == "table:vw_UserList")
+        assert view_node.type == NodeType.DATABASE_TABLE
+        assert view_node.metadata.get("kind") == "view"
 
     # -----------------------------------------------------------------------
     # Registration

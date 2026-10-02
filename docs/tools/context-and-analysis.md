@@ -142,7 +142,7 @@ Assess architectural risk for nodes. Risk = (degree * 0.4) + (betweenness * 0.4)
 **Example:**
 ```
 codegiraffe_risk_assessment(project_path="/home/user/my-project")
---> [{"node_id": "service:AuthService", "risk_score": 0.82, "degree_centrality": 0.45, "betweenness_centrality": 0.45, "blast_radius_count": 8, "file_path": "src/auth.py"}, ...]
+--> {"total_graph_nodes": 120, "nodes_assessed": 10, "nodes": [{"node_id": "service:AuthService", "risk_score": 0.82, "base_risk_score": 0.55, "degree_centrality": 0.45, "betweenness_centrality": 0.45, "blast_radius_count": 8, "file_path": "src/auth.py", "test_coverage": 0.0, "risk_explanation": "...; no test coverage (1.5x risk)"}, ...]}
 ```
 
 ---

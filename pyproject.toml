@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "mcp[cli]>=1.2.0",
+    "mcp[cli]>=1.2.0,<2",  # mcp 2.x removed mcp.server.fastmcp (renamed MCPServer)
     "networkx>=3.0",
     "pydantic>=2.0",
 ]

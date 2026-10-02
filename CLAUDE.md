@@ -134,6 +134,13 @@ V. Incremental & Non-Destructive, VI. Test-First (NON-NEGOTIABLE), VII. Simplici
 <!-- MANUAL ADDITIONS END -->
 
 ## Recent Changes
+- Unreleased (branch `feature/quality-improvements`):
+  - **`migration` node type**: `NodeType.MIGRATION` in `schema.py`; `SqlRecognizer` emits `migration:<stem>` nodes (with `writes` edges) for `.sql` files that `ALTER TABLE`/`CREATE INDEX` tables not created in the same file and define no procs/views. SQL views are now `database_table` nodes with `metadata.kind = "view"` (previously `mod:` module nodes). `migration` weighted 0.3 in `_NODE_TYPE_WEIGHTS`; dashboard `TYPE_COLORS` has `migration` and `project` entries
+  - **SQL recognizer accuracy**: CTE names (`WITH x AS (...)`) are excluded from table read/write detection per body; schema files that only alter their own tables no longer produce a migration node
+  - **Breaking: `codegiraffe_blast_radius` output** no longer includes the combined `downstream` key; downstream nodes are split into disjoint `direct_impact`, `transitive_impact`, `indirect_impact` buckets. `migration` added to the fuzzy-query preferred types (`_BLAST_PREFERRED_TYPES`)
+  - **`codegiraffe_risk_assessment`** now applies the documented 1.5x multiplier for nodes with `_test_coverage == 0.0` via `compute_risk_with_coverage`; adds `base_risk_score` and `test_coverage` fields
+  - **`ArchGraph.get_hotspots`** filters dataless nodes before slicing so `top_n` is honored; **`codegiraffe_add_contract`** creates placeholder `service` nodes (`manual=True`, `metadata.placeholder=True`) for unknown producer/consumer ids instead of leaving ghost nodes
+  - Fixed stale `TestUS5ParameterBounds` tests that patched the unused `compute_blast_radius`; removed the dead import. `TestSuggestion.__test__ = False` silences the pytest collection warning. `.gitignore` covers `.codelynx/` and `.serena/memories/`; 1792 tests
 - v0.16.0: Major reliability & performance release — 5 phases of improvements:
   - **Graph Correctness**: `nx.MultiDiGraph` migration (multi-edges preserved), Cypher write-rejection, `threading.RLock` concurrency protection, 4 new `ArchGraph` edge helpers
   - **Data Integrity**: Confidence persistence in SQLite/Neo4j, atomic JSON writes (`tempfile` + `os.replace`), coverage annotation persistence, per-class `__tablename__` scoping fix, edge dedup type normalization

@@ -3,12 +3,12 @@
 Detects architectural patterns in .sql files including:
     - CREATE/ALTER TABLE                   -> database_table nodes
     - CREATE PROCEDURE / CREATE FUNCTION   -> service nodes (kind=stored_procedure/function)
-    - CREATE VIEW                          -> module nodes (kind=view)
+    - CREATE VIEW                          -> database_table nodes (kind=view)
     - FOREIGN KEY ... REFERENCES           -> depends_on edges between tables
     - FROM/JOIN/INTO/UPDATE within bodies  -> reads/writes edges (proc/view -> table)
     - EXEC/EXECUTE proc_name within bodies -> calls edges (proc -> proc)
     - MERGE INTO table_name within bodies  -> writes edges (proc/view -> table)
-    - Migration file ALTER TABLE           -> writes edges (file module -> table)
+    - ALTER TABLE / CREATE INDEX on tables not created in the same file -> migration:<stem> node + writes edges
 
 Supports both T-SQL bracket notation ([dbo].[tbName]) and bare identifiers.
 All SQL keyword matching is case-insensitive.
@@ -148,6 +148,13 @@ _SQL_MERGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# WITH <name> AS ( ... ) / , <name> (col, ...) AS ( ... ) — common table expression names.
+# Matches the first CTE after WITH and each comma-separated additional CTE.
+_SQL_CTE_RE = re.compile(
+    r"""(?:\bWITH|,)\s+(\[?\w+\]?)\s*(?:\([^)]*\))?\s+AS\s*\(""",
+    re.IGNORECASE,
+)
+
 # Parameters for a stored procedure/function definition.
 # Matches @paramName datatype patterns after the object name up to AS/BEGIN.
 _SQL_PARAM_RE = re.compile(r"""(@\w+)\s+([\w\[\]]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)""", re.IGNORECASE)
@@ -212,14 +219,14 @@ class SqlRecognizer:
         - CREATE/ALTER TABLE             -> ``database_table`` nodes
         - CREATE/ALTER PROCEDURE/PROC    -> ``service`` nodes (kind=stored_procedure)
         - CREATE/ALTER FUNCTION          -> ``service`` nodes (kind=function)
-        - CREATE VIEW                    -> ``module`` nodes (kind=view)
+        - CREATE VIEW                    -> ``database_table`` nodes (kind=view)
         - FOREIGN KEY ... REFERENCES     -> ``depends_on`` edges (table -> table)
         - Body FROM/JOIN references      -> ``reads`` edges (proc/view -> table)
         - Body INSERT/UPDATE/DELETE      -> ``writes`` edges (proc/view -> table)
         - Body MERGE INTO table          -> ``writes`` edges (proc/view -> table)
         - Body EXEC/EXECUTE proc_name    -> ``calls`` edges (proc -> proc)
-        - Migration ALTER TABLE          -> ``writes`` edges (file module -> table)
-        - CREATE INDEX ... ON table      -> ``writes`` edge (file module -> table)
+        - Migration ALTER TABLE          -> ``writes`` edges (migration node -> table)
+        - CREATE INDEX ... ON table      -> ``writes`` edge (migration node -> table)
 
     EXEC/EXECUTE skips:
         - Dynamic execution: ``EXEC(@variable)``
@@ -274,6 +281,10 @@ class SqlRecognizer:
         # Maps node_id to the body text of that object's definition
         object_bodies: dict[str, tuple[str, str]] = {}  # node_id -> (kind, body_text)
 
+        # Tables CREATEd in this file (used to distinguish schema files from
+        # migration files that only ALTER pre-existing tables).
+        created_tables: set[str] = set()
+
         # -----------------------------------------------------------------------
         # Phase 1: scan full content for DDL declarations
         # -----------------------------------------------------------------------
@@ -284,6 +295,7 @@ class SqlRecognizer:
             name = _strip_name(raw)
             if not name or name.upper() in self._SQL_KEYWORDS:
                 continue
+            created_tables.add(name)
             if name not in seen_tables:
                 seen_tables.add(name)
                 node_id = f"table:{name}"
@@ -446,14 +458,14 @@ class SqlRecognizer:
                 continue
             if name not in seen_modules:
                 seen_modules.add(name)
-                node_id = f"mod:{name}"
+                node_id = f"table:{name}"
                 meta6: dict[str, object] = {"kind": "view", "source": "sql_ddl"}
                 if version:
                     meta6["version"] = version
                 nodes.append(
                     Node(
                         id=node_id,
-                        type=NodeType.MODULE,
+                        type=NodeType.DATABASE_TABLE,
                         label=name,
                         file_path=rel_path,
                         metadata=meta6,
@@ -468,10 +480,14 @@ class SqlRecognizer:
         seen_edges: set[tuple[str, str, str]] = set()
 
         for source_id, (obj_kind, body) in object_bodies.items():
+            # Names introduced as CTEs (WITH x AS (...), y AS (...)) in this body.
+            # These are not real tables and must not be treated as read/write targets.
+            cte_names = {_strip_name(m.group(1)).upper() for m in _SQL_CTE_RE.finditer(body)}
+
             # READ references: FROM / JOIN
             for ref_m in _SQL_READ_REF_RE.finditer(body):
                 ref_name = _strip_name(ref_m.group(1))
-                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS:
+                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS or ref_name.upper() in cte_names:
                     continue
                 target_id = f"table:{ref_name}"
                 key = (source_id, target_id, EdgeType.READS)
@@ -489,7 +505,7 @@ class SqlRecognizer:
             # WRITE references: INSERT INTO / UPDATE / DELETE FROM
             for ref_m in _SQL_WRITE_REF_RE.finditer(body):
                 ref_name = _strip_name(ref_m.group(1))
-                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS:
+                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS or ref_name.upper() in cte_names:
                     continue
                 target_id = f"table:{ref_name}"
                 key = (source_id, target_id, EdgeType.WRITES)
@@ -507,7 +523,7 @@ class SqlRecognizer:
             # MERGE INTO: treats target as a write (upsert)
             for ref_m in _SQL_MERGE_RE.finditer(body):
                 ref_name = _strip_name(ref_m.group(1))
-                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS:
+                if not ref_name or ref_name.upper() in self._SQL_KEYWORDS or ref_name.upper() in cte_names:
                     continue
                 target_id = f"table:{ref_name}"
                 key = (source_id, target_id, EdgeType.WRITES)
@@ -549,9 +565,9 @@ class SqlRecognizer:
 
         # -----------------------------------------------------------------------
         # Phase 3: migration-file-level edges
-        # For files that contain ALTER TABLE or CREATE INDEX (but are NOT defining
-        # procedures/views), emit a writes edge from a synthetic file module node.
-        # Only emit when we have ALTER TABLE or CREATE INDEX references.
+        # For files that contain ALTER TABLE or CREATE INDEX against tables not
+        # created in the same file (and that do NOT define procedures/views), emit
+        # a migration:<stem> node with writes edges to those pre-existing tables.
         # -----------------------------------------------------------------------
         migration_targets: set[str] = set()
 
@@ -567,10 +583,15 @@ class SqlRecognizer:
             if name and name.upper() not in self._SQL_KEYWORDS:
                 migration_targets.add(name)
 
-        if migration_targets and not object_bodies:
-            # This is a migration-only file (no procs/views); emit a file-level module node
+        # Tables altered/indexed here that were NOT also created in this file (these
+        # are the ones that make this a migration against pre-existing schema). A file
+        # that only touches tables it just CREATEd is an ordinary schema file.
+        external_targets = migration_targets - created_tables
+
+        if external_targets and not object_bodies:
+            # This is a migration-only file (no procs/views); emit a file-level migration node
             file_stem = file_path.stem
-            file_node_id = f"mod:{file_stem}"
+            file_node_id = f"migration:{file_stem}"
             if file_node_id not in {n.id for n in nodes}:
                 file_meta: dict[str, object] = {"kind": "migration", "source": "sql_migration"}
                 if version:
@@ -578,13 +599,13 @@ class SqlRecognizer:
                 nodes.append(
                     Node(
                         id=file_node_id,
-                        type=NodeType.MODULE,
+                        type=NodeType.MIGRATION,
                         label=file_stem,
                         file_path=rel_path,
                         metadata=file_meta,
                     )
                 )
-            for tbl_name in migration_targets:
+            for tbl_name in external_targets:
                 target_id = f"table:{tbl_name}"
                 key = (file_node_id, target_id, EdgeType.WRITES)
                 if key not in seen_edges:

@@ -513,22 +513,20 @@ class TestUS5ParameterBounds:
 
         captured_depth: list = []
         original_blast = __import__(
-            "codegiraffe.query", fromlist=["compute_blast_radius"]
-        ).compute_blast_radius
+            "codegiraffe.query", fromlist=["compute_enhanced_blast_radius"]
+        ).compute_enhanced_blast_radius
 
-        def mock_blast(graph, node_id, include_upstream=False, max_depth=None):
+        def mock_blast(graph, node_id, max_depth=None):
             captured_depth.append(max_depth)
-            return original_blast(graph, node_id,
-                                  include_upstream=include_upstream,
-                                  max_depth=max_depth)
+            return original_blast(graph, node_id, max_depth=max_depth)
 
-        with patch("codegiraffe.server.compute_blast_radius", side_effect=mock_blast):
+        with patch("codegiraffe.server.compute_enhanced_blast_radius", side_effect=mock_blast):
             codegiraffe_blast_radius(str(tmp_path), node_id="mod:app", max_depth=9999)
 
-        if captured_depth:
-            assert captured_depth[0] <= srv.MAX_BLAST_DEPTH, (
-                f"max_depth {captured_depth[0]} exceeds MAX_BLAST_DEPTH {srv.MAX_BLAST_DEPTH}"
-            )
+        assert captured_depth, "compute_enhanced_blast_radius was not called"
+        assert captured_depth[0] <= srv.MAX_BLAST_DEPTH, (
+            f"max_depth {captured_depth[0]} exceeds MAX_BLAST_DEPTH {srv.MAX_BLAST_DEPTH}"
+        )
 
     def test_blast_depth_none_is_clamped_to_max(self, tmp_path):
         """codegiraffe_blast_radius with max_depth=None uses MAX_BLAST_DEPTH (not unlimited)."""
@@ -560,7 +558,7 @@ class TestUS5ParameterBounds:
         with patch("codegiraffe.server.compute_enhanced_blast_radius", side_effect=mock_blast):
             codegiraffe_blast_radius(str(tmp_path), node_id="mod:app", max_depth=None)
 
-        assert captured_depth, "compute_blast_radius was not called"
+        assert captured_depth, "compute_enhanced_blast_radius was not called"
         assert captured_depth[0] is not None, (
             "max_depth=None must be replaced with MAX_BLAST_DEPTH before calling "
             "compute_enhanced_blast_radius; got None (unbounded traversal allowed)"

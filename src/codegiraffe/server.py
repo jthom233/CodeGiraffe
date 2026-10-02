@@ -21,8 +21,8 @@ from codegiraffe.coordination import CoordinationStore
 from codegiraffe.federation import GraphFederation
 from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
 from codegiraffe.query import (
-    compute_blast_radius,
     compute_enhanced_blast_radius,
+    compute_risk_with_coverage,
     context_for_task,
     detect_drift,
     file_coupling,
@@ -85,6 +85,9 @@ _initialized_project_paths: set[str] = set()
 MAX_QUERY_DEPTH = 20
 MAX_COUPLING_DEPTH = 500
 MAX_BLAST_DEPTH = 20
+
+# Node types preferred when resolving a fuzzy blast-radius query to a target node.
+_BLAST_PREFERRED_TYPES = frozenset({"service", "module", "database_table", "endpoint", "migration"})
 
 
 def _get_storage(backend: str = "json"):
@@ -643,6 +646,12 @@ def codegiraffe_blast_radius(
     The *include_upstream* parameter is accepted for backwards compatibility
     but is now a no-op -- upstream is always included in the report.
 
+    Downstream dependencies are split by severity into three disjoint buckets:
+    ``direct_impact`` (direct/uncertain_direct), ``transitive_impact``
+    (transitive/uncertain_transitive), and ``indirect_impact``
+    (indirect/uncertain_indirect). There is no combined ``downstream`` key;
+    the three buckets together cover every downstream node exactly once.
+
     Returns structured impact data as a dict.
     """
     try:
@@ -670,7 +679,7 @@ def codegiraffe_blast_radius(
                 reverse=True,
             )
 
-            preferred_types = {"service", "module", "database_table", "endpoint"}
+            preferred_types = _BLAST_PREFERRED_TYPES
 
             target_id = None
 
@@ -719,6 +728,7 @@ def codegiraffe_blast_radius(
         downstream = blast.get("downstream", [])
         direct_impact = [n for n in downstream if n["severity"] in ("direct", "uncertain_direct")]
         transitive_impact = [n for n in downstream if n["severity"] in ("transitive", "uncertain_transitive")]
+        indirect_impact = [n for n in downstream if n["severity"] in ("indirect", "uncertain_indirect")]
 
         result: dict = {
             "target": blast["target_node"],
@@ -730,7 +740,7 @@ def codegiraffe_blast_radius(
             "data_layer": blast.get("data_layer", []),
             "direct_impact": direct_impact,
             "transitive_impact": transitive_impact,
-            "downstream": downstream,
+            "indirect_impact": indirect_impact,
             "upstream": blast.get("upstream", []),
             "cycles": blast.get("cycles", []),
             "critical_paths": blast.get("critical_paths", []),
@@ -754,8 +764,12 @@ def codegiraffe_risk_assessment(
 ) -> dict:
     """Assess architectural risk for specific nodes or the entire graph.
 
-    Risk score = (degree_centrality * 0.4) + (betweenness_centrality * 0.4)
-                 + (descendant_count / total_nodes * 0.2)
+    base_risk_score = (degree_centrality * 0.4) + (betweenness_centrality * 0.4)
+                       + (descendant_count / total_nodes * 0.2)
+
+    risk_score = base_risk_score * 1.5 when the node's `_test_coverage` metadata
+    (set by codegiraffe_coverage) is exactly 0.0, otherwise risk_score equals
+    base_risk_score. Nodes without coverage data are unaffected.
 
     If node_ids provided: assess those nodes. If None: top-10 riskiest nodes.
     Returns structured risk data ranked by risk score.
@@ -779,24 +793,29 @@ def codegiraffe_risk_assessment(
             if node_data is None:
                 continue
             desc_count = len(graph.get_all_descendants(nid))
-            risk = (
+            base_risk = (
                 degree.get(nid, 0.0) * 0.4
                 + betweenness.get(nid, 0.0) * 0.4
                 + (desc_count / total_nodes) * 0.2
             )
+            risk = compute_risk_with_coverage(base_risk, node_data)
+            test_coverage = node_data.metadata.get("_test_coverage")
             scored.append({
                 "node_id": nid,
                 "label": node_data.label,
                 "type": node_data.type,
                 "risk_score": round(risk, 4),
+                "base_risk_score": round(base_risk, 4),
                 "degree_centrality": round(degree.get(nid, 0.0), 4),
                 "betweenness_centrality": round(betweenness.get(nid, 0.0), 4),
                 "blast_radius_count": desc_count,
                 "file_path": node_data.file_path,
+                "test_coverage": test_coverage,
                 "risk_explanation": _risk_explanation({
                     "degree_centrality": round(degree.get(nid, 0.0), 4),
                     "betweenness_centrality": round(betweenness.get(nid, 0.0), 4),
                     "blast_radius_count": desc_count,
+                    "test_coverage": test_coverage,
                 }),
             })
 
@@ -1017,6 +1036,11 @@ def codegiraffe_add_contract(
     *consumers* is a comma-separated string of node IDs.
     *contract_type* must be one of: api, event, data, config.
     *metadata* is a JSON string of extra key/value pairs.
+
+    If *producer* or any *consumers* id does not already exist in the graph,
+    a placeholder ``service`` node (``manual=True``, ``metadata.placeholder``
+    ``= True``) is created for it so the edge never points at a dataless
+    node; a warning is included in the result noting the placeholder.
     """
     try:
         if contract_type not in VALID_CONTRACT_TYPES:
@@ -1060,11 +1084,24 @@ def codegiraffe_add_contract(
                 )
             )
 
-            # Collect warnings for missing nodes
+            # Collect warnings for missing nodes, creating placeholders so no
+            # dataless (ghost) node is left in the graph after add_edge.
 
             # Create produces edge: producer -> contract
             if producer not in graph.graph:
-                warnings.append(f"Warning: producer '{producer}' not found in graph")
+                warnings.append(
+                    f"Warning: producer '{producer}' not found in graph; "
+                    "created as placeholder"
+                )
+                graph.add_node(
+                    Node(
+                        id=producer,
+                        type="service",
+                        label=producer,
+                        manual=True,
+                        metadata={"placeholder": True},
+                    )
+                )
             graph.add_edge(
                 Edge(
                     source=producer,
@@ -1077,7 +1114,19 @@ def codegiraffe_add_contract(
             # Create consumes_contract edges: consumer -> contract
             for cid in consumer_list:
                 if cid not in graph.graph:
-                    warnings.append(f"Warning: consumer '{cid}' not found in graph")
+                    warnings.append(
+                        f"Warning: consumer '{cid}' not found in graph; "
+                        "created as placeholder"
+                    )
+                    graph.add_node(
+                        Node(
+                            id=cid,
+                            type="service",
+                            label=cid,
+                            manual=True,
+                            metadata={"placeholder": True},
+                        )
+                    )
                 graph.add_edge(
                     Edge(
                         source=cid,
@@ -1856,6 +1905,8 @@ def _risk_explanation(item: dict) -> str:
         reasons.append(
             f"changes propagate to {item['blast_radius_count']} downstream nodes"
         )
+    if item.get("test_coverage") == 0.0:
+        reasons.append("no test coverage (1.5x risk)")
     if not reasons:
         reasons.append("moderate connectivity")
     return "; ".join(reasons)

@@ -43,6 +43,7 @@ The scanner includes several intelligence features introduced across v0.4.0 thro
 | C# | Yes | Yes (`using`) | Yes (class/interface inheritance) | — | Yes |
 | PHP | Yes | Yes (`use`/`namespace`) | Yes (`extends`/`implements`) | — | Yes |
 | Ruby | Yes | Yes (`require`/`require_relative`) | Yes (class inheritance, module `include`) | — | Yes |
+| SQL | — | — | — | Yes (`EXEC`/`EXECUTE`) | — |
 
 ---
 
@@ -124,6 +125,18 @@ The scanner includes several intelligence features introduced across v0.4.0 thro
 - **Environment**: `ENV["KEY"]`, `ENV.fetch` → `env_var` nodes
 - **HTTP clients**: `Net::HTTP`, `Faraday`, `HTTParty` → `external_api` nodes
 - **Sidekiq / ActiveJob**: Worker and job class patterns → `worker` nodes
+
+### SQL (.sql)
+
+- **CREATE/ALTER TABLE** → `database_table` nodes (id `table:<name>`; T-SQL bracket notation, e.g. `[dbo].[tbName]`, is stripped down to the bare name)
+- **CREATE VIEW** → `database_table` nodes with `metadata.kind = "view"`
+- **CREATE PROCEDURE / CREATE FUNCTION** → `service` nodes (id `service:<name>`) with `metadata.kind = "stored_procedure"` or `"function"`
+- **FOREIGN KEY ... REFERENCES** → `depends_on` edges between tables
+- **FROM/JOIN** inside a procedure or view body → `reads` edges (proc/view → table)
+- **INSERT/UPDATE/DELETE/MERGE** inside a body → `writes` edges (proc/view → table)
+- **EXEC/EXECUTE** inside a body → `calls` edges (proc → proc)
+- Common Table Expression (CTE) names introduced with `WITH <name> AS (...)` (including comma-separated additional CTEs) are excluded from table read/write detection within the body that defines them; the same name used as a real table elsewhere is unaffected
+- **Migration detection**: a file that defines no procedures, functions, or views and contains at least one `ALTER TABLE` or `CREATE INDEX` against a table *not* created in the same file produces a single `migration:<file-stem>` node (type `migration`) with `writes` edges to each such pre-existing table. A file may also create new tables and still be a migration; tables it creates itself get no `writes` edge from the migration node. Files that only create and then alter their own tables (e.g. adding a constraint to a table created earlier in the same file) are ordinary schema files, not migrations, and get no `migration` node. When the file path contains a `SqlServer/<version>/` segment, that version is recorded as `metadata.version` on the migration node (and on other SQL nodes from the same file)
 
 ---
 
