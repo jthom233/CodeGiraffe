@@ -5,72 +5,36 @@ on:
     branches: [main]
 
 env:
-  BLAST_RADIUS_THRESHOLD: 10  # configurable — PRs exceeding this are flagged
+  BLAST_RADIUS_THRESHOLD: 10  # PRs whose total blast radius exceeds this are flagged in the comment
 
 jobs:
   architectural-review:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # full history required for git diff
+          fetch-depth: 0  # full history required for the base-ref diff
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
-      - name: Install CodeGiraffe
-        run: pip install codegiraffe
+      - name: Install CodeGiraffe from this checkout
+        run: pip install .
 
-      - name: Initialize graph
+      - name: Analyze change impact
         run: |
-          python -c "
-          from codegiraffe.scanner import scan_project
-          from codegiraffe.storage import JSONStorage
-          s = JSONStorage('.codegiraffe')
-          s.save(scan_project('.'))
-          "
+          python .github/scripts/architectural-review.py \
+            "origin/${{ github.base_ref }}" review-results.json
 
-      - name: Validate changes
-        id: validate
-        run: |
-          python -c "
-          import json
-          from codegiraffe.storage import JSONStorage
-          from codegiraffe.graph import ArchGraph
-          from codegiraffe.query import compute_blast_radius, suggest_tests
-          from codegiraffe.git_utils import get_changed_files
-
-          storage = JSONStorage('.codegiraffe')
-          data = storage.load()
-          graph = ArchGraph()
-          graph.load(data)
-
-          changed = get_changed_files('.')
-          results = {
-              'changed_files': changed,
-              'blast_radius': [],
-              'test_suggestions': [],
-          }
-
-          for f in changed[:5]:
-              br = compute_blast_radius(graph, f'module:{f}')
-              results['blast_radius'].append({
-                  'file': f,
-                  'downstream_count': len(br.get('downstream', [])),
-              })
-
-          with open('review-results.json', 'w') as fp:
-              json.dump(results, fp)
-          "
-
-      - name: Format and post PR comment
-        if: always()
+      - name: Post PR comment
+        if: always() && hashFiles('review-results.json') != ''
         run: |
           python .github/scripts/format-pr-comment.py review-results.json \
             | gh pr comment ${{ github.event.pull_request.number }} --body-file -

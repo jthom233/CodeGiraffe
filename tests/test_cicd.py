@@ -245,3 +245,106 @@ class TestFormatPRComment:
         # All 10 files should appear
         for i in range(10):
             assert f"src/module{i}.py" in result
+
+
+# ---------------------------------------------------------------------------
+# TestArchitecturalReviewScript — .github/scripts/architectural-review.py
+# ---------------------------------------------------------------------------
+
+REVIEW_SCRIPT_PATH = REPO_ROOT / ".github" / "scripts" / "architectural-review.py"
+
+
+def _load_review_module():
+    spec = importlib.util.spec_from_file_location("architectural_review", REVIEW_SCRIPT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_SAMPLE_DIFF = """\
+diff --git a/src/app/payments.py b/src/app/payments.py
+index 1111111..2222222 100644
+--- a/src/app/payments.py
++++ b/src/app/payments.py
+@@ -1,3 +1,4 @@
+ class PaymentService:
++    retries = 3
+     pass
+"""
+
+
+class TestArchitecturalReviewScript:
+    """The review script must install from the checkout and use the real API."""
+
+    @pytest.fixture
+    def graph(self):
+        from codegiraffe.graph import ArchGraph, Edge, GraphData, Node
+
+        nodes = {
+            "mod:app.payments": Node(
+                id="mod:app.payments", type="module", label="payments",
+                file_path="src/app/payments.py",
+            ),
+            "service:PaymentService": Node(
+                id="service:PaymentService", type="service", label="PaymentService",
+                file_path="src/app/payments.py",
+            ),
+            "service:Checkout": Node(
+                id="service:Checkout", type="service", label="Checkout",
+                file_path="src/app/checkout.py",
+            ),
+            "table:tbPayment": Node(
+                id="table:tbPayment", type="database_table", label="tbPayment",
+            ),
+        }
+        edges = [
+            Edge(source="mod:app.payments", target="service:PaymentService", type="contains"),
+            Edge(source="service:PaymentService", target="table:tbPayment", type="writes"),
+            Edge(source="service:Checkout", target="service:PaymentService", type="calls"),
+        ]
+        return ArchGraph(GraphData(nodes=nodes, edges=edges, project_path="."))
+
+    def test_script_file_exists(self):
+        assert REVIEW_SCRIPT_PATH.exists()
+
+    def test_workflow_installs_from_checkout_not_pypi(self):
+        """Installing the published package would review the wrong code."""
+        content = WORKFLOW_PATH.read_text()
+        assert "pip install ." in content
+        assert "pip install codegiraffe" not in content
+        assert "architectural-review.py" in content
+
+    def test_build_results_has_formatter_keys(self, graph):
+        module = _load_review_module()
+        results = module.build_results(graph, _SAMPLE_DIFF, threshold=10)
+        assert results["changed_files"] == ["src/app/payments.py"]
+        assert results["blast_radius"] == [
+            {"file": "src/app/payments.py", "downstream_count": 1}
+        ]
+        assert isinstance(results["test_suggestions"], list)
+        assert results["threshold"] == 10
+        assert results["exceeds_threshold"] is False
+
+    def test_build_results_flags_threshold(self, graph):
+        module = _load_review_module()
+        results = module.build_results(graph, _SAMPLE_DIFF, threshold=0)
+        assert results["total_blast_radius"] > 0
+        assert results["exceeds_threshold"] is True
+        # The table is impacted but not changed, so it is uncovered.
+        assert "table:tbPayment" in results["uncovered_nodes"]
+
+    def test_build_results_empty_diff(self, graph):
+        module = _load_review_module()
+        results = module.build_results(graph, "", threshold=10)
+        assert results["changed_files"] == []
+        assert results["blast_radius"] == []
+        assert results["exceeds_threshold"] is False
+
+    def test_results_round_trip_through_formatter(self, graph):
+        review = _load_review_module()
+        fmt = _load_format_module()
+        results = review.build_results(graph, _SAMPLE_DIFF, threshold=0)
+        comment = fmt.format_comment(json.loads(json.dumps(results)))
+        assert "exceeds the threshold" in comment
+        assert "Uncovered Nodes" in comment
+        assert "src/app/payments.py" in comment

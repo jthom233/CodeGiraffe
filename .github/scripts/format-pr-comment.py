@@ -20,6 +20,8 @@ def format_comment(results: dict) -> str:
         - changed_files: list of file path strings
         - blast_radius: list of {"file": str, "downstream_count": int}
         - test_suggestions: list of test file path strings
+        - total_blast_radius, threshold, exceeds_threshold (optional)
+        - uncovered_nodes, contract_violations: lists of strings (optional)
 
     Returns
     -------
@@ -40,6 +42,35 @@ def format_comment(results: dict) -> str:
         lines.append("|------|-----------------|")
         for item in blast:
             lines.append(f"| `{item['file']}` | {item['downstream_count']} nodes |")
+        lines.append("")
+
+    # Aggregate blast radius vs. the configured threshold
+    total = results.get("total_blast_radius")
+    if total is not None:
+        threshold = results.get("threshold")
+        if results.get("exceeds_threshold"):
+            lines.append(
+                f"> :warning: **Total blast radius {total} exceeds the threshold "
+                f"of {threshold}.** Review the uncovered nodes below before merging.\n"
+            )
+        else:
+            lines.append(f"**Total blast radius:** {total}\n")
+
+    # Nodes impacted by the change but not themselves changed
+    uncovered = results.get("uncovered_nodes", [])
+    if uncovered:
+        lines.append(f"### Uncovered Nodes ({len(uncovered)})\n")
+        for node_id in uncovered[:20]:
+            lines.append(f"- `{node_id}`")
+        if len(uncovered) > 20:
+            lines.append(f"- ... and {len(uncovered) - 20} more")
+        lines.append("")
+
+    violations = results.get("contract_violations", [])
+    if violations:
+        lines.append("### Contract Violations\n")
+        for v in violations:
+            lines.append(f"- {v}")
         lines.append("")
 
     # Test suggestions
