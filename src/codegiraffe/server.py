@@ -2255,9 +2255,10 @@ def codegiraffe_status(project_path: str) -> str:
             return json.dumps({"initialized": False, "project_path": project_path}, indent=2)
 
         graph_data = _storage.load(project_path)
-        metadata = graph_data.metadata or {}
+        if graph_data is None:
+            return json.dumps({"initialized": False, "project_path": project_path}, indent=2)
 
-        last_scan_raw = metadata.get("scanned_at")
+        last_scan_raw = graph_data.last_scan
         if last_scan_raw:
             try:
                 last_scan_dt = datetime.fromisoformat(last_scan_raw)
@@ -2292,7 +2293,7 @@ def codegiraffe_status(project_path: str) -> str:
                 "staleness": staleness,
                 "storage_backend": type(_storage).__name__,
                 "active_agents": active_agents,
-                "schema_version": metadata.get("schema_version"),
+                "schema_version": graph_data.schema_version,
             },
             indent=2,
         )

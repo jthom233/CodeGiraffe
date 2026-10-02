@@ -218,3 +218,31 @@ codegiraffe_dashboard(project_path="/home/user/my-project", port=9000)
 ```
 
 ---
+
+---
+
+### `codegiraffe_status`
+
+Report whether a project has an architecture graph and how fresh it is. Reads directly from storage without loading the graph into memory, so it is cheap to call before deciding whether to run `codegiraffe_init` or `codegiraffe_sync`.
+
+| Parameter | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `project_path` | `str` | --- | yes | Root directory of the project |
+
+**Example:**
+```
+codegiraffe_status(project_path="/home/user/my-project")
+--> {
+      "initialized": true,
+      "project_path": "/home/user/my-project",
+      "node_count": 1240,
+      "edge_count": 3871,
+      "last_scan": "2026-10-02T19:41:07+00:00",
+      "staleness": "fresh",
+      "storage_backend": "JSONStorage",
+      "active_agents": [],
+      "schema_version": "1.0"
+    }
+```
+
+`staleness` is `fresh` (scanned within the last hour), `stale` (within a day), `very_stale` (older), or `unknown` when no scan timestamp is recorded. For an uninitialized project the result is `{"initialized": false, "project_path": ...}`.

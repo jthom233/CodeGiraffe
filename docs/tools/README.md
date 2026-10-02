@@ -2,7 +2,7 @@
 
 # MCP Tool Reference
 
-Code Giraffe exposes **40 tools** that any MCP client can call.
+Code Giraffe exposes **41 tools** that any MCP client can call.
 
 ## Tool Index
 
@@ -16,6 +16,7 @@ Code Giraffe exposes **40 tools** that any MCP client can call.
 | [`codegiraffe_export`](core.md#codegiraffe_export) | [Core](core.md) | Export the architecture graph as a visualization format |
 | [`codegiraffe_detect_drift`](core.md#codegiraffe_detect_drift) | [Core](core.md) | Check if the graph still matches the actual codebase |
 | [`codegiraffe_dashboard`](core.md#codegiraffe_dashboard) | [Core](core.md) | Launch the interactive web dashboard and open it in the browser |
+| [`codegiraffe_status`](core.md#codegiraffe_status) | [Core](core.md) | Report graph initialization status, size and scan freshness |
 | [`codegiraffe_context_for`](context-and-analysis.md#codegiraffe_context_for) | [Context & Analysis](context-and-analysis.md) | Return the minimal relevant subgraph for a natural-language task |
 | [`codegiraffe_hotspots`](context-and-analysis.md#codegiraffe_hotspots) | [Context & Analysis](context-and-analysis.md) | Identify the most coupled, change-prone areas of the architecture |
 | [`codegiraffe_patterns`](context-and-analysis.md#codegiraffe_patterns) | [Context & Analysis](context-and-analysis.md) | Extract naming conventions and detect structural anti-patterns |
@@ -51,7 +52,7 @@ Code Giraffe exposes **40 tools** that any MCP client can call.
 
 ## Categories
 
-- **[Core](core.md)** (8 tools) — Graph initialization, querying, manual annotation, sync, export, drift detection, dashboard
+- **[Core](core.md)** (9 tools) — Graph initialization, status, querying, manual annotation, sync, export, drift detection, dashboard
 - **[Context & Analysis](context-and-analysis.md)** (6 tools) — Intelligent context retrieval, hotspots, patterns, blast radius, risk, cycles
 - **[Contracts](contracts.md)** (3 tools) — Cross-system contract modeling and validation
 - **[Change Impact](change-impact.md)** (5 tools) — Change validation, test suggestions, file coupling, PR diffing, coverage

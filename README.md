@@ -54,11 +54,11 @@ claude mcp add codegiraffe -- /path/to/CodeGiraffe/.venv/Scripts/python.exe /pat
 
 See [Getting Started](docs/getting-started.md) for Claude Desktop setup, optional dependencies (embeddings, Neo4j, AST scanning), and a first-scan walkthrough.
 
-## MCP Tools (40)
+## MCP Tools (41)
 
 | Category | Tools | Description |
 |---|---|---|
-| [Core](docs/tools/core.md) | 8 | Graph init, query, manual annotation, sync, export, drift detection, dashboard |
+| [Core](docs/tools/core.md) | 9 | Graph init, status, query, manual annotation, sync, export, drift detection, dashboard |
 | [Context & Analysis](docs/tools/context-and-analysis.md) | 6 | Intelligent context retrieval, hotspots, patterns, blast radius, risk, cycles |
 | [Contracts](docs/tools/contracts.md) | 3 | Cross-system contract modeling and validation |
 | [Change Impact](docs/tools/change-impact.md) | 5 | Change validation, test suggestions, file coupling, PR diffing, coverage |
